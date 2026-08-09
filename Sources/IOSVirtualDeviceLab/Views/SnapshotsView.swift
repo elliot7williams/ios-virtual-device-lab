@@ -34,6 +34,12 @@ struct SnapshotsView: View {
                     TableColumn("Archive size") { snapshot in
                         Text(snapshot.sizeLabel)
                     }
+                    TableColumn("Integrity") { snapshot in
+                        StatusPill(
+                            text: (snapshot.integrityStatus ?? .unchecked).rawValue.capitalized,
+                            color: integrityColor(snapshot.integrityStatus ?? .unchecked)
+                        )
+                    }
                     TableColumn("Archive") { snapshot in
                         Text(snapshot.archiveURL.lastPathComponent)
                             .font(.caption.monospaced())
@@ -79,6 +85,12 @@ struct SnapshotsView: View {
             Spacer()
             Button("Reveal Archives") { model.reveal(model.paths.snapshotsRoot) }
             Button {
+                if let selected { Task { await model.verify(selected) } }
+            } label: {
+                Label("Verify", systemImage: "checkmark.shield")
+            }
+            .disabled(selected == nil)
+            Button {
                 if let selected { restoring = selected }
             } label: {
                 Label("Restore", systemImage: "arrow.uturn.backward")
@@ -93,5 +105,13 @@ struct SnapshotsView: View {
             .disabled(selected == nil)
         }
         .padding(18)
+    }
+
+    private func integrityColor(_ status: SnapshotIntegrityStatus) -> Color {
+        switch status {
+        case .verified: .green
+        case .changed, .missing: .red
+        case .unchecked: .secondary
+        }
     }
 }

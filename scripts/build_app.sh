@@ -18,9 +18,22 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$BIN_DIR/IOSVirtualDeviceLab" "$CONTENTS/MacOS/IOSVirtualDeviceLab"
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
+cp "$ROOT/Resources/compatibility-manifest.json" "$CONTENTS/Resources/compatibility-manifest.json"
+
+if [[ -n "${APP_VERSION:-}" ]]; then
+    plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$CONTENTS/Info.plist"
+fi
+if [[ -n "${BUILD_NUMBER:-}" ]]; then
+    plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$CONTENTS/Info.plist"
+fi
 
 echo "=== Signing app bundle ==="
-codesign --force --deep --sign - "$APP"
+SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    codesign --force --deep --sign - "$APP"
+else
+    codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 echo ""

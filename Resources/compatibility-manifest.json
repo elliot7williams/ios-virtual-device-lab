@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-08",
+  "entries": [
+    {
+      "id": "iphone17-3-ios18-6-2-22g100",
+      "iosVersion": "18.6.2",
+      "iosBuild": "22G100",
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.1",
+      "cloudOSBuild": "23B85",
+      "status": "supported",
+      "notes": "Listed in the upstream vphone-cli tested-environment matrix.",
+      "validatedHosts": ["Mac16,11 / macOS 27.0 beta 2"]
+    },
+    {
+      "id": "iphone17-3-ios26-0-23a341",
+      "iosVersion": "26.0",
+      "iosBuild": "23A341",
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.1",
+      "cloudOSBuild": "23B85",
+      "status": "supported",
+      "notes": "Listed in the upstream vphone-cli tested-environment matrix.",
+      "validatedHosts": ["Mac16,8 / macOS 26.5.1"]
+    },
+    {
+      "id": "iphone17-3-ios26-0-1-23a355",
+      "iosVersion": "26.0.1",
+      "iosBuild": "23A355",
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.1",
+      "cloudOSBuild": "23B85",
+      "status": "supported",
+      "notes": "Listed in the upstream vphone-cli tested-environment matrix.",
+      "validatedHosts": ["Mac16,8 / macOS 26.5.1"]
+    },
+    {
+      "id": "iphone17-3-ios26-1-23b85",
+      "iosVersion": "26.1",
+      "iosBuild": "23B85",
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.1",
+      "cloudOSBuild": "23B85",
+      "status": "supported",
+      "notes": "Listed in the upstream vphone-cli tested-environment matrix.",
+      "validatedHosts": ["Mac16,12 / macOS 26.3"]
+    },
+    {
+      "id": "iphone17-3-ios26-3",
+      "iosVersion": "26.3",
+      "iosBuild": null,
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.3",
+      "cloudOSBuild": null,
+      "status": "supported",
+      "notes": "The 23D127 and 23D8133 builds are listed in the upstream tested matrix.",
+      "validatedHosts": ["Mac16,12 / macOS 26.3"]
+    },
+    {
+      "id": "iphone17-3-ios26-4",
+      "iosVersion": "26.4",
+      "iosBuild": "23E246",
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.4",
+      "cloudOSBuild": "23E5207q",
+      "status": "supported",
+      "notes": "Listed in the upstream vphone-cli tested-environment matrix.",
+      "validatedHosts": ["Mac16,11 / macOS 26.2"]
+    },
+    {
+      "id": "iphone17-3-ios26-5",
+      "iosVersion": "26.5",
+      "iosBuild": null,
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.4",
+      "cloudOSBuild": "23E5207q",
+      "status": "supported",
+      "notes": "The 23F77 and 23F84 builds are listed in the upstream tested matrix.",
+      "validatedHosts": ["Mac16,11 / macOS 27.0 beta 2"]
+    },
+    {
+      "id": "iphone17-3-ios26-6-23g71",
+      "iosVersion": "26.6",
+      "iosBuild": "23G71",
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.4",
+      "cloudOSBuild": "23E5207q",
+      "status": "supported",
+      "notes": "Listed in the upstream vphone-cli tested-environment matrix.",
+      "validatedHosts": ["Mac16,6 / macOS 25.4.1"]
+    },
+    {
+      "id": "iphone17-3-ios27-beta",
+      "iosVersion": "27.0",
+      "iosBuild": null,
+      "device": "iPhone17,3",
+      "cloudOSVersion": "26.4",
+      "cloudOSBuild": "23E5207q",
+      "status": "experimental",
+      "notes": "Beta builds appear in the upstream tested matrix; treat them as experimental.",
+      "validatedHosts": ["Mac16,11 / macOS 27.0 beta 2", "Mac16,6 / macOS 25.4.1"]
+    },
+    {
+      "id": "ios17-research",
+      "iosVersion": "17",
+      "iosBuild": null,
+      "device": null,
+      "cloudOSVersion": null,
+      "cloudOSBuild": null,
+      "status": "unverified",
+      "notes": "No validated project pairing has been recorded.",
+      "validatedHosts": []
+    },
+    {
+      "id": "ios16-research",
+      "iosVersion": "16",
+      "iosBuild": null,
+      "device": null,
+      "cloudOSVersion": null,
+      "cloudOSBuild": null,
+      "status": "unverified",
+      "notes": "No validated project pairing has been recorded.",
+      "validatedHosts": []
+    },
+    {
+      "id": "ios15-research",
+      "iosVersion": "15",
+      "iosBuild": null,
+      "device": null,
+      "cloudOSVersion": null,
+      "cloudOSBuild": null,
+      "status": "researching",
+      "notes": "First older-iOS research target; not a support claim.",
+      "validatedHosts": []
+    },
+    {
+      "id": "ios14-research",
+      "iosVersion": "14",
+      "iosBuild": null,
+      "device": null,
+      "cloudOSVersion": null,
+      "cloudOSBuild": null,
+      "status": "researching",
+      "notes": "Queued after iOS 15 validation; not a support claim.",
+      "validatedHosts": []
+    },
+    {
+      "id": "ios13-research",
+      "iosVersion": "13",
+      "iosBuild": null,
+      "device": null,
+      "cloudOSVersion": null,
+      "cloudOSBuild": null,
+      "status": "researching",
+      "notes": "Queued after iOS 14 validation; not a support claim.",
+      "validatedHosts": []
+    },
+    {
+      "id": "ios12-research",
+      "iosVersion": "12",
+      "iosBuild": null,
+      "device": null,
+      "cloudOSVersion": null,
+      "cloudOSBuild": null,
+      "status": "researching",
+      "notes": "Final older-iOS research target; not a support claim.",
+      "validatedHosts": []
+    }
+  ]
+}

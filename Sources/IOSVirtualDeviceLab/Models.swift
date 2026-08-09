@@ -3,7 +3,11 @@ import Foundation
 enum LabSection: String, CaseIterable, Identifiable {
     case devices = "Virtual Devices"
     case firmware = "Firmware Library"
+    case compatibility = "Compatibility"
     case snapshots = "Snapshots"
+    case testRuns = "Test Runs"
+    case automation = "Automation"
+    case plugins = "Plugins"
     case activity = "Activity"
 
     var id: String { rawValue }
@@ -12,7 +16,11 @@ enum LabSection: String, CaseIterable, Identifiable {
         switch self {
         case .devices: "iphone.gen3"
         case .firmware: "shippingbox"
+        case .compatibility: "checkmark.seal"
         case .snapshots: "camera.filters"
+        case .testRuns: "checklist"
+        case .automation: "flowchart"
+        case .plugins: "puzzlepiece.extension"
         case .activity: "text.alignleft"
         }
     }
@@ -84,6 +92,7 @@ struct VirtualDevice: Identifiable, Hashable, Sendable {
     let bundleURL: URL
     let diskURL: URL
     var isRunning: Bool
+    var isPaused: Bool = false
 
     var id: String { name }
 
@@ -129,6 +138,9 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
     let build: String?
     let sizeBytes: Int64
     let importedAt: Date
+    var sha256: String? = nil
+    var validation: FirmwareValidation? = nil
+    var compatibilityStatus: CompatibilityStatus? = nil
 
     var url: URL { URL(fileURLWithPath: path) }
 
@@ -166,6 +178,86 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+enum FirmwareValidationState: String, Codable, Sendable {
+    case valid
+    case warning
+    case invalid
+}
+
+struct FirmwareValidation: Codable, Hashable, Sendable {
+    let state: FirmwareValidationState
+    let checkedAt: Date
+    let hasBuildManifest: Bool
+    let archiveEntryCount: Int
+    let issues: [String]
+}
+
+enum CompatibilityStatus: String, Codable, CaseIterable, Identifiable, Sendable {
+    case supported
+    case experimental
+    case researching
+    case incompatible
+    case unverified
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .supported: "Supported"
+        case .experimental: "Experimental"
+        case .researching: "Researching"
+        case .incompatible: "Incompatible"
+        case .unverified: "Unverified"
+        }
+    }
+}
+
+struct CompatibilityEntry: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    let iosVersion: String
+    let iosBuild: String?
+    let device: String?
+    let cloudOSVersion: String?
+    let cloudOSBuild: String?
+    let status: CompatibilityStatus
+    let notes: String
+    let validatedHosts: [String]
+
+    func matches(version: String?, build: String?, device candidateDevice: String?) -> Bool {
+        guard let version else { return false }
+        let versionMatches = version == iosVersion || version.hasPrefix(iosVersion + ".")
+        let buildMatches = iosBuild == nil || iosBuild == build
+        let deviceMatches = device == nil || device == candidateDevice
+        return versionMatches && buildMatches && deviceMatches
+    }
+}
+
+struct CompatibilityManifest: Codable, Hashable, Sendable {
+    let schemaVersion: Int
+    let updatedAt: String
+    let entries: [CompatibilityEntry]
+
+    static let empty = CompatibilityManifest(schemaVersion: 1, updatedAt: "unknown", entries: [])
+
+    func entry(for firmware: FirmwareImage) -> CompatibilityEntry? {
+        if firmware.kind == .cloudOS {
+            return entries.first { entry in
+                guard let candidate = entry.cloudOSVersion,
+                      let version = firmware.version else { return false }
+                let versionMatches = version == candidate || version.hasPrefix(candidate + ".")
+                let buildMatches = entry.cloudOSBuild == nil || entry.cloudOSBuild == firmware.build
+                return versionMatches && buildMatches
+            }
+        }
+        return entries.first { $0.matches(version: firmware.version, build: firmware.build, device: firmware.device) }
+            ?? entries.first { $0.matches(version: firmware.version, build: nil, device: firmware.device) }
+    }
+
+    func status(for firmware: FirmwareImage) -> CompatibilityStatus {
+        entry(for: firmware)?.status ?? .unverified
+    }
+}
+
 enum FirmwareFilenameParser {
     struct Result: Equatable, Sendable {
         let device: String?
@@ -197,12 +289,28 @@ struct SnapshotRecord: Identifiable, Codable, Hashable, Sendable {
     let createdAt: Date
     let archivePath: String
     var sizeBytes: Int64
+    var sha256: String? = nil
+    var lastVerifiedAt: Date? = nil
+    var integrityStatus: SnapshotIntegrityStatus? = nil
 
     var archiveURL: URL { URL(fileURLWithPath: archivePath) }
 
     var sizeLabel: String {
         ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
     }
+}
+
+enum SnapshotIntegrityStatus: String, Codable, Sendable {
+    case verified
+    case changed
+    case missing
+    case unchecked
+}
+
+struct SnapshotVerification: Sendable {
+    let snapshot: SnapshotRecord
+    let status: SnapshotIntegrityStatus
+    let message: String
 }
 
 enum ReadinessState: String, Sendable {
@@ -268,8 +376,185 @@ struct CommandResult: Sendable {
     let arguments: [String]
     let output: String
     let exitCode: Int32
+    var timedOut: Bool = false
+    var cancelled: Bool = false
+    var duration: TimeInterval = 0
 
     var succeeded: Bool { exitCode == 0 }
+}
+
+enum TestRunKind: String, Codable, Sendable {
+    case deployment
+    case baselineAcceptance
+}
+
+enum TestRunState: String, Codable, Sendable {
+    case queued
+    case running
+    case passed
+    case failed
+    case cancelled
+}
+
+struct DeviceTestResult: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let deviceName: String
+    var state: TestRunState
+    var message: String
+    var screenshotPath: String?
+    var diagnosticBundlePath: String?
+    var startedAt: Date
+    var completedAt: Date?
+
+    init(deviceName: String, state: TestRunState = .queued, message: String = "Queued") {
+        id = UUID()
+        self.deviceName = deviceName
+        self.state = state
+        self.message = message
+        startedAt = .now
+    }
+
+    init(
+        id: UUID,
+        deviceName: String,
+        state: TestRunState,
+        message: String,
+        screenshotPath: String?,
+        diagnosticBundlePath: String?,
+        startedAt: Date,
+        completedAt: Date?
+    ) {
+        self.id = id
+        self.deviceName = deviceName
+        self.state = state
+        self.message = message
+        self.screenshotPath = screenshotPath
+        self.diagnosticBundlePath = diagnosticBundlePath
+        self.startedAt = startedAt
+        self.completedAt = completedAt
+    }
+}
+
+struct TestRunRecord: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let kind: TestRunKind
+    let name: String
+    let packagePath: String?
+    let createdAt: Date
+    var completedAt: Date?
+    var state: TestRunState
+    var results: [DeviceTestResult]
+}
+
+enum AutomationAction: String, Codable, CaseIterable, Identifiable, Sendable {
+    case boot
+    case waitForGuest
+    case screenshot
+    case pressHome
+    case stop
+    case snapshot
+    case diagnostics
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .boot: "Boot"
+        case .waitForGuest: "Wait for Guest"
+        case .screenshot: "Capture Screenshot"
+        case .pressHome: "Press Home"
+        case .stop: "Stop"
+        case .snapshot: "Create Snapshot"
+        case .diagnostics: "Collect Diagnostics"
+        }
+    }
+}
+
+struct AutomationStep: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let action: AutomationAction
+    let value: String?
+
+    init(_ action: AutomationAction, value: String? = nil) {
+        id = UUID()
+        self.action = action
+        self.value = value
+    }
+}
+
+struct AutomationWorkflow: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    var name: String
+    var steps: [AutomationStep]
+    var isBuiltIn: Bool
+}
+
+struct PluginDescriptor: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let version: String
+    let executable: String
+    let capabilities: [String]
+    let arguments: [String]
+    let description: String?
+}
+
+struct DiagnosticBundle: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let deviceName: String
+    let url: URL
+    let createdAt: Date
+}
+
+struct ControlResponse: Sendable {
+    let succeeded: Bool
+    let path: String?
+    let error: String?
+    let imageData: Data?
+}
+
+struct StorageCheck: Sendable {
+    let availableBytes: Int64
+    let requiredBytes: Int64
+
+    var isSufficient: Bool { availableBytes >= requiredBytes }
+
+    var message: String {
+        let available = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
+        let required = ByteCountFormatter.string(fromByteCount: requiredBytes, countStyle: .file)
+        return "\(available) available; \(required) required"
+    }
+}
+
+struct BackendCapabilities: Sendable {
+    let pause: Bool
+    let screenshots: Bool
+    let automation: Bool
+    let guestLogs: Bool
+
+    static let vphone = BackendCapabilities(
+        pause: true,
+        screenshots: true,
+        automation: true,
+        guestLogs: false
+    )
+}
+
+final class OperationCancellationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requested = false
+
+    func cancel() {
+        lock.lock()
+        requested = true
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return requested
+    }
 }
 
 struct LabPaths: Sendable {

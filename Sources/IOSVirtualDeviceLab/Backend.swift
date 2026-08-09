@@ -1,4 +1,40 @@
 @preconcurrency import Foundation
+import CryptoKit
+import Darwin
+
+final class ProcessControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancellationRequested = false
+
+    func attach(_ process: Process) {
+        lock.lock()
+        self.process = process
+        let shouldCancel = cancellationRequested
+        lock.unlock()
+        if shouldCancel, process.isRunning { process.interrupt() }
+    }
+
+    func detach() {
+        lock.lock()
+        process = nil
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        cancellationRequested = true
+        let process = process
+        lock.unlock()
+        if let process, process.isRunning { process.interrupt() }
+    }
+
+    var isCancellationRequested: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancellationRequested
+    }
+}
 
 final class StreamAccumulator: @unchecked Sendable {
     private let lock = NSLock()
@@ -50,8 +86,11 @@ enum ProcessExecutor {
         currentDirectory: URL? = nil,
         environment additions: [String: String] = [:],
         standardInput: Data? = nil,
+        timeout: TimeInterval? = nil,
+        control: ProcessControl? = nil,
         onLine: @escaping @Sendable (String) -> Void = { _ in }
     ) -> CommandResult {
+        let startedAt = Date()
         let process = Process()
         let outputPipe = Pipe()
         let inputPipe = Pipe()
@@ -64,6 +103,8 @@ enum ProcessExecutor {
         process.standardError = outputPipe
         process.standardInput = inputPipe
         process.environment = ProcessInfo.processInfo.environment.merging(additions) { _, new in new }
+        control?.attach(process)
+        defer { control?.detach() }
 
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             accumulator.consume(handle.availableData)
@@ -75,7 +116,9 @@ enum ProcessExecutor {
                 inputPipe.fileHandleForWriting.write(standardInput)
             }
             try? inputPipe.fileHandleForWriting.close()
-            process.waitUntilExit()
+            if control?.isCancellationRequested == true, process.isRunning {
+                process.interrupt()
+            }
         } catch {
             try? inputPipe.fileHandleForWriting.close()
             outputPipe.fileHandleForReading.readabilityHandler = nil
@@ -84,9 +127,41 @@ enum ProcessExecutor {
                 executable: executable.path,
                 arguments: arguments,
                 output: accumulator.finish(),
-                exitCode: 127
+                exitCode: 127,
+                duration: Date().timeIntervalSince(startedAt)
             )
         }
+
+        var timedOut = false
+        if let timeout {
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < deadline && control?.isCancellationRequested != true {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning && control?.isCancellationRequested != true {
+                timedOut = true
+                process.interrupt()
+            }
+        } else {
+            while process.isRunning && control?.isCancellationRequested != true {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+
+        if process.isRunning && control?.isCancellationRequested == true {
+            process.interrupt()
+        }
+        if process.isRunning {
+            let graceDeadline = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < graceDeadline { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        if process.isRunning { process.terminate() }
+        if process.isRunning {
+            let terminateDeadline = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < terminateDeadline { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        process.waitUntilExit()
 
         outputPipe.fileHandleForReading.readabilityHandler = nil
         accumulator.consume(outputPipe.fileHandleForReading.readDataToEndOfFile())
@@ -97,7 +172,10 @@ enum ProcessExecutor {
             executable: executable.path,
             arguments: arguments,
             output: accumulator.finish(),
-            exitCode: status
+            exitCode: status,
+            timedOut: timedOut,
+            cancelled: control?.isCancellationRequested == true,
+            duration: Date().timeIntervalSince(startedAt)
         )
     }
 
@@ -107,23 +185,34 @@ enum ProcessExecutor {
         currentDirectory: URL? = nil,
         environment additions: [String: String] = [:],
         standardInput: Data? = nil,
+        timeout: TimeInterval? = nil,
+        control: ProcessControl? = nil,
         onLine: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> CommandResult {
-        await Task.detached(priority: .userInitiated) {
-            run(
-                executable: executable,
-                arguments: arguments,
-                currentDirectory: currentDirectory,
-                environment: additions,
-                standardInput: standardInput,
-                onLine: onLine
-            )
-        }.value
+        let control = control ?? ProcessControl()
+        return await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) {
+                run(
+                    executable: executable,
+                    arguments: arguments,
+                    currentDirectory: currentDirectory,
+                    environment: additions,
+                    standardInput: standardInput,
+                    timeout: timeout,
+                    control: control,
+                    onLine: onLine
+                )
+            }.value
+        } onCancel: {
+            control.cancel()
+        }
     }
 }
 
-actor VPhoneBackend {
+actor VPhoneBackend: LabBackend {
     let paths: LabPaths
+    nonisolated let capabilities = BackendCapabilities.vphone
+    private var activeControls: [UUID: ProcessControl] = [:]
 
     init(paths: LabPaths = .default) {
         self.paths = paths
@@ -270,6 +359,7 @@ actor VPhoneBackend {
         let udid = readFirstLine(bundleURL.appendingPathComponent("udid.txt"))
             ?? readFirstLine(bundleURL.appendingPathComponent("udid-prediction.txt"))
 
+        let pids = runningPIDs(for: diskURL)
         return VirtualDevice(
             name: bundleURL.lastPathComponent,
             cpuCount: cpu,
@@ -280,7 +370,8 @@ actor VPhoneBackend {
             udid: udid,
             bundleURL: bundleURL,
             diskURL: diskURL,
-            isRunning: isDiskOpen(diskURL)
+            isRunning: !pids.isEmpty,
+            isPaused: !pids.isEmpty && pids.allSatisfy(isProcessPaused)
         )
     }
 
@@ -289,13 +380,26 @@ actor VPhoneBackend {
         return value.components(separatedBy: .newlines).first?.trimmed.nilIfEmpty
     }
 
-    private func isDiskOpen(_ diskURL: URL) -> Bool {
-        guard FileManager.default.fileExists(atPath: diskURL.path) else { return false }
+    private func runningPIDs(for diskURL: URL) -> [Int32] {
+        guard FileManager.default.fileExists(atPath: diskURL.path) else { return [] }
         let result = ProcessExecutor.run(
             executable: URL(fileURLWithPath: "/usr/sbin/lsof"),
-            arguments: ["-t", "--", diskURL.path]
+            arguments: ["-t", "--", diskURL.path],
+            timeout: 5
         )
-        return result.succeeded && !result.output.trimmed.isEmpty
+        guard result.succeeded else { return [] }
+        return result.output
+            .components(separatedBy: .newlines)
+            .compactMap { Int32($0.trimmed) }
+    }
+
+    private func isProcessPaused(_ pid: Int32) -> Bool {
+        let result = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/bin/ps"),
+            arguments: ["-o", "state=", "-p", String(pid)],
+            timeout: 5
+        )
+        return result.succeeded && result.output.trimmed.hasPrefix("T")
     }
 
     // MARK: - Backend operations
@@ -303,6 +407,7 @@ actor VPhoneBackend {
     func runCLI(
         _ arguments: [String],
         currentDirectory: URL? = nil,
+        timeout: TimeInterval? = 3_600,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult {
         guard let binary = resolveBinary() else {
@@ -313,12 +418,45 @@ actor VPhoneBackend {
                 exitCode: 127
             )
         }
+        let operationID = UUID()
+        let control = ProcessControl()
+        activeControls[operationID] = control
+        defer { activeControls.removeValue(forKey: operationID) }
         return await ProcessExecutor.runAsync(
             executable: binary,
             arguments: arguments,
             currentDirectory: currentDirectory,
             environment: ["VPHONE_LIBRARY_ROOT": paths.libraryRoot.path],
+            timeout: timeout,
+            control: control,
             onLine: onLine
+        )
+    }
+
+    func cancelAllOperations() {
+        for control in activeControls.values { control.cancel() }
+    }
+
+    func storageCheck(requiredBytes: Int64) -> StorageCheck {
+        let keys: Set<URLResourceKey> = [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey,
+        ]
+        let values = try? paths.dataRoot.resourceValues(forKeys: keys)
+        let important = values?.volumeAvailableCapacityForImportantUsage ?? 0
+        let fallback = Int64(values?.volumeAvailableCapacity ?? 0)
+        return StorageCheck(
+            availableBytes: important > 0 ? important : fallback,
+            requiredBytes: requiredBytes
+        )
+    }
+
+    private func insufficientStorageResult(_ check: StorageCheck, arguments: [String]) -> CommandResult {
+        CommandResult(
+            executable: "vphone-cli",
+            arguments: arguments,
+            output: "Insufficient storage: \(check.message)",
+            exitCode: 75
         )
     }
 
@@ -346,13 +484,55 @@ actor VPhoneBackend {
                     "--install-ipa", installPackage.path,
                 ],
                 currentDirectory: device.bundleURL,
+                timeout: nil,
                 onLine: onLine
             )
         }
         return await runCLI(
             ["vm", "launch", device.name, "--library-root", paths.libraryRoot.path],
             currentDirectory: device.bundleURL,
+            timeout: nil,
             onLine: onLine
+        )
+    }
+
+    func pause(
+        _ device: VirtualDevice,
+        onLine: @escaping @Sendable (String) -> Void
+    ) -> CommandResult {
+        signalVM(device, signal: SIGSTOP, action: "pause", onLine: onLine)
+    }
+
+    func resume(
+        _ device: VirtualDevice,
+        onLine: @escaping @Sendable (String) -> Void
+    ) -> CommandResult {
+        signalVM(device, signal: SIGCONT, action: "resume", onLine: onLine)
+    }
+
+    private func signalVM(
+        _ device: VirtualDevice,
+        signal: Int32,
+        action: String,
+        onLine: @Sendable (String) -> Void
+    ) -> CommandResult {
+        let pids = runningPIDs(for: device.diskURL)
+        guard !pids.isEmpty else {
+            let message = "\(device.name) is not running"
+            onLine(message)
+            return CommandResult(executable: "/bin/kill", arguments: [], output: message, exitCode: 1)
+        }
+        var failures: [Int32] = []
+        for pid in pids where kill(pid, signal) != 0 { failures.append(pid) }
+        let message = failures.isEmpty
+            ? "\(action.capitalized)d \(device.name) (\(pids.count) process\(pids.count == 1 ? "" : "es"))"
+            : "Could not \(action) process IDs: \(failures.map(String.init).joined(separator: ", "))"
+        onLine(message)
+        return CommandResult(
+            executable: "/bin/kill",
+            arguments: ["-\(signal)"] + pids.map(String.init),
+            output: message,
+            exitCode: failures.isEmpty ? 0 : 1
         )
     }
 
@@ -409,6 +589,13 @@ actor VPhoneBackend {
         ]
         if let iphoneIPSW { arguments += ["--iphone-source", iphoneIPSW.path] }
         if let cloudOSIPSW { arguments += ["--cloudos-source", cloudOSIPSW.path] }
+        let sourceBytes = [iphoneIPSW, cloudOSIPSW]
+            .compactMap { $0 }
+            .compactMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }
+            .reduce(Int64(0)) { $0 + Int64($1) }
+        let minimumWorkspace = Int64(15) * 1_073_741_824
+        let check = storageCheck(requiredBytes: minimumWorkspace + sourceBytes)
+        guard check.isSufficient else { return insufficientStorageResult(check, arguments: arguments) }
         return await runCLI(arguments, onLine: onLine)
     }
 
@@ -488,6 +675,16 @@ actor VPhoneBackend {
         let stamp = formatter.string(from: .now)
         let base = "\(NameSanitizer.fileComponent(device.name))-\(NameSanitizer.fileComponent(snapshotName))-\(stamp)"
         let archive = paths.snapshotsRoot.appendingPathComponent(base).appendingPathExtension("tgz")
+        let diskValues = try? device.diskURL.resourceValues(forKeys: [.totalFileAllocatedSizeKey])
+        let allocatedDisk = Int64(diskValues?.totalFileAllocatedSize ?? 0)
+        let required = max(Int64(5) * 1_073_741_824, allocatedDisk)
+        let check = storageCheck(requiredBytes: required)
+        guard check.isSufficient else {
+            return (
+                insufficientStorageResult(check, arguments: ["vm", "export", device.name]),
+                nil
+            )
+        }
         let result = await runCLI(
             [
                 "vm", "export", device.name,
@@ -499,19 +696,19 @@ actor VPhoneBackend {
         guard result.succeeded else { return (result, nil) }
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: archive.path)
+        let digest = try? sha256(of: archive)
         let record = SnapshotRecord(
             id: UUID(),
             name: snapshotName,
             sourceVM: device.name,
             createdAt: .now,
             archivePath: archive.path,
-            sizeBytes: (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            sizeBytes: (attrs?[.size] as? NSNumber)?.int64Value ?? 0,
+            sha256: digest,
+            lastVerifiedAt: digest == nil ? nil : .now,
+            integrityStatus: digest == nil ? .unchecked : .verified
         )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let metadataURL = archive.deletingPathExtension().appendingPathExtension("json")
-        if let data = try? encoder.encode(record) { try? data.write(to: metadataURL, options: .atomic) }
+        try? saveSnapshotRecord(record)
         return (result, record)
     }
 
@@ -520,7 +717,16 @@ actor VPhoneBackend {
         as newName: String,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult {
-        await runCLI(
+        let verification = verifySnapshot(snapshot)
+        guard verification.status == .verified else {
+            return CommandResult(
+                executable: "vphone-cli",
+                arguments: ["vm", "import", "--in", snapshot.archivePath],
+                output: "Snapshot integrity check failed: \(verification.message)",
+                exitCode: 74
+            )
+        }
+        return await runCLI(
             [
                 "vm", "import",
                 "--in", snapshot.archivePath,
@@ -531,6 +737,57 @@ actor VPhoneBackend {
         )
     }
 
+    func verifySnapshot(_ snapshot: SnapshotRecord) -> SnapshotVerification {
+        var copy = snapshot
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: snapshot.archivePath) else {
+            copy.integrityStatus = .missing
+            copy.lastVerifiedAt = .now
+            try? saveSnapshotRecord(copy)
+            return SnapshotVerification(snapshot: copy, status: .missing, message: "Archive is missing")
+        }
+        do {
+            let digest = try sha256(of: snapshot.archiveURL)
+            let status: SnapshotIntegrityStatus = snapshot.sha256 == nil || snapshot.sha256 == digest
+                ? .verified : .changed
+            copy.sha256 = snapshot.sha256 ?? digest
+            copy.integrityStatus = status
+            copy.lastVerifiedAt = .now
+            try saveSnapshotRecord(copy)
+            let message = status == .verified
+                ? "SHA-256 verified"
+                : "Archive checksum does not match its snapshot metadata"
+            return SnapshotVerification(snapshot: copy, status: status, message: message)
+        } catch {
+            copy.integrityStatus = .changed
+            copy.lastVerifiedAt = .now
+            try? saveSnapshotRecord(copy)
+            return SnapshotVerification(
+                snapshot: copy,
+                status: .changed,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func saveSnapshotRecord(_ record: SnapshotRecord) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let metadataURL = record.archiveURL.deletingPathExtension().appendingPathExtension("json")
+        try encoder.encode(record).write(to: metadataURL, options: .atomic)
+    }
+
+    private func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let data = try handle.read(upToCount: 4 * 1_024 * 1_024), !data.isEmpty {
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     func deleteSnapshot(_ snapshot: SnapshotRecord) throws {
         let archive = snapshot.archiveURL
         let metadata = archive.deletingPathExtension().appendingPathExtension("json")
@@ -539,6 +796,156 @@ actor VPhoneBackend {
         }
         if FileManager.default.fileExists(atPath: metadata.path) {
             try FileManager.default.removeItem(at: metadata)
+        }
+    }
+
+    // MARK: - Host control and diagnostics
+
+    func captureScreenshot(_ device: VirtualDevice, destination: URL) -> ControlResponse {
+        try? FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        return sendControl(
+            to: device,
+            payload: ["t": "screenshot", "path": destination.path]
+        )
+    }
+
+    func sendHardwareKey(_ device: VirtualDevice, name: String) -> ControlResponse {
+        sendControl(to: device, payload: ["t": "key", "name": name, "screen": false])
+    }
+
+    private func sendControl(to device: VirtualDevice, payload: [String: Any]) -> ControlResponse {
+        let socket = device.bundleURL.appendingPathComponent("vphone.sock")
+        guard FileManager.default.fileExists(atPath: socket.path) else {
+            return ControlResponse(
+                succeeded: false,
+                path: nil,
+                error: "Host control socket is not available; boot the VM with its window visible",
+                imageData: nil
+            )
+        }
+        guard var request = try? JSONSerialization.data(withJSONObject: payload) else {
+            return ControlResponse(succeeded: false, path: nil, error: "Could not encode control request", imageData: nil)
+        }
+        request.append(0x0A)
+        let result = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/nc"),
+            arguments: ["-U", socket.path],
+            standardInput: request,
+            timeout: 20
+        )
+        let responseLine = result.output.components(separatedBy: .newlines)
+            .last { $0.trimmingCharacters(in: .whitespaces).hasPrefix("{") }
+        guard let responseLine,
+              let data = responseLine.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return ControlResponse(
+                succeeded: false,
+                path: nil,
+                error: result.timedOut ? "Control request timed out" : result.output.trimmed,
+                imageData: nil
+            )
+        }
+        let imageData = (json["image"] as? String).flatMap { Data(base64Encoded: $0) }
+        return ControlResponse(
+            succeeded: json["ok"] as? Bool == true,
+            path: json["path"] as? String,
+            error: json["error"] as? String,
+            imageData: imageData
+        )
+    }
+
+    func createDiagnosticBundle(
+        for device: VirtualDevice,
+        activityLog: String
+    ) throws -> DiagnosticBundle {
+        let stampFormatter = DateFormatter()
+        stampFormatter.locale = Locale(identifier: "en_US_POSIX")
+        stampFormatter.dateFormat = "yyyyMMdd-HHmmss"
+        let createdAt = Date()
+        let name = "\(NameSanitizer.fileComponent(device.name))-\(stampFormatter.string(from: createdAt))"
+        let root = paths.stateRoot
+            .appendingPathComponent("Diagnostics", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+        let fm = FileManager.default
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+        try activityLog.write(
+            to: root.appendingPathComponent("activity.log"),
+            atomically: true,
+            encoding: .utf8
+        )
+        for fileName in ["config.plist", "restore-info.json", "udid.txt", "udid-prediction.txt"] {
+            let source = device.bundleURL.appendingPathComponent(fileName)
+            if fm.fileExists(atPath: source.path) {
+                try? fm.copyItem(at: source, to: root.appendingPathComponent(fileName))
+            }
+        }
+
+        let system = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/sbin/system_profiler"),
+            arguments: ["SPSoftwareDataType", "SPHardwareDataType"],
+            timeout: 60
+        )
+        try system.output.write(
+            to: root.appendingPathComponent("host-system-profile.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let unified = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/log"),
+            arguments: [
+                "show", "--last", "15m", "--style", "compact",
+                "--predicate", "process == \"vphone-cli\" OR eventMessage CONTAINS[c] \"vphone\"",
+            ],
+            timeout: 60
+        )
+        try unified.output.write(
+            to: root.appendingPathComponent("host-unified.log"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        copyDiagnosticArtifacts(from: device.bundleURL, to: root.appendingPathComponent("guest-artifacts"))
+        if device.isRunning {
+            _ = captureScreenshot(device, destination: root.appendingPathComponent("screen.png"))
+        }
+        let limitations = """
+        This bundle includes the manager activity stream, host unified logs, VM metadata,
+        a screenshot when the host control socket was available, and log/crash artifacts
+        already present in the VM bundle. Direct guest syslog/crash export requires a
+        guest-agent capability that the current vphone host socket does not expose.
+        """
+        try limitations.write(
+            to: root.appendingPathComponent("LIMITATIONS.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        return DiagnosticBundle(id: UUID(), deviceName: device.name, url: root, createdAt: createdAt)
+    }
+
+    private func copyDiagnosticArtifacts(from sourceRoot: URL, to destinationRoot: URL) {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: sourceRoot,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let allowed = Set(["log", "crash", "ips"])
+        for case let source as URL in enumerator {
+            guard allowed.contains(source.pathExtension.lowercased()),
+                  let values = try? source.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                  values.isRegularFile == true,
+                  (values.fileSize ?? 0) <= 50 * 1_048_576
+            else { continue }
+            let relative = source.path.replacingOccurrences(of: sourceRoot.path + "/", with: "")
+            let destination = destinationRoot.appendingPathComponent(relative)
+            try? fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.copyItem(at: source, to: destination)
         }
     }
 
@@ -572,10 +979,75 @@ actor VPhoneBackend {
 
     func importFirmware(_ urls: [URL], kind: FirmwareKind) throws -> [FirmwareImage] {
         var records = loadFirmware()
-        let known = Set(records.map(\.path))
+        var known = Set(records.map(\.path))
         for url in urls where !known.contains(url.path) {
             records.append(FirmwareImage.inspect(url, kind: kind))
+            known.insert(url.path)
         }
+        try saveFirmwareCatalog(records)
+        return loadFirmware()
+    }
+
+    func validateFirmware(
+        _ firmware: FirmwareImage,
+        compatibility: CompatibilityManifest
+    ) throws -> [FirmwareImage] {
+        var records = loadFirmware()
+        guard let index = records.firstIndex(where: { $0.path == firmware.path }) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        let fm = FileManager.default
+        var issues: [String] = []
+        var hasBuildManifest = false
+        var entryCount = 0
+        var digest: String?
+        let url = firmware.url
+
+        guard fm.fileExists(atPath: url.path) else { throw CocoaError(.fileNoSuchFile) }
+        if url.pathExtension.lowercased() != "ipsw" {
+            issues.append("File extension is not .ipsw")
+        }
+        if firmware.sizeBytes < 50 * 1_048_576 {
+            issues.append("File is unexpectedly small for an IPSW")
+        }
+
+        let listing = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/unzip"),
+            arguments: ["-Z1", url.path],
+            timeout: 120
+        )
+        if listing.succeeded {
+            let entries = listing.output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+            entryCount = entries.count
+            hasBuildManifest = entries.contains { $0 == "BuildManifest.plist" || $0.hasSuffix("/BuildManifest.plist") }
+            if !hasBuildManifest { issues.append("Archive does not contain BuildManifest.plist") }
+        } else {
+            issues.append("Archive could not be read as a ZIP/IPSW")
+        }
+
+        digest = try sha256(of: url)
+        let compatibilityStatus = compatibility.status(for: firmware)
+        if compatibilityStatus == .unverified {
+            issues.append("No matching entry exists in the compatibility manifest")
+        } else if compatibilityStatus == .incompatible {
+            issues.append("This firmware is marked incompatible")
+        }
+
+        let structurallyInvalid = !listing.succeeded || !hasBuildManifest || url.pathExtension.lowercased() != "ipsw"
+        let state: FirmwareValidationState = structurallyInvalid
+            ? .invalid
+            : (issues.isEmpty ? .valid : .warning)
+
+        records[index].sha256 = digest
+        records[index].compatibilityStatus = compatibilityStatus
+        records[index].validation = FirmwareValidation(
+            state: state,
+            checkedAt: .now,
+            hasBuildManifest: hasBuildManifest,
+            archiveEntryCount: entryCount,
+            issues: issues
+        )
         try saveFirmwareCatalog(records)
         return loadFirmware()
     }

@@ -48,9 +48,9 @@ private struct DeviceRow: View {
         HStack(spacing: 11) {
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(device.isRunning ? Color.green.opacity(0.15) : Color.secondary.opacity(0.12))
+                    .fill(device.isPaused ? Color.orange.opacity(0.15) : (device.isRunning ? Color.green.opacity(0.15) : Color.secondary.opacity(0.12)))
                 Image(systemName: "iphone.gen3")
-                    .foregroundStyle(device.isRunning ? .green : .secondary)
+                    .foregroundStyle(device.isPaused ? .orange : (device.isRunning ? .green : .secondary))
             }
             .frame(width: 38, height: 48)
 
@@ -159,8 +159,8 @@ private struct DeviceDetailView: View {
                 HStack(spacing: 10) {
                     Text(device.name).font(.largeTitle.weight(.semibold))
                     StatusPill(
-                        text: device.isRunning ? "Running" : "Stopped",
-                        color: device.isRunning ? .green : .secondary
+                        text: device.isPaused ? "Paused" : (device.isRunning ? "Running" : "Stopped"),
+                        color: device.isPaused ? .orange : (device.isRunning ? .green : .secondary)
                     )
                 }
                 Text("\(device.iosLabel) • build \(device.buildLabel) • \(device.variantLabel)")
@@ -192,6 +192,16 @@ private struct DeviceDetailView: View {
                 Label("Stop", systemImage: "stop.fill")
             }
             .disabled(!device.isRunning || model.isBusy("stop:\(device.id)"))
+
+            Button {
+                Task {
+                    if device.isPaused { await model.resume(device) }
+                    else { await model.pause(device) }
+                }
+            } label: {
+                Label(device.isPaused ? "Resume" : "Pause", systemImage: device.isPaused ? "play.circle" : "pause.fill")
+            }
+            .disabled(!device.isRunning || !model.backendCapabilities.pause)
 
             Button { showingSnapshot = true } label: {
                 Label("Snapshot", systemImage: "camera.filters")
@@ -243,6 +253,15 @@ private struct DeviceDetailView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("Screenshot") {
+                    Task { await model.captureScreenshot(of: device) }
+                }
+                .disabled(!device.isRunning || !model.backendCapabilities.screenshots)
+                Button("Collect Diagnostics") {
+                    Task {
+                        if let bundle = await model.collectDiagnostics(for: device) { model.reveal(bundle.url) }
+                    }
+                }
                 Button("Choose App…") { showingPackageImporter = true }
                     .disabled(device.isRunning)
             }

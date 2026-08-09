@@ -88,6 +88,9 @@ private struct FirmwareRow: View {
                     Text(image.versionLabel)
                     if let device = image.device { Text(device) }
                     Text(image.sizeLabel)
+                    if let status = image.compatibilityStatus {
+                        StatusPill(text: status.displayName, color: compatibilityColor(status))
+                    }
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -95,6 +98,14 @@ private struct FirmwareRow: View {
                     .font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
+                if let validation = image.validation {
+                    Text(validation.issues.isEmpty
+                        ? "Validated • SHA-256 \(image.sha256?.prefix(12) ?? "unknown")…"
+                        : validation.issues.joined(separator: " • "))
+                        .font(.caption2)
+                        .foregroundStyle(validation.state == .invalid ? .red : .secondary)
+                        .lineLimit(2)
+                }
             }
             Spacer()
             Picker(
@@ -108,6 +119,13 @@ private struct FirmwareRow: View {
             }
             .labelsHidden()
             .frame(width: 115)
+            Button {
+                Task { await model.validateFirmware(image) }
+            } label: {
+                Image(systemName: image.validation == nil ? "checkmark.shield" : "arrow.clockwise")
+            }
+            .help(image.validation == nil ? "Validate structure, checksum, and compatibility" : "Validate again")
+            .disabled(model.isBusy("firmware-validate:\(image.id.uuidString)"))
             Button { model.reveal(image.url) } label: {
                 Image(systemName: "folder")
             }
@@ -122,5 +140,15 @@ private struct FirmwareRow: View {
             }
         }
         .padding(.vertical, 6)
+    }
+
+    private func compatibilityColor(_ status: CompatibilityStatus) -> Color {
+        switch status {
+        case .supported: .green
+        case .experimental: .orange
+        case .researching: .blue
+        case .incompatible: .red
+        case .unverified: .secondary
+        }
     }
 }

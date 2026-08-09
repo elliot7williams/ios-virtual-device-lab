@@ -44,13 +44,15 @@ struct CreateVMView: View {
                     Picker("iPhone IPSW", selection: $iphonePath) {
                         Text("Automatic supported firmware").tag(String?.none)
                         ForEach(iphoneImages) { image in
-                            Text("\(image.versionLabel) — \(image.fileName)").tag(Optional(image.path))
+                            Text("\(image.versionLabel) — \(image.compatibilityStatus?.displayName ?? "Unverified") — \(image.fileName)")
+                                .tag(Optional(image.path))
                         }
                     }
                     Picker("cloudOS IPSW", selection: $cloudOSPath) {
                         Text("Automatic recommended pairing").tag(String?.none)
                         ForEach(cloudImages) { image in
-                            Text("\(image.versionLabel) — \(image.fileName)").tag(Optional(image.path))
+                            Text("\(image.versionLabel) — \(image.compatibilityStatus?.displayName ?? "Unverified") — \(image.fileName)")
+                                .tag(Optional(image.path))
                         }
                     }
                     if model.firmware.isEmpty {
