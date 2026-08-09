@@ -1,0 +1,42 @@
+# Roadmap
+
+## Delivered in the MVP
+
+| Plan stage | Current implementation |
+|---|---|
+| Backend baseline | `vphone-cli` adapter, host preflight, external storage, direct bundle discovery |
+| SwiftUI shell | Native device library, detail view, lifecycle controls, status and settings |
+| Firmware management | In-place IPSW catalog, metadata parsing, guided VM creation inputs |
+| Snapshots | Named exports, restore-as-new-device, archive management, VM cloning |
+| Developer workflow | Launch-and-install IPA/TIPA path, repeatable per-VM actions |
+| Diagnostics | Persistent streaming activity console and actionable host preflight |
+
+## Next engineering milestones
+
+1. Complete a real supported VM creation/boot after the required host restart.
+2. Add backend progress events so creation stages have structured progress rather than log-only progress.
+3. Add a multi-select matrix to launch and install one app across several compatible VMs.
+4. Integrate screenshots and automation through the backend control socket.
+5. Add scheduled snapshot retention and archive integrity verification.
+6. Define a formal Swift backend protocol and introduce a mock backend for UI previews.
+
+## Older-iOS compatibility research
+
+Older releases are not represented as supported until they boot and complete a documented validation matrix. Research proceeds one release at a time:
+
+1. iOS 15
+2. iOS 14
+3. iOS 13
+4. iOS 12
+
+For each release, record:
+
+- compatible IPSW/device model and signing inputs;
+- boot-chain and firmware-container differences;
+- device-tree and virtual hardware expectations;
+- kernel and driver compatibility gaps;
+- restore, guest-agent, networking, graphics, and input behavior;
+- app deployment and developer API limitations;
+- reproducible failure logs and required patches.
+
+An IPSW appearing in the firmware catalog is not a support claim. The UI should eventually distinguish `supported`, `experimental`, `researching`, and `incompatible` pairings based on a versioned compatibility manifest.
