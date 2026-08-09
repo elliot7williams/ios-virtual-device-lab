@@ -68,6 +68,11 @@ struct ActivityView: View {
             }
             .labelsHidden()
             .frame(width: 125)
+            if model.isBusy {
+                Button("Cancel", role: .destructive) {
+                    Task { await model.cancelOperations() }
+                }
+            }
             Menu {
                 Button("Copy Visible Logs", action: copyVisible)
                 Button("Export All Logs…", action: export)

@@ -17,6 +17,11 @@ A native macOS SwiftUI manager for virtual iOS research and developer testing. T
 - Named compressed snapshots and restores using `vphone-cli vm export/import`.
 - Persistent, filterable streaming command logs with copy/export support.
 - External storage support through the existing `~/.vphone` layout.
+- Versioned firmware compatibility evidence, IPSW structure checks, and SHA-256 fingerprints.
+- Multi-device deployment runs with screenshots and persistent per-VM results.
+- Full baseline acceptance runner covering clone, boot, guest control, stop, snapshot, verify, restore, and cleanup.
+- Pause/resume, cancellable operations, timeouts, disk-space guards, and snapshot integrity checks.
+- Built-in automation workflows, explicit executable plugins, and diagnostic bundles.
 
 ## Requirements
 
@@ -56,6 +61,14 @@ To regenerate the macOS `.icns` bundle from the checked-in 1024 px master:
 ./scripts/build_icon.sh
 ```
 
+To create a versioned ZIP and checksum:
+
+```sh
+./scripts/release_app.sh 0.2.0
+```
+
+Developer ID signing and notarization are supported through `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE`; see [Release engineering](docs/RELEASES.md).
+
 ## Storage
 
 The default layout follows the backend:
@@ -79,3 +92,5 @@ To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/
 - The manager never weakens SIP/AMFI itself.
 
 See [Architecture](docs/ARCHITECTURE.md) and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
+
+Also read [Compatibility](docs/COMPATIBILITY.md), [Limitations](docs/LIMITATIONS.md), and [Plugin development](docs/PLUGINS.md). An entry marked `researching` or `unverified` is never a support claim.

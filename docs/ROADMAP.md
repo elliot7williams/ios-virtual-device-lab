@@ -10,15 +10,19 @@
 | Snapshots | Named exports, restore-as-new-device, archive management, VM cloning |
 | Developer workflow | Launch-and-install IPA/TIPA path, repeatable per-VM actions |
 | Diagnostics | Persistent streaming activity console and actionable host preflight |
+| Safety and integrity | Cancellation, timeouts, storage guards, firmware SHA-256, snapshot verification |
+| Multi-version testing | Persistent multi-VM deployment runs, screenshots, and full baseline acceptance runner |
+| Automation and extensions | Built-in workflows plus explicit executable plugin registry |
+| Release engineering | CI, packaged artifacts, tagged releases, optional Developer ID/notarization tooling |
 
 ## Next engineering milestones
 
-1. Complete a real supported VM creation/boot after the required host restart.
+1. Complete and publish the first real baseline acceptance result after the required host restart.
 2. Add backend progress events so creation stages have structured progress rather than log-only progress.
-3. Add a multi-select matrix to launch and install one app across several compatible VMs.
-4. Integrate screenshots and automation through the backend control socket.
-5. Add scheduled snapshot retention and archive integrity verification.
-6. Define a formal Swift backend protocol and introduce a mock backend for UI previews.
+3. Expose guest syslog/crash export through an upstream host-control capability or a trusted plugin.
+4. Add scheduled snapshot retention policies; checksum verification is now implemented.
+5. Populate Apple Developer credentials and publish a Developer ID signed, notarized release.
+6. Expand integration and UI automation coverage using `MockLabBackend`.
 
 ## Older-iOS compatibility research
 

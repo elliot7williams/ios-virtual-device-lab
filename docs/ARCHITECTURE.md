@@ -9,7 +9,9 @@ SwiftUI views
     │
 LabAppModel (main-actor state and workflows)
     │
-VPhoneBackend actor
+LabBackend protocol
+    ├── VPhoneBackend actor
+    └── MockLabBackend actor
     ├── process adapter → vphone-cli
     ├── read-only VM bundle scanner
     ├── firmware catalog
@@ -31,6 +33,8 @@ VPhoneBackend actor
 
 `VPhoneBackend` resolves an installed or local `vphone-cli`, passes an explicit VM library root, and maps high-level actions to stable CLI operations. Long-running commands execute away from the main actor and stream output back to the UI.
 
+`LabBackend` is the formal dependency boundary. The application model accepts any conforming backend, while `MockLabBackend` supports deterministic workflow and UI tests without entitled virtualization.
+
 ### Read-only scanner
 
 VM discovery reads the backend-compatible `config.plist` and `restore-info.json` formats directly. This lets the library remain visible when the entitled backend binary is blocked by host policy.
@@ -45,7 +49,17 @@ Snapshots use backend exports as `.tgz` archives plus small JSON metadata sideca
 
 ### Diagnostics
 
-The preflight checks OS version, architecture, hardware model, nested virtualization, SIP, research guests, backend location, and a real `vphone-cli --help` launch. Activity records backend output and operation results locally.
+The preflight checks OS version, architecture, hardware model, nested virtualization, SIP, research guests, backend location, and a real `vphone-cli --help` launch. Activity records backend output and operation results locally. Diagnostic bundles combine that activity, host unified logs, VM metadata, available guest log/crash artifacts, and a control-socket screenshot.
+
+### Compatibility and testing
+
+The checked-in JSON compatibility manifest separates supported evidence from experimental, researching, incompatible, and unverified pairings. Firmware validation checks the IPSW ZIP structure, requires `BuildManifest.plist`, records SHA-256, and associates the image with manifest evidence.
+
+Test runs persist one result per selected VM. The baseline acceptance runner operates only on temporary clones and cleans up the restored VM, snapshot, and clone after exercising the complete lifecycle.
+
+### Automation and plugins
+
+Automation is a typed sequence of backend/control-socket actions. Plugins are user-installed executable descriptors with explicit capabilities. They never auto-run and receive device context through narrowly named environment variables.
 
 ## Replaceable backend
 

@@ -91,8 +91,16 @@ struct LabRootView: View {
             DevicesView(showCreateVM: $showingCreateVM)
         case .firmware:
             FirmwareLibraryView()
+        case .compatibility:
+            CompatibilityView()
         case .snapshots:
             SnapshotsView()
+        case .testRuns:
+            TestRunsView()
+        case .automation:
+            AutomationView()
+        case .plugins:
+            PluginsView()
         case .activity:
             ActivityView()
         }

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-package:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Build signed app bundle
+        run: ./scripts/build_app.sh
+
+      - name: Verify bundle
+        run: |
+          set -euo pipefail
+          app='.build/iOS Virtual Device Lab.app'
+          codesign --verify --deep --strict --verbose=2 "$app"
+          test -f "$app/Contents/Resources/AppIcon.icns"
+          test -f "$app/Contents/Resources/compatibility-manifest.json"
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-virtual-device-lab-${{ github.sha }}
+          path: .build/iOS Virtual Device Lab.app
