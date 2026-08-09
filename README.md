@@ -4,7 +4,7 @@
   <img src="Assets/AppIcon-1024.png" width="180" alt="iOS Virtual Device Lab icon">
 </p>
 
-A native macOS SwiftUI manager for virtual iOS research and developer testing. The MVP uses [`vphone-cli`](https://github.com/Lakr233/vphone-cli) as a replaceable process-level backend and leaves its upstream checkout unmodified.
+A native macOS SwiftUI laboratory for virtual iOS research and cross-version app testing. It uses [`vphone-cli`](https://github.com/Lakr233/vphone-cli) as the first replaceable backend behind a typed engine API.
 
 ## Implemented MVP
 
@@ -22,6 +22,11 @@ A native macOS SwiftUI manager for virtual iOS research and developer testing. T
 - Full baseline acceptance runner covering clone, boot, guest control, stop, snapshot, verify, restore, and cleanup.
 - Pause/resume, cancellable operations, timeouts, disk-space guards, and snapshot integrity checks.
 - Built-in automation workflows, explicit executable plugins, and diagnostic bundles.
+- Versioned iPhone hardware profiles with SoC, RAM, storage, display, GPU, network modes, and supported-iOS ranges.
+- Automatic IPSW/device identification, compatibility recommendations, cloudOS pairing, and creation-time enforcement.
+- Configurable test assertions, reusable IPA/TIPA artifacts, Markdown/JSON reports, and an ordered workflow editor.
+- Networking, audio-test, isolation, performance-monitoring, guest crash/log export, and snapshot-retention controls.
+- Xcode Run Script deployment helper plus trusted, checksum-pinned plugin permissions.
 
 ## Requirements
 
@@ -64,7 +69,7 @@ To regenerate the macOS `.icns` bundle from the checked-in 1024 px master:
 To create a versioned ZIP and checksum:
 
 ```sh
-./scripts/release_app.sh 0.2.0
+./scripts/release_app.sh 0.3.0
 ```
 
 Developer ID signing and notarization are supported through `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE`; see [Release engineering](docs/RELEASES.md).
@@ -78,7 +83,7 @@ The default layout follows the backend:
 ├── VMs/                  virtual-device bundles
 ├── ipsws/                downloaded/imported firmware cache
 ├── Snapshots/            compressed named restore points
-└── VirtualDeviceLab/     firmware index and activity history
+└── VirtualDeviceLab/     profiles, app builds, test reports, diagnostics, plugins, and activity
 ```
 
 To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/.vphone` may be symlinked to a directory on an external APFS volume before creating devices.
@@ -91,6 +96,6 @@ To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/
 - VM creation uses the backend’s native authentication dialog rather than storing a sudo password.
 - The manager never weakens SIP/AMFI itself.
 
-See [Architecture](docs/ARCHITECTURE.md) and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
+See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
 
 Also read [Compatibility](docs/COMPATIBILITY.md), [Limitations](docs/LIMITATIONS.md), and [Plugin development](docs/PLUGINS.md). An entry marked `researching` or `unverified` is never a support claim.

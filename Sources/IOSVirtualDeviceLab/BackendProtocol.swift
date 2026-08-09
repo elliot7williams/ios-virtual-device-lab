@@ -1,6 +1,7 @@
 import Foundation
 
 protocol LabBackend: Sendable {
+    var descriptor: BackendDescriptor { get async }
     var capabilities: BackendCapabilities { get async }
 
     func prepareStorage() async throws
@@ -10,11 +11,8 @@ protocol LabBackend: Sendable {
     func loadFirmware() async -> [FirmwareImage]
 
     func createVM(
-        name: String,
-        variant: FirmwareVariant,
-        diskSizeGB: Int,
-        iphoneIPSW: URL?,
-        cloudOSIPSW: URL?,
+        request: VMCreationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult
     func launch(
@@ -44,10 +42,8 @@ protocol LabBackend: Sendable {
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult
     func updateConfiguration(
-        _ device: VirtualDevice,
-        cpu: Int,
-        memoryMB: Int,
-        network: String,
+        request: VMConfigurationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult
 
@@ -79,10 +75,17 @@ protocol LabBackend: Sendable {
         for device: VirtualDevice,
         activityLog: String
     ) async throws -> DiagnosticBundle
+    func performanceSample(for device: VirtualDevice) async -> PerformanceSample
+    func exportGuestDiagnostics(
+        for device: VirtualDevice,
+        categories: [DiagnosticCategory],
+        destination: URL
+    ) async -> DiagnosticExportResult
     func cancelAllOperations() async
 }
 
 actor MockLabBackend: LabBackend {
+    let descriptor = BackendDescriptor(id: "mock", name: "Mock Lab Backend", version: "1", engine: "In-memory")
     let capabilities = BackendCapabilities.vphone
     private var devices: [VirtualDevice]
     private var firmware: [FirmwareImage]
@@ -124,14 +127,18 @@ actor MockLabBackend: LabBackend {
     }
 
     func createVM(
-        name: String,
-        variant: FirmwareVariant,
-        diskSizeGB: Int,
-        iphoneIPSW: URL?,
-        cloudOSIPSW: URL?,
+        request: VMCreationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) -> CommandResult {
-        success(["vm", "create", name], line: "created \(name)", onLine: onLine)
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .create,
+            phase: .completed,
+            fractionCompleted: 1,
+            message: "Mock VM created"
+        ))
+        return success(["vm", "create", request.name], line: "created \(request.name)", onLine: onLine)
     }
 
     func launch(
@@ -167,13 +174,22 @@ actor MockLabBackend: LabBackend {
     }
 
     func updateConfiguration(
-        _ device: VirtualDevice,
-        cpu: Int,
-        memoryMB: Int,
-        network: String,
+        request: VMConfigurationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) -> CommandResult {
-        success(["vm", "config", device.name], line: "configured \(device.name)", onLine: onLine)
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .configure,
+            phase: .completed,
+            fractionCompleted: 1,
+            message: "Mock configuration applied"
+        ))
+        return success(
+            ["vm", "config", request.device.name],
+            line: "configured \(request.device.name)",
+            onLine: onLine
+        )
     }
 
     func createSnapshot(
@@ -266,6 +282,31 @@ actor MockLabBackend: LabBackend {
 
     func createDiagnosticBundle(for device: VirtualDevice, activityLog: String) -> DiagnosticBundle {
         DiagnosticBundle(id: UUID(), deviceName: device.name, url: URL(fileURLWithPath: "/mock/diagnostics"), createdAt: .now)
+    }
+
+    func performanceSample(for device: VirtualDevice) -> PerformanceSample {
+        PerformanceSample(
+            deviceName: device.name,
+            cpuPercent: device.isRunning ? 12 : 0,
+            residentMemoryBytes: device.isRunning ? 512 * 1_048_576 : 0,
+            gpuPercent: nil,
+            framesPerSecond: nil,
+            audioSampleRateHz: device.audioConfiguration?.sampleRateHz,
+            source: "Mock backend"
+        )
+    }
+
+    func exportGuestDiagnostics(
+        for device: VirtualDevice,
+        categories: [DiagnosticCategory],
+        destination: URL
+    ) -> DiagnosticExportResult {
+        DiagnosticExportResult(
+            supported: false,
+            categories: categories,
+            outputURL: nil,
+            message: "Mock guest diagnostics are not configured"
+        )
     }
 
     func cancelAllOperations() {}

@@ -16,8 +16,16 @@ App Store, iCloud, activation, DRM-protected media, push notification registrati
 
 ## Diagnostics
 
-The current upstream host socket exposes screenshots and input automation, but not direct guest syslog/crash export. Diagnostic bundles include manager/backend output, host logs, metadata, screenshots, and guest artifacts already present in the bundle. A plugin or upstream capability is required for broader guest-log collection.
+The lab's [companion vphone patch](https://github.com/elliot7williams/vphone-cli/pull/1) adds bounded guest file listing/download to the host-control socket and can collect existing log/crash files from known roots. It does not provide an unrestricted guest shell or a live unified-log stream. An older installed `vphone-cli` will reject these commands; install the companion build or use a trusted diagnostics plugin.
+
+Guest files that were never persisted, are protected from vphoned, or disappeared during a crash cannot be recovered by the manager.
 
 ## Pause behavior
 
 Pause uses `SIGSTOP`/`SIGCONT` on the VM processes holding the virtual disk. It freezes the process rather than creating a durable suspend image. Stop the VM before snapshots or host shutdown.
+
+The backend resumes a paused VM before asking it to stop so the graceful-stop signal can be processed.
+
+## Audio, network, and performance
+
+Network proxy injection, packet capture, virtual audio input/output fidelity, accessory simulation, GPU utilization, guest FPS, and guest disk-throughput counters depend on engine support. The UI stores these policies and reports unavailable measurements explicitly; it does not claim unsupported simulation.

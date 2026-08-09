@@ -106,6 +106,14 @@ private struct FirmwareRow: View {
                         .foregroundStyle(validation.state == .invalid ? .red : .secondary)
                         .lineLimit(2)
                 }
+                if image.kind == .iPhone {
+                    let recommendation = model.firmwareRecommendation(for: image)
+                    if let profile = recommendation.hardwareProfile {
+                        Text("Recommended: \(profile.name)\(recommendation.cloudOSFirmware.map { " • cloudOS \($0.versionLabel)" } ?? "")")
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                    }
+                }
             }
             Spacer()
             Picker(

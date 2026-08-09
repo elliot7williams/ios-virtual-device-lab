@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "updatedAt": "2026-08-08",
   "entries": [
     {
@@ -11,7 +11,12 @@
       "cloudOSBuild": "23B85",
       "status": "supported",
       "notes": "Listed in the upstream vphone-cli tested-environment matrix.",
-      "validatedHosts": ["Mac16,11 / macOS 27.0 beta 2"]
+      "validatedHosts": ["Mac16,11 / macOS 27.0 beta 2"],
+      "hardwareProfileIDs": ["iphone-16-pro-a18"],
+      "bootStatus": "Boot evidence recorded upstream",
+      "knownIssues": ["GPU, audio, Apple services, and hardware peripherals remain backend-dependent"],
+      "requiredPatches": ["vphone regular/dev boot-chain patch set"],
+      "appDeploymentSupport": "Supported through the vphoned guest channel"
     },
     {
       "id": "iphone17-3-ios26-0-23a341",
@@ -132,7 +137,12 @@
       "cloudOSBuild": null,
       "status": "researching",
       "notes": "First older-iOS research target; not a support claim.",
-      "validatedHosts": []
+      "validatedHosts": [],
+      "hardwareProfileIDs": ["iphone-x-a11", "iphone-13-a15"],
+      "bootStatus": "Not yet boot-tested by this project",
+      "knownIssues": ["GPU acceleration, device tree, restore flow, and guest agent are unverified"],
+      "requiredPatches": ["To be determined from the first reproducible boot failure"],
+      "appDeploymentSupport": "Unverified"
     },
     {
       "id": "ios14-research",
@@ -143,7 +153,12 @@
       "cloudOSBuild": null,
       "status": "researching",
       "notes": "Queued after iOS 15 validation; not a support claim.",
-      "validatedHosts": []
+      "validatedHosts": [],
+      "hardwareProfileIDs": ["iphone-x-a11", "iphone-12-a14"],
+      "bootStatus": "Queued after iOS 15 evidence",
+      "knownIssues": ["GPU acceleration and restore compatibility are expected research areas"],
+      "requiredPatches": ["Unknown until ordered iOS 15 research completes"],
+      "appDeploymentSupport": "Unverified"
     },
     {
       "id": "ios13-research",
@@ -154,7 +169,12 @@
       "cloudOSBuild": null,
       "status": "researching",
       "notes": "Queued after iOS 14 validation; not a support claim.",
-      "validatedHosts": []
+      "validatedHosts": [],
+      "hardwareProfileIDs": ["iphone-xr-a12", "iphone-11-a13"],
+      "bootStatus": "Queued after iOS 14 evidence",
+      "knownIssues": ["Older virtual hardware and GPU drivers require investigation"],
+      "requiredPatches": ["Unknown until preceding research stages complete"],
+      "appDeploymentSupport": "Unverified"
     },
     {
       "id": "ios12-research",
@@ -165,7 +185,12 @@
       "cloudOSBuild": null,
       "status": "researching",
       "notes": "Final older-iOS research target; not a support claim.",
-      "validatedHosts": []
+      "validatedHosts": [],
+      "hardwareProfileIDs": ["iphone-x-a11", "iphone-xr-a12"],
+      "bootStatus": "Final ordered older-iOS research target",
+      "knownIssues": ["A11/A12 hardware expectations, boot chain, graphics, and guest tooling are unverified"],
+      "requiredPatches": ["Unknown until iOS 15–13 research evidence exists"],
+      "appDeploymentSupport": "Unverified"
     }
   ]
 }

@@ -14,15 +14,21 @@
 | Multi-version testing | Persistent multi-VM deployment runs, screenshots, and full baseline acceptance runner |
 | Automation and extensions | Built-in workflows plus explicit executable plugin registry |
 | Release engineering | CI, packaged artifacts, tagged releases, optional Developer ID/notarization tooling |
+| Backend architecture | Typed replaceable engine requests, capability reporting, progress events, performance and diagnostic contracts |
+| Hardware and compatibility | Versioned device profiles, automatic import recommendations, pairing enforcement, evidence database |
+| Developer lab | App artifact library, configurable assertions/reports, workflow editor, Xcode helper |
+| Lab controls | Network/audio/isolation policy, performance dashboard, guest crash/log export, snapshot retention |
+| Extension security | Plugin API version, permissions, explicit trust, and checksum pinning |
 
 ## Next engineering milestones
 
-1. Complete and publish the first real baseline acceptance result after the required host restart.
-2. Add backend progress events so creation stages have structured progress rather than log-only progress.
-3. Expose guest syslog/crash export through an upstream host-control capability or a trusted plugin.
-4. Add scheduled snapshot retention policies; checksum verification is now implemented.
-5. Populate Apple Developer credentials and publish a Developer ID signed, notarized release.
-6. Expand integration and UI automation coverage using `MockLabBackend`.
+1. Complete and publish the first real baseline acceptance result after the required host restart and supported IPSW import.
+2. Validate guest diagnostic export against the companion vphone host-control build on a running guest.
+3. Run the ordered iOS 15 → 14 → 13 → 12 research matrix and update evidence only from reproducible results.
+4. Add UI-tree, screenshot-diff, audio-output, background-media, and app-specific assertions.
+5. Add real scheduling/CI execution around persisted workflow schedule/headless metadata.
+6. Populate Apple Developer credentials and publish a Developer ID signed, notarized release.
+7. Expand full application UI automation after a stable real-VM fixture exists.
 
 ## Older-iOS compatibility research
 

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum TestRunStore {
@@ -84,7 +85,10 @@ enum PluginRegistry {
               "executable": "/absolute/path/to/lab-tools",
               "capabilities": ["diagnostics"],
               "arguments": [],
-              "description": "Optional diagnostics integration"
+              "description": "Optional diagnostics integration",
+              "apiVersion": 1,
+              "trusted": false,
+              "permissions": ["diagnostics"]
             }
             ```
 
@@ -124,6 +128,30 @@ enum PluginRegistry {
                 exitCode: 64
             )
         }
+        guard plugin.apiVersion ?? 1 == 1 else {
+            return CommandResult(
+                executable: plugin.executable,
+                arguments: plugin.arguments + [capability],
+                output: "Plugin API version \(plugin.apiVersion ?? 0) is not supported; this app supports version 1",
+                exitCode: 65
+            )
+        }
+        guard plugin.trusted == true else {
+            return CommandResult(
+                executable: plugin.executable,
+                arguments: plugin.arguments + [capability],
+                output: "Plugin is not trusted. Review its executable and grant trust in the Plugins screen.",
+                exitCode: 77
+            )
+        }
+        if let permissions = plugin.permissions, !permissions.contains(capability) {
+            return CommandResult(
+                executable: plugin.executable,
+                arguments: plugin.arguments + [capability],
+                output: "Plugin has not been granted the \(capability) permission",
+                exitCode: 77
+            )
+        }
         guard FileManager.default.isExecutableFile(atPath: plugin.executable) else {
             return CommandResult(
                 executable: plugin.executable,
@@ -131,6 +159,16 @@ enum PluginRegistry {
                 output: "Plugin executable is missing or not executable",
                 exitCode: 126
             )
+        }
+        if let expected = plugin.executableSHA256 {
+            guard let actual = try? sha256(of: URL(fileURLWithPath: plugin.executable)), actual == expected else {
+                return CommandResult(
+                    executable: plugin.executable,
+                    arguments: plugin.arguments + [capability],
+                    output: "Plugin executable changed after it was trusted; review and trust it again",
+                    exitCode: 77
+                )
+            }
         }
         let outputRoot = paths.stateRoot.appendingPathComponent("Plugin Output", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
@@ -149,6 +187,37 @@ enum PluginRegistry {
             timeout: 300,
             onLine: onLine
         )
+    }
+
+    static func setTrusted(_ plugin: PluginDescriptor, trusted: Bool, paths: LabPaths) throws {
+        let directory = root(paths: paths)
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        guard let descriptorURL = files.first(where: {
+            $0.pathExtension.lowercased() == "json"
+                && decodeFile(PluginDescriptor.self, from: $0)?.id == plugin.id
+        }) else { throw CocoaError(.fileNoSuchFile) }
+        var updated = plugin
+        updated.apiVersion = updated.apiVersion ?? 1
+        updated.trusted = trusted
+        updated.permissions = updated.permissions ?? updated.capabilities
+        updated.executableSHA256 = trusted
+            ? try sha256(of: URL(fileURLWithPath: plugin.executable))
+            : nil
+        try encodeFile(updated, to: descriptorURL)
+    }
+
+    private static func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let data = try handle.read(upToCount: 4 * 1_024 * 1_024), !data.isEmpty {
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
 

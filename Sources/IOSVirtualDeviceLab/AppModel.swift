@@ -8,12 +8,24 @@ final class LabAppModel: ObservableObject {
     @Published var selectedDeviceID: String?
     @Published private(set) var devices: [VirtualDevice] = []
     @Published private(set) var firmware: [FirmwareImage] = []
+    @Published private(set) var hardwareProfiles: HardwareProfileCatalog = .empty
     @Published private(set) var snapshots: [SnapshotRecord] = []
     @Published private(set) var compatibility: CompatibilityManifest = .empty
     @Published private(set) var testRuns: [TestRunRecord] = []
     @Published private(set) var workflows: [AutomationWorkflow] = []
     @Published private(set) var plugins: [PluginDescriptor] = []
+    @Published private(set) var appArtifacts: [AppArtifact] = []
     @Published private(set) var diagnosticBundles: [DiagnosticBundle] = []
+    @Published private(set) var performanceSamples: [String: PerformanceSample] = [:]
+    @Published private(set) var progressEvents: [LabProgressEvent] = []
+    @Published private(set) var snapshotRetention: SnapshotRetentionPolicy = .standard
+    @Published private(set) var backendDescriptor: BackendDescriptor = .vphone
+    @Published private(set) var xcodeIntegration = XcodeIntegrationStatus(
+        xcodePath: nil,
+        xcodebuildVersion: nil,
+        commandLineToolsReady: false,
+        helperScriptURL: nil
+    )
     @Published private(set) var backendCapabilities: BackendCapabilities = .vphone
     @Published private(set) var logs: [LogEntry] = []
     @Published private(set) var readiness: HostReadiness = .checking
@@ -45,9 +57,14 @@ final class LabAppModel: ObservableObject {
             try await backend.prepareStorage()
             try PluginRegistry.prepare(paths: paths)
             compatibility = CompatibilityCatalog.load(paths: paths)
+            hardwareProfiles = HardwareProfilesCatalog.load(paths: paths)
             testRuns = TestRunStore.load(paths: paths)
             workflows = WorkflowStore.load(paths: paths)
             plugins = PluginRegistry.loadPlugins(paths: paths)
+            appArtifacts = AppArtifactStore.load(paths: paths)
+            snapshotRetention = SnapshotRetentionStore.load(paths: paths)
+            xcodeIntegration = DeveloperTools.inspect(paths: paths)
+            backendDescriptor = await backend.descriptor
             backendCapabilities = await backend.capabilities
             loadPersistedLogs()
             appendLog(.info, scope: "lab", "Storage: \(paths.dataRoot.path)")
@@ -102,22 +119,69 @@ final class LabAppModel: ObservableObject {
         variant: FirmwareVariant,
         diskSizeGB: Int,
         iphoneIPSW: URL?,
-        cloudOSIPSW: URL?
+        cloudOSIPSW: URL?,
+        hardwareProfileID: String? = nil,
+        network: NetworkConfiguration = .standard,
+        audio: AudioConfiguration = .playback,
+        isolation: IsolationPolicy = .strict,
+        allowUnverifiedFirmware: Bool = false
     ) async {
         guard requireReady(for: "Create VM") else { return }
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             alertMessage = "Enter a name for the virtual device."
             return
         }
-        let key = "create:\(name)"
-        busyKeys.insert(key)
-        appendLog(.command, scope: name, "Creating \(variant.displayName) VM with a \(diskSizeGB) GB disk")
-        let result = await backend.createVM(
+        let iphone = iphoneIPSW.flatMap { url in firmware.first { $0.path == url.path } }
+        let requestedCloud = cloudOSIPSW.flatMap { url in firmware.first { $0.path == url.path } }
+        let recommendation = iphone.map {
+            CompatibilityEvaluator.recommend(
+                iphone: $0,
+                catalog: compatibility,
+                profiles: hardwareProfiles,
+                availableFirmware: firmware
+            )
+        }
+        guard let profile = hardwareProfiles.profile(id: hardwareProfileID)
+            ?? recommendation?.hardwareProfile
+            ?? hardwareProfiles.profiles.first(where: { $0.status == .supported })
+            ?? hardwareProfiles.profiles.first
+        else {
+            alertMessage = "No virtual hardware profiles are installed."
+            return
+        }
+        let operationID = UUID()
+        let request = VMCreationRequest(
+            operationID: operationID,
             name: name,
+            hardwareProfile: profile,
             variant: variant,
             diskSizeGB: diskSizeGB,
-            iphoneIPSW: iphoneIPSW,
-            cloudOSIPSW: cloudOSIPSW,
+            iphoneFirmware: iphone,
+            cloudOSFirmware: requestedCloud ?? recommendation?.cloudOSFirmware,
+            network: network,
+            audio: audio,
+            isolation: isolation,
+            allowUnverifiedFirmware: allowUnverifiedFirmware
+        )
+        let decision = CompatibilityEvaluator.evaluate(request, compatibility: compatibility)
+        guard decision.decision != .blocked else {
+            alertMessage = decision.messages.joined(separator: "\n")
+            return
+        }
+        guard decision.decision != .warning || allowUnverifiedFirmware else {
+            alertMessage = decision.messages.joined(separator: "\n") + "\n\nEnable the experimental/unverified acknowledgement to continue."
+            return
+        }
+        let key = "create:\(name)"
+        busyKeys.insert(key)
+        appendLog(
+            .command,
+            scope: name,
+            "Creating \(variant.displayName) VM with \(profile.name), a \(diskSizeGB) GB disk, and \(network.mode.displayName)"
+        )
+        let result = await backend.createVM(
+            request: request,
+            onProgress: progressHandler(scope: name),
             onLine: logger(scope: name)
         )
         finish(result, scope: name, success: "VM creation completed")
@@ -214,7 +278,11 @@ final class LabAppModel: ObservableObject {
         _ device: VirtualDevice,
         cpu: Int,
         memoryMB: Int,
-        network: String
+        network: String,
+        hardwareProfileID: String? = nil,
+        networkConfiguration: NetworkConfiguration? = nil,
+        audio: AudioConfiguration? = nil,
+        isolation: IsolationPolicy? = nil
     ) async {
         guard requireReady(for: "Update VM") else { return }
         guard !device.isRunning else {
@@ -224,11 +292,24 @@ final class LabAppModel: ObservableObject {
         let key = "config:\(device.id)"
         busyKeys.insert(key)
         appendLog(.command, scope: device.name, "Updating hardware configuration")
-        let result = await backend.updateConfiguration(
-            device,
+        let request = VMConfigurationRequest(
+            operationID: UUID(),
+            device: device,
+            hardwareProfileID: hardwareProfileID ?? device.hardwareProfileID,
             cpu: cpu,
             memoryMB: memoryMB,
-            network: network,
+            network: networkConfiguration ?? device.networkConfiguration ?? NetworkConfiguration(
+                mode: network == "bridged" ? .bridged : (network == "none" ? .offline : .nat),
+                proxyURL: nil,
+                captureTraffic: false,
+                allowHostAccess: false
+            ),
+            audio: audio ?? device.audioConfiguration ?? .playback,
+            isolation: isolation ?? device.isolationPolicy ?? .strict
+        )
+        let result = await backend.updateConfiguration(
+            request: request,
+            onProgress: progressHandler(scope: device.name),
             onLine: logger(scope: device.name)
         )
         finish(result, scope: device.name, success: "Configuration updated")
@@ -272,6 +353,9 @@ final class LabAppModel: ObservableObject {
         finish(result, scope: device.name, success: "Snapshot created")
         busyKeys.remove(key)
         snapshots = await backend.loadSnapshots()
+        if result.succeeded, snapshotRetention.isEnabled {
+            _ = await applySnapshotRetention()
+        }
     }
 
     func restore(_ snapshot: SnapshotRecord, as newName: String) async {
@@ -319,6 +403,72 @@ final class LabAppModel: ObservableObject {
         } catch {
             present(error, context: "Deleting snapshot")
         }
+    }
+
+    func updateSnapshotRetention(_ policy: SnapshotRetentionPolicy) {
+        snapshotRetention = policy
+        do {
+            try SnapshotRetentionStore.save(policy, paths: paths)
+            appendLog(.success, scope: "snapshots", "Snapshot retention policy updated")
+            persistLogs()
+        } catch {
+            present(error, context: "Saving snapshot retention policy")
+        }
+    }
+
+    @discardableResult
+    func applySnapshotRetention() async -> SnapshotRetentionResult {
+        let policy = snapshotRetention
+        guard policy.isEnabled else {
+            return SnapshotRetentionResult(removed: [], preserved: snapshots, reclaimedBytes: 0)
+        }
+
+        let ordered = snapshots.sorted { $0.createdAt > $1.createdAt }
+        var preservedIDs = Set<UUID>()
+        for group in Dictionary(grouping: ordered, by: \.sourceVM).values {
+            for snapshot in group.prefix(max(0, policy.keepLastPerDevice)) {
+                preservedIDs.insert(snapshot.id)
+            }
+        }
+
+        let ageCutoff = Calendar.current.date(byAdding: .day, value: -max(0, policy.maximumAgeDays), to: .now) ?? .distantPast
+        var pruneIDs = Set(ordered.filter {
+            !preservedIDs.contains($0.id) && $0.createdAt < ageCutoff
+        }.map(\.id))
+
+        var projectedBytes = ordered
+            .filter { !pruneIDs.contains($0.id) }
+            .reduce(Int64(0)) { $0 + $1.sizeBytes }
+        if projectedBytes > policy.maximumTotalBytes {
+            for snapshot in ordered.reversed()
+                where !preservedIDs.contains(snapshot.id) && !pruneIDs.contains(snapshot.id) {
+                pruneIDs.insert(snapshot.id)
+                projectedBytes -= snapshot.sizeBytes
+                if projectedBytes <= policy.maximumTotalBytes { break }
+            }
+        }
+
+        var removed: [SnapshotRecord] = []
+        for snapshot in ordered where pruneIDs.contains(snapshot.id) {
+            if policy.verifyBeforePruning {
+                let verification = await backend.verifySnapshot(snapshot)
+                guard verification.status == .verified else {
+                    appendLog(.warning, scope: snapshot.sourceVM, "Retention preserved \(snapshot.name): integrity is \(verification.status.rawValue)")
+                    continue
+                }
+            }
+            do {
+                try await backend.deleteSnapshot(snapshot)
+                removed.append(snapshot)
+            } catch {
+                present(error, context: "Pruning snapshot \(snapshot.name)")
+            }
+        }
+        snapshots = await backend.loadSnapshots()
+        let reclaimed = removed.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        appendLog(.info, scope: "snapshots", "Retention removed \(removed.count) snapshot(s) and reclaimed \(ByteCountFormatter.string(fromByteCount: reclaimed, countStyle: .file))")
+        persistLogs()
+        return SnapshotRetentionResult(removed: removed, preserved: snapshots, reclaimedBytes: reclaimed)
     }
 
     // MARK: - Firmware
@@ -379,6 +529,35 @@ final class LabAppModel: ObservableObject {
         }
     }
 
+    func firmwareRecommendation(for image: FirmwareImage) -> FirmwareRecommendation {
+        CompatibilityEvaluator.recommend(
+            iphone: image,
+            catalog: compatibility,
+            profiles: hardwareProfiles,
+            availableFirmware: firmware
+        )
+    }
+
+    func importAppArtifact(_ url: URL) {
+        do {
+            appArtifacts = try AppArtifactStore.importArtifact(url, paths: paths)
+            appendLog(.success, scope: "artifacts", "Imported \(url.lastPathComponent) into the app artifact library")
+            persistLogs()
+        } catch {
+            present(error, context: "Importing app artifact")
+        }
+    }
+
+    func deleteAppArtifact(_ artifact: AppArtifact) {
+        do {
+            appArtifacts = try AppArtifactStore.remove(artifact, paths: paths)
+            appendLog(.info, scope: "artifacts", "Removed \(artifact.name) from the app artifact library")
+            persistLogs()
+        } catch {
+            present(error, context: "Removing app artifact")
+        }
+    }
+
     // MARK: - Screenshots and diagnostics
 
     func captureScreenshot(of device: VirtualDevice) async {
@@ -419,12 +598,62 @@ final class LabAppModel: ObservableObject {
         }
     }
 
+    func refreshPerformance(for device: VirtualDevice) async {
+        let sample = await backend.performanceSample(for: device)
+        performanceSamples[device.id] = sample
+    }
+
+    func exportGuestDiagnostics(
+        for device: VirtualDevice,
+        categories: [DiagnosticCategory]
+    ) async -> DiagnosticExportResult {
+        let destination = paths.stateRoot
+            .appendingPathComponent("Diagnostics", isDirectory: true)
+            .appendingPathComponent("\(NameSanitizer.fileComponent(device.name))-guest-\(timestamp())", isDirectory: true)
+        let result = await backend.exportGuestDiagnostics(
+            for: device,
+            categories: categories,
+            destination: destination
+        )
+        if result.supported {
+            appendLog(.success, scope: device.name, result.message)
+            persistLogs()
+            return result
+        }
+
+        if let plugin = plugins.first(where: {
+            $0.capabilities.contains("guest-diagnostics") && $0.trusted == true
+        }) {
+            let pluginResult = await PluginRegistry.run(
+                plugin,
+                capability: "guest-diagnostics",
+                device: device,
+                paths: paths,
+                onLine: logger(scope: "plugin:\(plugin.id)")
+            )
+            let pluginExport = DiagnosticExportResult(
+                supported: pluginResult.succeeded,
+                categories: categories,
+                outputURL: pluginResult.succeeded ? destination : nil,
+                message: pluginResult.output
+            )
+            appendLog(pluginResult.succeeded ? .success : .error, scope: device.name, pluginExport.message)
+            persistLogs()
+            return pluginExport
+        }
+
+        appendLog(.warning, scope: device.name, result.message)
+        persistLogs()
+        return result
+    }
+
     // MARK: - Multi-device test runs
 
     func startDeploymentTest(
         name: String,
         deviceIDs: Set<String>,
-        packageURL: URL
+        packageURL: URL,
+        assertions: [TestAssertion] = TestAssertion.deploymentDefaults
     ) async {
         guard requireReady(for: "Run multi-device test") else { return }
         let selected = devices.filter { deviceIDs.contains($0.id) }
@@ -445,6 +674,7 @@ final class LabAppModel: ObservableObject {
             state: .running,
             results: selected.map { DeviceTestResult(deviceName: $0.name, state: .running, message: "Booting and installing") }
         )
+        record.assertions = assertions
         testRuns.insert(record, at: 0)
         saveTestRuns()
         let runID = record.id
@@ -453,6 +683,7 @@ final class LabAppModel: ObservableObject {
         busyKeys.insert("test-run:\(runID.uuidString)")
         let backend = self.backend
         let paths = self.paths
+        let shouldCollectDiagnostics = assertions.contains { $0.kind == .diagnosticsCollected }
 
         let results = await withTaskGroup(of: DeviceTestResult.self, returning: [DeviceTestResult].self) { group in
             for device in selected {
@@ -487,23 +718,42 @@ final class LabAppModel: ObservableObject {
                         let capture = await backend.captureScreenshot(device, destination: screenshot)
                         screenshotPath = capture.succeeded ? (capture.path ?? screenshot.path) : nil
                     }
+                    var diagnosticPath: String?
+                    if shouldCollectDiagnostics,
+                       let bundle = try? await backend.createDiagnosticBundle(
+                           for: device,
+                           activityLog: "Generated by deployment test \(runID.uuidString)\n"
+                       ) {
+                        diagnosticPath = bundle.url.path
+                    }
                     let current = await backend.listDevices().first { $0.id == device.id }
                     if let current, current.isRunning {
                         _ = await backend.stop(current, onLine: logger)
                     }
                     let launch = await launchTask.value
-                    let passed = guestReady && launch.succeeded && !cancellation.isCancelled
+                    let duration = Date().timeIntervalSince(startedAt)
+                    let assertionResults = TestAssertionEvaluator.evaluate(
+                        assertions,
+                        guestReady: guestReady,
+                        launch: launch,
+                        screenshotPath: screenshotPath,
+                        diagnosticPath: diagnosticPath,
+                        duration: duration
+                    )
+                    let passed = assertionResults.allSatisfy { !$0.assertion.isRequired || $0.passed }
+                        && !cancellation.isCancelled
+                    let passedAssertions = assertionResults.filter(\.passed).count
                     return DeviceTestResult(
                         id: UUID(),
                         deviceName: device.name,
                         state: passed ? .passed : ((launch.cancelled || cancellation.isCancelled) ? .cancelled : .failed),
-                        message: passed
-                            ? "Guest connected, app deployment completed, screenshot captured, and VM stopped"
-                            : (guestReady ? "VM exited with code \(launch.exitCode)" : "Guest control did not become ready"),
+                        message: "\(passedAssertions)/\(assertionResults.count) assertions passed",
                         screenshotPath: screenshotPath,
-                        diagnosticBundlePath: nil,
+                        diagnosticBundlePath: diagnosticPath,
                         startedAt: startedAt,
-                        completedAt: .now
+                        completedAt: .now,
+                        assertionResults: assertionResults,
+                        performanceSummary: nil
                     )
                 }
             }
@@ -516,6 +766,9 @@ final class LabAppModel: ObservableObject {
         record.completedAt = .now
         record.state = results.allSatisfy { $0.state == .passed } ? .passed
             : (results.contains { $0.state == .cancelled } ? .cancelled : .failed)
+        if let report = try? TestReportStore.write(record, paths: paths) {
+            record.reportPath = report.path
+        }
         replaceTestRun(record)
         orchestrationFlags.removeValue(forKey: runID)
         busyKeys.remove("test-run:\(runID.uuidString)")
@@ -652,6 +905,9 @@ final class LabAppModel: ObservableObject {
                 completedAt: .now
             )]
         }
+        if let report = try? TestReportStore.write(record, paths: paths) {
+            record.reportPath = report.path
+        }
         replaceTestRun(record)
         orchestrationFlags.removeValue(forKey: record.id)
         busyKeys.remove("test-run:\(record.id.uuidString)")
@@ -674,6 +930,37 @@ final class LabAppModel: ObservableObject {
         saveWorkflows()
     }
 
+    func addWorkflow(name: String, steps: [AutomationStep], schedule: String?, headless: Bool) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !steps.isEmpty else { return }
+        workflows.append(AutomationWorkflow(
+            id: UUID(),
+            name: trimmed,
+            steps: steps,
+            isBuiltIn: false,
+            schedule: schedule?.trimmingCharacters(in: .whitespacesAndNewlines),
+            headless: headless
+        ))
+        saveWorkflows()
+    }
+
+    func updateWorkflow(_ workflow: AutomationWorkflow) {
+        guard !workflow.isBuiltIn,
+              let index = workflows.firstIndex(where: { $0.id == workflow.id }) else { return }
+        workflows[index] = workflow
+        saveWorkflows()
+    }
+
+    func moveWorkflowStep(workflowID: UUID, stepID: UUID, offset: Int) {
+        guard let workflowIndex = workflows.firstIndex(where: { $0.id == workflowID && !$0.isBuiltIn }),
+              let stepIndex = workflows[workflowIndex].steps.firstIndex(where: { $0.id == stepID }) else { return }
+        let destination = min(max(0, stepIndex + offset), workflows[workflowIndex].steps.count - 1)
+        guard destination != stepIndex else { return }
+        let step = workflows[workflowIndex].steps.remove(at: stepIndex)
+        workflows[workflowIndex].steps.insert(step, at: destination)
+        saveWorkflows()
+    }
+
     func deleteWorkflow(_ workflow: AutomationWorkflow) {
         guard !workflow.isBuiltIn else { return }
         workflows.removeAll { $0.id == workflow.id }
@@ -690,51 +977,98 @@ final class LabAppModel: ObservableObject {
         var launchTask: Task<CommandResult, Never>?
         var current = initialDevice
 
-        for step in workflow.steps {
+        workflowSteps: for step in workflow.steps {
             if Task.isCancelled || cancellation.isCancelled { break }
             if let refreshed = await backend.listDevices().first(where: { $0.id == initialDevice.id }) {
                 current = refreshed
             }
+            if step.condition == "running", !current.isRunning { continue }
+            if step.condition == "stopped", current.isRunning { continue }
+            if let delay = step.delaySeconds, delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
             appendLog(.info, scope: initialDevice.name, "Automation: \(step.action.displayName)")
-            switch step.action {
-            case .boot:
-                if !current.isRunning {
-                    let backend = self.backend
-                    let logger = logger(scope: initialDevice.name)
-                    let deviceToLaunch = current
-                    launchTask = Task {
-                        await backend.launch(deviceToLaunch, installPackage: nil, onLine: logger)
+            let attempts = max(1, (step.retryCount ?? 0) + 1)
+            var stepSucceeded = false
+            for attempt in 0..<attempts {
+                switch step.action {
+                case .boot, .installApp:
+                    if !current.isRunning {
+                        let backend = self.backend
+                        let logger = logger(scope: initialDevice.name)
+                        let deviceToLaunch = current
+                        let package = step.action == .installApp
+                            ? step.value.map { URL(fileURLWithPath: $0) }
+                            : nil
+                        launchTask = Task {
+                            await backend.launch(deviceToLaunch, installPackage: package, onLine: logger)
+                        }
                     }
-                }
-            case .waitForGuest:
-                let seconds = Int(step.value ?? "120") ?? 120
-                var ready = false
-                for _ in 0..<max(1, seconds / 3) {
-                    if cancellation.isCancelled { break }
-                    try? await Task.sleep(for: .seconds(3))
-                    if await backend.sendHardwareKey(current, name: "home").succeeded {
-                        ready = true
-                        break
+                    stepSucceeded = true
+                case .waitForGuest:
+                    let seconds = Int(step.value ?? "120") ?? 120
+                    for _ in 0..<max(1, seconds / 3) {
+                        if cancellation.isCancelled { break }
+                        try? await Task.sleep(for: .seconds(3))
+                        if await backend.sendHardwareKey(current, name: "home").succeeded {
+                            stepSucceeded = true
+                            break
+                        }
                     }
-                }
-                if !ready { appendLog(.warning, scope: current.name, "Guest control wait timed out") }
-            case .screenshot:
-                await captureScreenshot(of: current)
-            case .pressHome:
-                let result = await backend.sendHardwareKey(current, name: "home")
-                appendLog(result.succeeded ? .success : .warning, scope: current.name, result.error ?? "Home key sent")
-            case .stop:
-                if current.isRunning { _ = await backend.stop(current, onLine: logger(scope: current.name)) }
-            case .snapshot:
-                if !current.isRunning {
-                    _ = await backend.createSnapshot(
-                        of: current,
-                        named: step.value ?? "Automated Snapshot",
-                        onLine: logger(scope: current.name)
+                case .delay:
+                    let seconds = Double(step.value ?? "1") ?? 1
+                    try? await Task.sleep(for: .seconds(max(0, seconds)))
+                    stepSucceeded = true
+                case .screenshot:
+                    let directory = paths.stateRoot.appendingPathComponent("Automation", isDirectory: true)
+                    let destination = directory.appendingPathComponent("\(NameSanitizer.fileComponent(current.name))-\(timestamp()).png")
+                    stepSucceeded = await backend.captureScreenshot(current, destination: destination).succeeded
+                case .pressHome, .assertGuestReady:
+                    let result = await backend.sendHardwareKey(current, name: "home")
+                    stepSucceeded = result.succeeded
+                    appendLog(result.succeeded ? .success : .warning, scope: current.name, result.error ?? "Guest control responded")
+                case .setNetworkMode:
+                    guard !current.isRunning else { stepSucceeded = false; break }
+                    let mode = NetworkMode(rawValue: step.value ?? "nat") ?? .nat
+                    await updateConfiguration(
+                        current,
+                        cpu: current.cpuCount,
+                        memoryMB: current.memoryMB,
+                        network: mode.backendValue,
+                        networkConfiguration: NetworkConfiguration(
+                            mode: mode,
+                            proxyURL: current.networkConfiguration?.proxyURL,
+                            captureTraffic: current.networkConfiguration?.captureTraffic ?? false,
+                            allowHostAccess: current.networkConfiguration?.allowHostAccess ?? false
+                        )
                     )
+                    stepSucceeded = true
+                case .samplePerformance:
+                    await refreshPerformance(for: current)
+                    stepSucceeded = performanceSamples[current.id] != nil
+                case .stop:
+                    if current.isRunning {
+                        stepSucceeded = await backend.stop(current, onLine: logger(scope: current.name)).succeeded
+                    } else {
+                        stepSucceeded = true
+                    }
+                case .snapshot:
+                    if !current.isRunning {
+                        stepSucceeded = await backend.createSnapshot(
+                            of: current,
+                            named: step.value ?? "Automated Snapshot",
+                            onLine: logger(scope: current.name)
+                        ).0.succeeded
+                    }
+                case .diagnostics:
+                    stepSucceeded = await collectDiagnostics(for: current) != nil
                 }
-            case .diagnostics:
-                _ = await collectDiagnostics(for: current)
+                if stepSucceeded { break }
+                if attempt + 1 < attempts { try? await Task.sleep(for: .seconds(1)) }
+            }
+            if !stepSucceeded {
+                appendLog(.error, scope: current.name, "Automation step failed: \(step.action.displayName)")
+                if step.continueOnFailure != true { break workflowSteps }
             }
         }
         if let launchTask, workflow.steps.contains(where: { $0.action == .stop }) {
@@ -744,12 +1078,27 @@ final class LabAppModel: ObservableObject {
         orchestrationFlags.removeValue(forKey: workflow.id)
         snapshots = await backend.loadSnapshots()
         await refreshDevices()
-        appendLog(.success, scope: initialDevice.name, "Workflow completed: \(workflow.name)")
+        appendLog(.success, scope: initialDevice.name, "Workflow finished: \(workflow.name)")
         persistLogs()
     }
 
     func reloadPlugins() {
         plugins = PluginRegistry.loadPlugins(paths: paths)
+    }
+
+    func setPluginTrusted(_ plugin: PluginDescriptor, trusted: Bool) {
+        do {
+            try PluginRegistry.setTrusted(plugin, trusted: trusted, paths: paths)
+            reloadPlugins()
+            appendLog(
+                trusted ? .warning : .info,
+                scope: "plugin:\(plugin.id)",
+                trusted ? "Plugin trusted with an executable checksum and declared permissions" : "Plugin trust revoked"
+            )
+            persistLogs()
+        } catch {
+            present(error, context: trusted ? "Trusting plugin" : "Revoking plugin trust")
+        }
     }
 
     func runPlugin(_ plugin: PluginDescriptor, capability: String, device: VirtualDevice?) async {
@@ -763,6 +1112,21 @@ final class LabAppModel: ObservableObject {
             onLine: logger(scope: scope)
         )
         finish(result, scope: scope, success: "Plugin completed")
+    }
+
+    func installXcodeDeploymentHelper() {
+        do {
+            let helper = try DeveloperTools.installHelper(paths: paths, backendPath: readiness.binaryPath)
+            xcodeIntegration = DeveloperTools.inspect(paths: paths)
+            appendLog(.success, scope: "developer-tools", "Installed Xcode deployment helper at \(helper.path)")
+            persistLogs()
+        } catch {
+            present(error, context: "Installing Xcode deployment helper")
+        }
+    }
+
+    func snapshotCount(for device: VirtualDevice) -> Int {
+        snapshots.filter { $0.sourceVM == device.name }.count
     }
 
     // MARK: - Activity
@@ -842,9 +1206,22 @@ final class LabAppModel: ObservableObject {
         { [weak self] line in self?.relayLog(scope: scope, line: line) }
     }
 
+    private func progressHandler(scope: String) -> LabProgressHandler {
+        { [weak self] event in self?.relayProgress(scope: scope, event: event) }
+    }
+
     nonisolated private func relayLog(scope: String, line: String) {
         Task { @MainActor [weak self] in
             self?.appendLog(.info, scope: scope, line)
+        }
+    }
+
+    nonisolated private func relayProgress(scope: String, event: LabProgressEvent) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            progressEvents.append(event)
+            if progressEvents.count > 300 { progressEvents.removeFirst(progressEvents.count - 300) }
+            appendLog(.info, scope: scope, "[\(event.phase.rawValue)] \(event.message)")
         }
     }
 

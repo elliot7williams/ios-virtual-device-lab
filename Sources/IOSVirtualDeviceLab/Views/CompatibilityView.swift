@@ -35,6 +35,13 @@ struct CompatibilityView: View {
                 }
                 .width(115)
 
+                TableColumn("Hardware profile") { entry in
+                    Text((entry.hardwareProfileIDs ?? []).compactMap { model.hardwareProfiles.profile(id: $0)?.name }.joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .width(min: 120, ideal: 170)
+
                 TableColumn("Evidence and notes") { entry in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(entry.notes).lineLimit(2)
@@ -44,6 +51,8 @@ struct CompatibilityView: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
+                        if let boot = entry.bootStatus { Text(boot).font(.caption).foregroundStyle(.secondary) }
+                        if let deployment = entry.appDeploymentSupport { Text("App deployment: \(deployment)").font(.caption2).foregroundStyle(.tertiary) }
                     }
                 }
             }

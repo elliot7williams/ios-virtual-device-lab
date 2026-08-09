@@ -25,7 +25,11 @@ struct PluginsView: View {
                 HSplitView {
                     List(model.plugins, selection: $selectedPluginID) { plugin in
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(plugin.name).fontWeight(.medium)
+                            HStack {
+                                Text(plugin.name).fontWeight(.medium)
+                                Image(systemName: plugin.trusted == true ? "checkmark.shield.fill" : "exclamationmark.shield")
+                                    .foregroundStyle(plugin.trusted == true ? .green : .orange)
+                            }
                             Text("v\(plugin.version) • \(plugin.capabilities.joined(separator: ", "))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -73,8 +77,14 @@ struct PluginsView: View {
                 LabeledContent("Name", value: plugin.name)
                 LabeledContent("Identifier", value: plugin.id)
                 LabeledContent("Version", value: plugin.version)
+                LabeledContent("API version", value: String(plugin.apiVersion ?? 1))
                 LabeledContent("Executable", value: plugin.executable)
+                LabeledContent("Trust", value: plugin.trusted == true ? "Trusted and checksum-pinned" : "Not trusted")
+                LabeledContent("Permissions", value: (plugin.permissions ?? plugin.capabilities).joined(separator: ", "))
                 if let description = plugin.description { Text(description).foregroundStyle(.secondary) }
+                Button(plugin.trusted == true ? "Revoke Trust" : "Review and Trust…", role: plugin.trusted == true ? .destructive : nil) {
+                    model.setPluginTrusted(plugin, trusted: plugin.trusted != true)
+                }
             }
             Section("Run") {
                 Picker("Capability", selection: $selectedCapability) {
@@ -89,7 +99,7 @@ struct PluginsView: View {
                     Task { await model.runPlugin(plugin, capability: selectedCapability, device: device) }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(selectedCapability.isEmpty)
+                .disabled(selectedCapability.isEmpty || plugin.trusted != true)
             }
         }
         .formStyle(.grouped)

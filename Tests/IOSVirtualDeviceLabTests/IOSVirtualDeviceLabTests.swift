@@ -196,14 +196,30 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             executable: "/bin/echo",
             capabilities: ["diagnostics"],
             arguments: ["plugin"],
-            description: nil
+            description: nil,
+            trusted: false,
+            permissions: ["diagnostics"]
         )
         let data = try JSONEncoder().encode(plugin)
         try data.write(to: PluginRegistry.root(paths: paths).appendingPathComponent("echo.json"))
         let loaded = PluginRegistry.loadPlugins(paths: paths)
         XCTAssertEqual(loaded.map(\.id), ["test.echo"])
-        let result = await PluginRegistry.run(
+        let blocked = await PluginRegistry.run(
             loaded[0],
+            capability: "diagnostics",
+            device: nil,
+            paths: paths,
+            onLine: { _ in }
+        )
+        XCTAssertFalse(blocked.succeeded)
+        XCTAssertTrue(blocked.output.contains("not trusted"))
+
+        try PluginRegistry.setTrusted(loaded[0], trusted: true, paths: paths)
+        let trusted = try XCTUnwrap(PluginRegistry.loadPlugins(paths: paths).first)
+        XCTAssertTrue(trusted.trusted == true)
+        XCTAssertNotNil(trusted.executableSHA256)
+        let result = await PluginRegistry.run(
+            trusted,
             capability: "diagnostics",
             device: nil,
             paths: paths,
@@ -211,6 +227,173 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         )
         XCTAssertTrue(result.succeeded)
         XCTAssertTrue(result.output.contains("plugin diagnostics"))
+    }
+
+    func testHardwareProfilesAndOlderIOSRecommendation() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let paths = makePaths(root: root)
+        let profiles = HardwareProfilesCatalog.load(paths: paths)
+        XCTAssertGreaterThanOrEqual(profiles.profiles.count, 6)
+        XCTAssertEqual(profiles.profile(id: "iphone-x-a11")?.soc, "A11 Bionic")
+
+        let compatibility = CompatibilityCatalog.load(paths: paths)
+        let ios15 = FirmwareImage.inspect(
+            URL(fileURLWithPath: "/tmp/iPhone10,6_15.8_19H370_Restore.ipsw")
+        )
+        let recommendation = CompatibilityEvaluator.recommend(
+            iphone: ios15,
+            catalog: compatibility,
+            profiles: profiles,
+            availableFirmware: [ios15]
+        )
+        XCTAssertEqual(recommendation.status, .researching)
+        XCTAssertEqual(recommendation.decision, .warning)
+        XCTAssertEqual(recommendation.hardwareProfile?.id, "iphone-x-a11")
+    }
+
+    func testCompatibilityGateBlocksMismatchedHardware() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let paths = makePaths(root: root)
+        let profiles = HardwareProfilesCatalog.load(paths: paths)
+        let profile = try XCTUnwrap(profiles.profile(id: "iphone-x-a11"))
+        let image = FirmwareImage.inspect(
+            URL(fileURLWithPath: "/tmp/iPhone17,3_26.1_23B85_Restore.ipsw")
+        )
+        let request = VMCreationRequest(
+            operationID: UUID(),
+            name: "mismatch",
+            hardwareProfile: profile,
+            variant: .regular,
+            diskSizeGB: 64,
+            iphoneFirmware: image,
+            cloudOSFirmware: nil,
+            network: .standard,
+            audio: .playback,
+            isolation: .strict,
+            allowUnverifiedFirmware: true
+        )
+        let result = CompatibilityEvaluator.evaluate(
+            request,
+            compatibility: CompatibilityCatalog.load(paths: paths)
+        )
+        XCTAssertEqual(result.decision, .blocked)
+        XCTAssertTrue(result.messages.contains { $0.contains("does not match") })
+    }
+
+    func testAssertionEvaluatorProducesExplicitPassFailEvidence() {
+        let assertions = TestAssertion.deploymentDefaults + [
+            TestAssertion(.maximumDuration, expectedValue: "10")
+        ]
+        let command = CommandResult(
+            executable: "mock",
+            arguments: [],
+            output: "ok",
+            exitCode: 0,
+            duration: 4
+        )
+        let results = TestAssertionEvaluator.evaluate(
+            assertions,
+            guestReady: true,
+            launch: command,
+            screenshotPath: "/tmp/screen.png",
+            diagnosticPath: nil,
+            duration: 4
+        )
+        XCTAssertEqual(results.count, assertions.count)
+        XCTAssertTrue(results.allSatisfy(\.passed))
+    }
+
+    func testAppArtifactLibraryCopiesAndRemovesBuild() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("artifact-store-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let source = root.appendingPathComponent("Music.ipa")
+        try Data("sample-app".utf8).write(to: source)
+        let imported = try AppArtifactStore.importArtifact(source, paths: paths)
+        XCTAssertEqual(imported.count, 1)
+        XCTAssertNotNil(imported[0].sha256)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: imported[0].path))
+        let remaining = try AppArtifactStore.remove(imported[0], paths: paths)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testTestReportIncludesAssertions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test-report-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let assertion = TestAssertion(.guestReady)
+        let run = TestRunRecord(
+            id: UUID(),
+            kind: .deployment,
+            name: "Music Compatibility",
+            packagePath: "/tmp/Music.ipa",
+            createdAt: .now,
+            completedAt: .now,
+            state: .passed,
+            results: [DeviceTestResult(
+                id: UUID(),
+                deviceName: "iOS 15",
+                state: .passed,
+                message: "1/1 assertions passed",
+                screenshotPath: nil,
+                diagnosticBundlePath: nil,
+                startedAt: .now,
+                completedAt: .now,
+                assertionResults: [TestAssertionResult(assertion: assertion, passed: true, message: "Connected")]
+            )]
+        )
+        let report = try TestReportStore.write(run, paths: paths)
+        let text = try String(contentsOf: report, encoding: .utf8)
+        XCTAssertTrue(text.contains("Music Compatibility"))
+        XCTAssertTrue(text.contains("Guest control connected"))
+    }
+
+    @MainActor
+    func testSnapshotRetentionKeepsNewestPerDevice() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("retention-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        let now = Date()
+        let snapshots = (0..<4).map { index in
+            SnapshotRecord(
+                id: UUID(),
+                name: "Snapshot \(index)",
+                sourceVM: "music-lab",
+                createdAt: now.addingTimeInterval(TimeInterval(-index * 86_400)),
+                archivePath: "/mock/\(index).tgz",
+                sizeBytes: 1_024
+            )
+        }
+        let backend = MockLabBackend(snapshots: snapshots)
+        let model = LabAppModel(paths: paths, backend: backend)
+        await model.bootstrap()
+        model.updateSnapshotRetention(SnapshotRetentionPolicy(
+            isEnabled: true,
+            keepLastPerDevice: 2,
+            maximumAgeDays: 1,
+            maximumTotalBytes: .max,
+            verifyBeforePruning: true
+        ))
+        let result = await model.applySnapshotRetention()
+        XCTAssertEqual(result.removed.count, 2)
+        XCTAssertEqual(model.snapshots.count, 2)
+    }
+
+    func testDeveloperHelperGeneration() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("developer-helper-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let helper = try DeveloperTools.installHelper(paths: paths, backendPath: "/opt/homebrew/bin/vphone-cli")
+        let text = try String(contentsOf: helper, encoding: .utf8)
+        XCTAssertTrue(text.contains("--install-ipa"))
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper.path))
     }
 
     private func makePaths(root: URL) -> LabPaths {

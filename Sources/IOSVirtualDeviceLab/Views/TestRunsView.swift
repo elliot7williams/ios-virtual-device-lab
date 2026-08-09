@@ -8,6 +8,9 @@ struct TestRunsView: View {
     @State private var packageURL: URL?
     @State private var showingPackageImporter = false
     @State private var baselineDeviceID: String?
+    @State private var artifactID: UUID?
+    @State private var assertionKinds = Set(TestAssertion.deploymentDefaults.map(\.kind))
+    @State private var maximumDurationSeconds = 300
 
     var body: some View {
         VStack(spacing: 0) {
@@ -64,6 +67,33 @@ struct TestRunsView: View {
                     Button(packageURL?.lastPathComponent ?? "Choose IPA/TIPA…") {
                         showingPackageImporter = true
                     }
+                    if !model.appArtifacts.isEmpty {
+                        Picker("Saved app build", selection: $artifactID) {
+                            Text("None").tag(UUID?.none)
+                            ForEach(model.appArtifacts) { artifact in
+                                Text(artifact.name).tag(Optional(artifact.id))
+                            }
+                        }
+                        .onChange(of: artifactID) { _, id in
+                            packageURL = id.flatMap { selected in model.appArtifacts.first { $0.id == selected }?.url }
+                        }
+                    }
+                    DisclosureGroup("Pass/fail assertions") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(TestAssertionKind.allCases) { kind in
+                                Toggle(kind.displayName, isOn: Binding(
+                                    get: { assertionKinds.contains(kind) },
+                                    set: { enabled in
+                                        if enabled { assertionKinds.insert(kind) } else { assertionKinds.remove(kind) }
+                                    }
+                                ))
+                            }
+                            if assertionKinds.contains(.maximumDuration) {
+                                Stepper("Time limit: \(maximumDurationSeconds) seconds", value: $maximumDurationSeconds, in: 30...1_800, step: 30)
+                            }
+                        }
+                        .padding(.top, 6)
+                    }
                     Divider()
                     if model.devices.isEmpty {
                         Text("Create at least one virtual device first.").foregroundStyle(.secondary)
@@ -91,7 +121,8 @@ struct TestRunsView: View {
                             await model.startDeploymentTest(
                                 name: runName,
                                 deviceIDs: selectedDeviceIDs,
-                                packageURL: packageURL
+                                packageURL: packageURL,
+                                assertions: selectedAssertions
                             )
                         }
                     }
@@ -134,6 +165,16 @@ struct TestRunsView: View {
         }
     }
 
+    private var selectedAssertions: [TestAssertion] {
+        TestAssertionKind.allCases.compactMap { kind in
+            guard assertionKinds.contains(kind) else { return nil }
+            return TestAssertion(
+                kind,
+                expectedValue: kind == .maximumDuration ? String(maximumDurationSeconds) : nil
+            )
+        }
+    }
+
     @ViewBuilder
     private var runHistory: some View {
         if model.testRuns.isEmpty {
@@ -169,10 +210,23 @@ private struct TestRunCard: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(result.deviceName).fontWeight(.medium)
                             Text(result.message).font(.caption).foregroundStyle(.secondary)
+                            if let assertions = result.assertionResults {
+                                ForEach(assertions) { assertion in
+                                    Label(
+                                        "\(assertion.assertion.kind.displayName): \(assertion.message)",
+                                        systemImage: assertion.passed ? "checkmark.circle.fill" : "xmark.circle.fill"
+                                    )
+                                    .font(.caption2)
+                                    .foregroundStyle(assertion.passed ? .green : .red)
+                                }
+                            }
                         }
                         Spacer()
                         if let path = result.screenshotPath {
                             Button("Screenshot") { model.reveal(URL(fileURLWithPath: path)) }
+                        }
+                        if let path = result.diagnosticBundlePath {
+                            Button("Diagnostics") { model.reveal(URL(fileURLWithPath: path)) }
                         }
                     }
                 }
@@ -190,6 +244,9 @@ private struct TestRunCard: View {
                 Spacer()
                 Text("\(run.results.filter { $0.state == .passed }.count)/\(run.results.count) passed")
                     .font(.caption.monospaced())
+                if let report = run.reportPath {
+                    Button("Report") { model.reveal(URL(fileURLWithPath: report)) }
+                }
             }
         }
         .padding(12)

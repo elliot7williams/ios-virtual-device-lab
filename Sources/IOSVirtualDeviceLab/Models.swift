@@ -3,10 +3,13 @@ import Foundation
 enum LabSection: String, CaseIterable, Identifiable {
     case devices = "Virtual Devices"
     case firmware = "Firmware Library"
+    case profiles = "Hardware Profiles"
     case compatibility = "Compatibility"
     case snapshots = "Snapshots"
     case testRuns = "Test Runs"
     case automation = "Automation"
+    case diagnostics = "Diagnostics & Performance"
+    case developerTools = "Developer Tools"
     case plugins = "Plugins"
     case activity = "Activity"
 
@@ -16,10 +19,13 @@ enum LabSection: String, CaseIterable, Identifiable {
         switch self {
         case .devices: "iphone.gen3"
         case .firmware: "shippingbox"
+        case .profiles: "iphone.gen3.radiowaves.left.and.right"
         case .compatibility: "checkmark.seal"
         case .snapshots: "camera.filters"
         case .testRuns: "checklist"
         case .automation: "flowchart"
+        case .diagnostics: "waveform.path.ecg"
+        case .developerTools: "hammer"
         case .plugins: "puzzlepiece.extension"
         case .activity: "text.alignleft"
         }
@@ -93,6 +99,10 @@ struct VirtualDevice: Identifiable, Hashable, Sendable {
     let diskURL: URL
     var isRunning: Bool
     var isPaused: Bool = false
+    var hardwareProfileID: String? = nil
+    var networkConfiguration: NetworkConfiguration? = nil
+    var audioConfiguration: AudioConfiguration? = nil
+    var isolationPolicy: IsolationPolicy? = nil
 
     var id: String { name }
 
@@ -141,6 +151,7 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
     var sha256: String? = nil
     var validation: FirmwareValidation? = nil
     var compatibilityStatus: CompatibilityStatus? = nil
+    var recommendedProfileID: String? = nil
 
     var url: URL { URL(fileURLWithPath: path) }
 
@@ -222,6 +233,11 @@ struct CompatibilityEntry: Identifiable, Codable, Hashable, Sendable {
     let status: CompatibilityStatus
     let notes: String
     let validatedHosts: [String]
+    let hardwareProfileIDs: [String]?
+    let bootStatus: String?
+    let knownIssues: [String]?
+    let requiredPatches: [String]?
+    let appDeploymentSupport: String?
 
     func matches(version: String?, build: String?, device candidateDevice: String?) -> Bool {
         guard let version else { return false }
@@ -405,6 +421,8 @@ struct DeviceTestResult: Identifiable, Codable, Hashable, Sendable {
     var diagnosticBundlePath: String?
     var startedAt: Date
     var completedAt: Date?
+    var assertionResults: [TestAssertionResult]?
+    var performanceSummary: String?
 
     init(deviceName: String, state: TestRunState = .queued, message: String = "Queued") {
         id = UUID()
@@ -422,7 +440,9 @@ struct DeviceTestResult: Identifiable, Codable, Hashable, Sendable {
         screenshotPath: String?,
         diagnosticBundlePath: String?,
         startedAt: Date,
-        completedAt: Date?
+        completedAt: Date?,
+        assertionResults: [TestAssertionResult]? = nil,
+        performanceSummary: String? = nil
     ) {
         self.id = id
         self.deviceName = deviceName
@@ -432,6 +452,8 @@ struct DeviceTestResult: Identifiable, Codable, Hashable, Sendable {
         self.diagnosticBundlePath = diagnosticBundlePath
         self.startedAt = startedAt
         self.completedAt = completedAt
+        self.assertionResults = assertionResults
+        self.performanceSummary = performanceSummary
     }
 }
 
@@ -444,13 +466,21 @@ struct TestRunRecord: Identifiable, Codable, Hashable, Sendable {
     var completedAt: Date?
     var state: TestRunState
     var results: [DeviceTestResult]
+    var assertions: [TestAssertion]? = nil
+    var reportPath: String? = nil
+    var appArtifactID: UUID? = nil
 }
 
 enum AutomationAction: String, Codable, CaseIterable, Identifiable, Sendable {
     case boot
+    case installApp
     case waitForGuest
+    case delay
     case screenshot
     case pressHome
+    case setNetworkMode
+    case samplePerformance
+    case assertGuestReady
     case stop
     case snapshot
     case diagnostics
@@ -460,9 +490,14 @@ enum AutomationAction: String, Codable, CaseIterable, Identifiable, Sendable {
     var displayName: String {
         switch self {
         case .boot: "Boot"
+        case .installApp: "Boot & Install App"
         case .waitForGuest: "Wait for Guest"
+        case .delay: "Delay"
         case .screenshot: "Capture Screenshot"
         case .pressHome: "Press Home"
+        case .setNetworkMode: "Set Network Mode"
+        case .samplePerformance: "Sample Performance"
+        case .assertGuestReady: "Assert Guest Ready"
         case .stop: "Stop"
         case .snapshot: "Create Snapshot"
         case .diagnostics: "Collect Diagnostics"
@@ -472,13 +507,28 @@ enum AutomationAction: String, Codable, CaseIterable, Identifiable, Sendable {
 
 struct AutomationStep: Identifiable, Codable, Hashable, Sendable {
     let id: UUID
-    let action: AutomationAction
-    let value: String?
+    var action: AutomationAction
+    var value: String?
+    var delaySeconds: Double?
+    var retryCount: Int?
+    var continueOnFailure: Bool?
+    var condition: String?
 
-    init(_ action: AutomationAction, value: String? = nil) {
+    init(
+        _ action: AutomationAction,
+        value: String? = nil,
+        delaySeconds: Double = 0,
+        retryCount: Int = 0,
+        continueOnFailure: Bool = false,
+        condition: String? = nil
+    ) {
         id = UUID()
         self.action = action
         self.value = value
+        self.delaySeconds = delaySeconds
+        self.retryCount = retryCount
+        self.continueOnFailure = continueOnFailure
+        self.condition = condition
     }
 }
 
@@ -487,6 +537,8 @@ struct AutomationWorkflow: Identifiable, Codable, Hashable, Sendable {
     var name: String
     var steps: [AutomationStep]
     var isBuiltIn: Bool
+    var schedule: String? = nil
+    var headless: Bool? = nil
 }
 
 struct PluginDescriptor: Identifiable, Codable, Hashable, Sendable {
@@ -497,6 +549,36 @@ struct PluginDescriptor: Identifiable, Codable, Hashable, Sendable {
     let capabilities: [String]
     let arguments: [String]
     let description: String?
+    var apiVersion: Int?
+    var executableSHA256: String?
+    var trusted: Bool?
+    var permissions: [String]?
+
+    init(
+        id: String,
+        name: String,
+        version: String,
+        executable: String,
+        capabilities: [String],
+        arguments: [String],
+        description: String?,
+        apiVersion: Int? = 1,
+        executableSHA256: String? = nil,
+        trusted: Bool? = false,
+        permissions: [String]? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.version = version
+        self.executable = executable
+        self.capabilities = capabilities
+        self.arguments = arguments
+        self.description = description
+        self.apiVersion = apiVersion
+        self.executableSHA256 = executableSHA256
+        self.trusted = trusted
+        self.permissions = permissions
+    }
 }
 
 struct DiagnosticBundle: Identifiable, Hashable, Sendable {
@@ -531,12 +613,22 @@ struct BackendCapabilities: Sendable {
     let screenshots: Bool
     let automation: Bool
     let guestLogs: Bool
+    let networking: Bool
+    let audio: Bool
+    let performanceMetrics: Bool
+    let crashExport: Bool
+    let xcodeDeployment: Bool
 
     static let vphone = BackendCapabilities(
         pause: true,
         screenshots: true,
         automation: true,
-        guestLogs: false
+        guestLogs: true,
+        networking: true,
+        audio: false,
+        performanceMetrics: true,
+        crashExport: true,
+        xcodeDeployment: true
     )
 }
 
