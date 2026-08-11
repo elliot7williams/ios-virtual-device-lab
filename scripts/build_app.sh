@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 APP="$ROOT/.build/iOS Virtual Device Lab.app"
 CONTENTS="$APP/Contents"
+BUILD_TEMP="${VDL_BUILD_TMPDIR:-$ROOT/.tmp}"
+
+mkdir -p "$BUILD_TEMP"
+export TMPDIR="$BUILD_TEMP"
 
 cd "$ROOT"
 "$ROOT/scripts/build_icon.sh"
@@ -16,10 +20,14 @@ echo "=== Packaging app bundle ==="
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$BIN_DIR/IOSVirtualDeviceLab" "$CONTENTS/MacOS/IOSVirtualDeviceLab"
+cp "$BIN_DIR/vdlctl" "$CONTENTS/MacOS/vdlctl"
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 cp "$ROOT/Resources/compatibility-manifest.json" "$CONTENTS/Resources/compatibility-manifest.json"
 cp "$ROOT/Resources/hardware-profiles.json" "$CONTENTS/Resources/hardware-profiles.json"
+if [[ -n "${UPDATE_PUBLIC_KEY_PATH:-}" ]]; then
+    cp "$UPDATE_PUBLIC_KEY_PATH" "$CONTENTS/Resources/update-public-key.pem"
+fi
 
 if [[ -n "${APP_VERSION:-}" ]]; then
     plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$CONTENTS/Info.plist"

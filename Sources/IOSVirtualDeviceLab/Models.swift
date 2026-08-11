@@ -143,15 +143,16 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
     var kind: FirmwareKind
     let path: String
     let fileName: String
-    let device: String?
-    let version: String?
-    let build: String?
+    var device: String?
+    var version: String?
+    var build: String?
     let sizeBytes: Int64
     let importedAt: Date
     var sha256: String? = nil
     var validation: FirmwareValidation? = nil
     var compatibilityStatus: CompatibilityStatus? = nil
     var recommendedProfileID: String? = nil
+    var manifestMetadata: IPSWManifestMetadata? = nil
 
     var url: URL { URL(fileURLWithPath: path) }
 
@@ -189,6 +190,25 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+struct IPSWBuildIdentity: Codable, Hashable, Sendable {
+    let deviceClass: String?
+    let variant: String?
+    let boardID: String?
+    let chipID: String?
+}
+
+struct IPSWManifestMetadata: Codable, Hashable, Sendable {
+    let productVersion: String?
+    let productBuildVersion: String?
+    let supportedProductTypes: [String]
+    let buildIdentities: [IPSWBuildIdentity]
+    let sourceEntry: String
+
+    var primaryProductType: String? {
+        supportedProductTypes.count == 1 ? supportedProductTypes[0] : nil
+    }
+}
+
 enum FirmwareValidationState: String, Codable, Sendable {
     case valid
     case warning
@@ -201,6 +221,85 @@ struct FirmwareValidation: Codable, Hashable, Sendable {
     let hasBuildManifest: Bool
     let archiveEntryCount: Int
     let issues: [String]
+}
+
+enum DiagnosticSeverity: String, Codable, CaseIterable, Sendable {
+    case information
+    case warning
+    case critical
+}
+
+enum DiagnosticClassification: String, Codable, CaseIterable, Sendable {
+    case appCrash
+    case vmCrash
+    case bootFailure
+    case kernelPanic
+    case resourcePressure
+    case networkFailure
+    case audioFailure
+    case unknown
+}
+
+struct DiagnosticFinding: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let classification: DiagnosticClassification
+    let severity: DiagnosticSeverity
+    let title: String
+    let evidence: String
+    let recommendation: String
+    let sourceFile: String?
+
+    init(
+        classification: DiagnosticClassification,
+        severity: DiagnosticSeverity,
+        title: String,
+        evidence: String,
+        recommendation: String,
+        sourceFile: String? = nil
+    ) {
+        id = UUID()
+        self.classification = classification
+        self.severity = severity
+        self.title = title
+        self.evidence = evidence
+        self.recommendation = recommendation
+        self.sourceFile = sourceFile
+    }
+}
+
+struct DiagnosticAnalysisReport: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let bundlePath: String
+    let createdAt: Date
+    let analyzer: String
+    let findings: [DiagnosticFinding]
+    let summary: String
+}
+
+struct DiagnosticPrivacyPolicy: Codable, Hashable, Sendable {
+    var redactSecrets: Bool
+    var redactPersonalData: Bool
+    var includeHostProfile: Bool
+    var includeScreenshots: Bool
+    var maximumFileBytes: Int64
+    var encryptExports: Bool
+
+    static let standard = DiagnosticPrivacyPolicy(
+        redactSecrets: true,
+        redactPersonalData: true,
+        includeHostProfile: false,
+        includeScreenshots: true,
+        maximumFileBytes: 50 * 1_048_576,
+        encryptExports: false
+    )
+}
+
+struct DiagnosticPrivacyPreview: Codable, Hashable, Sendable {
+    let filesIncluded: Int
+    let filesExcluded: Int
+    let redactions: Int
+    let totalBytes: Int64
+    let warnings: [String]
 }
 
 enum CompatibilityStatus: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -471,6 +570,20 @@ struct TestRunRecord: Identifiable, Codable, Hashable, Sendable {
     var appArtifactID: UUID? = nil
 }
 
+struct LabResourcePolicy: Codable, Hashable, Sendable {
+    var maximumConcurrentVMs: Int
+    var maximumAggregateMemoryMB: Int
+    var reservedHostMemoryMB: Int
+    var maximumHostCPUPercent: Double
+
+    static let standard = LabResourcePolicy(
+        maximumConcurrentVMs: 2,
+        maximumAggregateMemoryMB: 12_288,
+        reservedHostMemoryMB: 4_096,
+        maximumHostCPUPercent: 85
+    )
+}
+
 enum AutomationAction: String, Codable, CaseIterable, Identifiable, Sendable {
     case boot
     case installApp
@@ -625,11 +738,36 @@ struct BackendCapabilities: Sendable {
         automation: true,
         guestLogs: true,
         networking: true,
-        audio: false,
+        audio: true,
         performanceMetrics: true,
         crashExport: true,
         xcodeDeployment: true
     )
+
+    var featureSupport: [BackendFeatureSupport] {
+        [
+            BackendFeatureSupport(name: "NAT / bridged / offline networking", state: networking ? .available : .unavailable, reason: "Mapped to vphone VM network configuration"),
+            BackendFeatureSupport(name: "Proxy injection", state: .unavailable, reason: "No guest proxy API is exposed by vphone"),
+            BackendFeatureSupport(name: "Packet capture", state: .extensionRequired, reason: "Requires a trusted capture plugin with explicit permission"),
+            BackendFeatureSupport(name: "Host audio input/output", state: audio ? .available : .unavailable, reason: "vphone provisions Virtio sound streams backed by host audio"),
+            BackendFeatureSupport(name: "Audio interruptions and accessories", state: .unavailable, reason: "The engine does not expose interruption or Bluetooth/headphone simulation"),
+            BackendFeatureSupport(name: "CPU, memory, and disk I/O", state: performanceMetrics ? .available : .unavailable, reason: "Measured from the host VM processes"),
+            BackendFeatureSupport(name: "Guest GPU utilization and FPS", state: .unavailable, reason: "Virtualization.framework does not expose these counters"),
+        ]
+    }
+}
+
+enum BackendFeatureState: String, Codable, Sendable {
+    case available
+    case extensionRequired
+    case unavailable
+}
+
+struct BackendFeatureSupport: Identifiable, Codable, Hashable, Sendable {
+    let name: String
+    let state: BackendFeatureState
+    let reason: String
+    var id: String { name }
 }
 
 final class OperationCancellationFlag: @unchecked Sendable {

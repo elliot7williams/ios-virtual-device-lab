@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "IOSVirtualDeviceLab", targets: ["IOSVirtualDeviceLab"]),
+        .executable(name: "vdlctl", targets: ["VDLCLI"]),
     ],
     targets: [
         .executableTarget(
@@ -19,6 +20,10 @@ let package = Package(
             name: "IOSVirtualDeviceLabTests",
             dependencies: ["IOSVirtualDeviceLab"],
             path: "Tests/IOSVirtualDeviceLabTests"
+        ),
+        .executableTarget(
+            name: "VDLCLI",
+            path: "Sources/VDLCLI"
         ),
     ]
 )

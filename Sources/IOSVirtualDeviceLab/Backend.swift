@@ -214,6 +214,7 @@ actor VPhoneBackend: LabBackend {
     nonisolated let descriptor = BackendDescriptor.vphone
     nonisolated let capabilities = BackendCapabilities.vphone
     private var activeControls: [UUID: ProcessControl] = [:]
+    private var previousIOCounters: [String: (read: UInt64, written: UInt64, timestamp: Date)] = [:]
 
     init(paths: LabPaths = .default) {
         self.paths = paths
@@ -1071,15 +1072,50 @@ actor VPhoneBackend: LabBackend {
                 totalRSSKB += Int64(fields[1]) ?? 0
             }
         }
+        let now = Date()
+        let counters = processIOCounters(pids)
+        let prior = previousIOCounters[device.id]
+        previousIOCounters[device.id] = counters.map { ($0.read, $0.written, now) }
+        let elapsed = prior.map { now.timeIntervalSince($0.timestamp) } ?? 0
+        let readRate: Int64? = counters.flatMap { current in
+            guard let prior, elapsed > 0, current.read >= prior.read else { return nil }
+            return Int64(Double(current.read - prior.read) / elapsed)
+        }
+        let writeRate: Int64? = counters.flatMap { current in
+            guard let prior, elapsed > 0, current.written >= prior.written else { return nil }
+            return Int64(Double(current.written - prior.written) / elapsed)
+        }
+        let runtime = sendControlJSON(to: device, payload: ["t": "capabilities", "screen": false]).json
+        let audioAvailable = runtime?["audio_output"] as? Bool == true
         return PerformanceSample(
             deviceName: device.name,
             cpuPercent: result.succeeded ? totalCPU : nil,
             residentMemoryBytes: result.succeeded ? totalRSSKB * 1_024 : nil,
+            diskReadBytesPerSecond: readRate,
+            diskWriteBytesPerSecond: writeRate,
             gpuPercent: nil,
             framesPerSecond: nil,
-            audioSampleRateHz: device.audioConfiguration?.sampleRateHz,
-            source: "Host vphone process counters"
+            audioSampleRateHz: audioAvailable ? device.audioConfiguration?.sampleRateHz : nil,
+            source: "Host vphone process CPU, memory, and rusage disk-I/O counters"
         )
+    }
+
+    private func processIOCounters(_ pids: [Int32]) -> (read: UInt64, written: UInt64)? {
+        var totalRead: UInt64 = 0
+        var totalWritten: UInt64 = 0
+        var collected = false
+        for pid in pids {
+            var info = rusage_info_v4()
+            let status = withUnsafeMutablePointer(to: &info) { pointer in
+                var raw: rusage_info_t? = UnsafeMutableRawPointer(pointer)
+                return proc_pid_rusage(pid, RUSAGE_INFO_V4, &raw)
+            }
+            guard status == 0 else { continue }
+            totalRead &+= info.ri_diskio_bytesread
+            totalWritten &+= info.ri_diskio_byteswritten
+            collected = true
+        }
+        return collected ? (totalRead, totalWritten) : nil
     }
 
     func exportGuestDiagnostics(
@@ -1274,7 +1310,17 @@ actor VPhoneBackend: LabBackend {
         var records = loadFirmware()
         var known = Set(records.map(\.path))
         for url in urls where !known.contains(url.path) {
-            records.append(FirmwareImage.inspect(url, kind: kind))
+            var inspected = FirmwareImage.inspect(url, kind: kind)
+            if let metadata = try? IPSWManifestInspector.inspect(url) {
+                inspected.manifestMetadata = metadata
+                inspected.version = metadata.productVersion ?? inspected.version
+                inspected.build = metadata.productBuildVersion ?? inspected.build
+                inspected.device = IPSWManifestInspector.preferredProductType(
+                    from: metadata,
+                    filenameDevice: inspected.device
+                )
+            }
+            records.append(inspected)
             known.insert(url.path)
         }
         try saveFirmwareCatalog(records)
@@ -1293,6 +1339,7 @@ actor VPhoneBackend: LabBackend {
         let fm = FileManager.default
         var issues: [String] = []
         var hasBuildManifest = false
+        var parsedBuildManifest = false
         var entryCount = 0
         var digest: String?
         let url = firmware.url
@@ -1310,8 +1357,9 @@ actor VPhoneBackend: LabBackend {
             arguments: ["-Z1", url.path],
             timeout: 120
         )
+        var entries: [String] = []
         if listing.succeeded {
-            let entries = listing.output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+            entries = listing.output.components(separatedBy: .newlines).filter { !$0.isEmpty }
             entryCount = entries.count
             hasBuildManifest = entries.contains { $0 == "BuildManifest.plist" || $0.hasSuffix("/BuildManifest.plist") }
             if !hasBuildManifest { issues.append("Archive does not contain BuildManifest.plist") }
@@ -1319,15 +1367,50 @@ actor VPhoneBackend: LabBackend {
             issues.append("Archive could not be read as a ZIP/IPSW")
         }
 
+        if hasBuildManifest {
+            do {
+                let metadata = try IPSWManifestInspector.inspect(url, archiveEntries: entries)
+                parsedBuildManifest = true
+                let filename = FirmwareFilenameParser.parse(firmware.fileName)
+                if let filenameVersion = filename.version,
+                   let manifestVersion = metadata.productVersion,
+                   filenameVersion != manifestVersion {
+                    issues.append("Filename iOS \(filenameVersion) differs from BuildManifest \(manifestVersion)")
+                }
+                if let filenameBuild = filename.build,
+                   let manifestBuild = metadata.productBuildVersion,
+                   filenameBuild != manifestBuild {
+                    issues.append("Filename build \(filenameBuild) differs from BuildManifest \(manifestBuild)")
+                }
+                if let filenameDevice = filename.device,
+                   !metadata.supportedProductTypes.isEmpty,
+                   !metadata.supportedProductTypes.contains(filenameDevice) {
+                    issues.append("Filename device \(filenameDevice) is not listed by BuildManifest")
+                }
+                records[index].manifestMetadata = metadata
+                records[index].version = metadata.productVersion ?? records[index].version
+                records[index].build = metadata.productBuildVersion ?? records[index].build
+                records[index].device = IPSWManifestInspector.preferredProductType(
+                    from: metadata,
+                    filenameDevice: filename.device ?? records[index].device
+                )
+            } catch {
+                issues.append(error.localizedDescription)
+            }
+        }
+
         digest = try sha256(of: url)
-        let compatibilityStatus = compatibility.status(for: firmware)
+        let compatibilityStatus = compatibility.status(for: records[index])
         if compatibilityStatus == .unverified {
             issues.append("No matching entry exists in the compatibility manifest")
         } else if compatibilityStatus == .incompatible {
             issues.append("This firmware is marked incompatible")
         }
 
-        let structurallyInvalid = !listing.succeeded || !hasBuildManifest || url.pathExtension.lowercased() != "ipsw"
+        let structurallyInvalid = !listing.succeeded
+            || !hasBuildManifest
+            || !parsedBuildManifest
+            || url.pathExtension.lowercased() != "ipsw"
         let state: FirmwareValidationState = structurallyInvalid
             ? .invalid
             : (issues.isEmpty ? .valid : .warning)

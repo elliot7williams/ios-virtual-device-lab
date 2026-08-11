@@ -16,9 +16,13 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var plugins: [PluginDescriptor] = []
     @Published private(set) var appArtifacts: [AppArtifact] = []
     @Published private(set) var diagnosticBundles: [DiagnosticBundle] = []
+    @Published private(set) var diagnosticAnalysisReports: [DiagnosticAnalysisReport] = []
+    @Published private(set) var diagnosticPrivacy: DiagnosticPrivacyPolicy = .standard
+    @Published private(set) var latestDiagnosticPreview: DiagnosticPrivacyPreview?
     @Published private(set) var performanceSamples: [String: PerformanceSample] = [:]
     @Published private(set) var progressEvents: [LabProgressEvent] = []
     @Published private(set) var snapshotRetention: SnapshotRetentionPolicy = .standard
+    @Published private(set) var resourcePolicy: LabResourcePolicy = .standard
     @Published private(set) var backendDescriptor: BackendDescriptor = .vphone
     @Published private(set) var xcodeIntegration = XcodeIntegrationStatus(
         xcodePath: nil,
@@ -27,6 +31,7 @@ final class LabAppModel: ObservableObject {
         helperScriptURL: nil
     )
     @Published private(set) var backendCapabilities: BackendCapabilities = .vphone
+    @Published private(set) var updateState: UpdateState = .idle
     @Published private(set) var logs: [LogEntry] = []
     @Published private(set) var readiness: HostReadiness = .checking
     @Published private(set) var busyKeys: Set<String> = []
@@ -36,6 +41,7 @@ final class LabAppModel: ObservableObject {
     private let backend: any LabBackend
     private var didBootstrap = false
     private var orchestrationFlags: [UUID: OperationCancellationFlag] = [:]
+    private let updateService = UpdateService()
 
     init(paths: LabPaths = .default, backend: (any LabBackend)? = nil) {
         self.paths = paths
@@ -63,12 +69,15 @@ final class LabAppModel: ObservableObject {
             plugins = PluginRegistry.loadPlugins(paths: paths)
             appArtifacts = AppArtifactStore.load(paths: paths)
             snapshotRetention = SnapshotRetentionStore.load(paths: paths)
+            resourcePolicy = ResourcePolicyStore.load(paths: paths)
+            diagnosticPrivacy = DiagnosticPrivacyStore.load(paths: paths)
             xcodeIntegration = DeveloperTools.inspect(paths: paths)
             backendDescriptor = await backend.descriptor
             backendCapabilities = await backend.capabilities
             loadPersistedLogs()
             appendLog(.info, scope: "lab", "Storage: \(paths.dataRoot.path)")
             await refreshAll()
+            Task { await checkForUpdates(automatic: true) }
         } catch {
             present(error, context: "Preparing lab storage")
         }
@@ -313,6 +322,30 @@ final class LabAppModel: ObservableObject {
             onLine: logger(scope: device.name)
         )
         finish(result, scope: device.name, success: "Configuration updated")
+        if result.succeeded,
+           request.network.proxyURL != nil || request.network.captureTraffic {
+            if let plugin = plugins.first(where: {
+                $0.capabilities.contains("network-policy") && $0.trusted == true
+            }),
+               let data = try? JSONEncoder().encode(request.network),
+               let json = String(data: data, encoding: .utf8) {
+                let extensionResult = await PluginRegistry.run(
+                    plugin,
+                    capability: "network-policy",
+                    device: device,
+                    paths: paths,
+                    additionalEnvironment: ["LAB_NETWORK_CONFIGURATION": json],
+                    onLine: logger(scope: "plugin:\(plugin.id)")
+                )
+                finish(extensionResult, scope: "plugin:\(plugin.id)", success: "Network instrumentation policy applied")
+            } else {
+                appendLog(
+                    .warning,
+                    scope: device.name,
+                    "Proxy and packet-capture policy was saved but requires a trusted network-policy plugin"
+                )
+            }
+        }
         busyKeys.remove(key)
         await refreshDevices()
     }
@@ -582,9 +615,23 @@ final class LabAppModel: ObservableObject {
         busyKeys.insert(key)
         appendLog(.command, scope: device.name, "Collecting diagnostic bundle")
         do {
-            let bundle = try await backend.createDiagnosticBundle(
+            let rawBundle = try await backend.createDiagnosticBundle(
                 for: device,
                 activityLog: formattedActivityLog()
+            )
+            let sanitizedURL = rawBundle.url.deletingLastPathComponent()
+                .appendingPathComponent(rawBundle.url.lastPathComponent + "-sanitized", isDirectory: true)
+            latestDiagnosticPreview = try DiagnosticSanitizer.sanitize(
+                source: rawBundle.url,
+                destination: sanitizedURL,
+                policy: diagnosticPrivacy
+            )
+            try? FileManager.default.removeItem(at: rawBundle.url)
+            let bundle = DiagnosticBundle(
+                id: rawBundle.id,
+                deviceName: rawBundle.deviceName,
+                url: sanitizedURL,
+                createdAt: rawBundle.createdAt
             )
             diagnosticBundles.insert(bundle, at: 0)
             appendLog(.success, scope: device.name, "Diagnostics saved to \(bundle.url.path)")
@@ -595,6 +642,59 @@ final class LabAppModel: ObservableObject {
             busyKeys.remove(key)
             present(error, context: "Collecting diagnostics")
             return nil
+        }
+    }
+
+    func updateDiagnosticPrivacy(_ policy: DiagnosticPrivacyPolicy) {
+        diagnosticPrivacy = policy
+        do {
+            try DiagnosticPrivacyStore.save(policy, paths: paths)
+            appendLog(.info, scope: "privacy", "Diagnostic privacy policy updated")
+            persistLogs()
+        } catch {
+            present(error, context: "Saving diagnostic privacy policy")
+        }
+    }
+
+    func analyzeDiagnostics(_ bundle: DiagnosticBundle, useTrustedPlugin: Bool = false) async {
+        do {
+            let local = try DiagnosticAnalyzer.analyze(bundle.url)
+            diagnosticAnalysisReports.insert(local, at: 0)
+            appendLog(.success, scope: "diagnostics", local.summary)
+            if useTrustedPlugin,
+               let plugin = plugins.first(where: {
+                   $0.capabilities.contains("diagnostic-analysis") && $0.trusted == true
+               }) {
+                let result = await PluginRegistry.run(
+                    plugin,
+                    capability: "diagnostic-analysis",
+                    device: nil,
+                    paths: paths,
+                    additionalEnvironment: ["LAB_DIAGNOSTIC_BUNDLE": bundle.url.path],
+                    onLine: logger(scope: "plugin:\(plugin.id)")
+                )
+                finish(result, scope: "plugin:\(plugin.id)", success: "Trusted diagnostic analyzer completed")
+            }
+            persistLogs()
+        } catch {
+            present(error, context: "Analyzing diagnostics")
+        }
+    }
+
+    func exportEncryptedDiagnostics(_ bundle: DiagnosticBundle, passphrase: String) {
+        do {
+            let destination = bundle.url.deletingLastPathComponent()
+                .appendingPathComponent(bundle.url.lastPathComponent + ".vdlenc")
+            let output = try DiagnosticSanitizer.encryptedArchive(
+                of: bundle.url,
+                destination: destination,
+                passphrase: passphrase
+            )
+            appendLog(.success, scope: "privacy", "Encrypted diagnostic export created")
+            persistLogs()
+            reveal(output)
+        } catch {
+            present(error, context: "Encrypting diagnostic export (use at least 12 characters)")
         }
     }
 
@@ -684,11 +784,33 @@ final class LabAppModel: ObservableObject {
         let backend = self.backend
         let paths = self.paths
         let shouldCollectDiagnostics = assertions.contains { $0.kind == .diagnosticsCollected }
+        let gate = LabResourceGate(policy: resourcePolicy)
+        let runPolicy = resourcePolicy
 
         let results = await withTaskGroup(of: DeviceTestResult.self, returning: [DeviceTestResult].self) { group in
             for device in selected {
                 let logger = logger(scope: "test:\(device.name)")
                 group.addTask {
+                    let reservedMemory = min(
+                        max(1, device.memoryMB),
+                        max(1, runPolicy.maximumAggregateMemoryMB)
+                    )
+                    guard await HostResourceMonitor.waitForCPU(
+                        below: runPolicy.maximumHostCPUPercent,
+                        cancellation: cancellation
+                    ) else {
+                        return DeviceTestResult(
+                            id: UUID(),
+                            deviceName: device.name,
+                            state: cancellation.isCancelled ? .cancelled : .failed,
+                            message: "Host CPU remained above the configured resource limit",
+                            screenshotPath: nil,
+                            diagnosticBundlePath: nil,
+                            startedAt: .now,
+                            completedAt: .now
+                        )
+                    }
+                    await gate.acquire(memoryMB: reservedMemory)
                     let startedAt = Date()
                     let screenshot = paths.stateRoot
                         .appendingPathComponent("Test Runs", isDirectory: true)
@@ -726,6 +848,7 @@ final class LabAppModel: ObservableObject {
                        ) {
                         diagnosticPath = bundle.url.path
                     }
+                    let performance = await backend.performanceSample(for: device)
                     let current = await backend.listDevices().first { $0.id == device.id }
                     if let current, current.isRunning {
                         _ = await backend.stop(current, onLine: logger)
@@ -738,12 +861,17 @@ final class LabAppModel: ObservableObject {
                         launch: launch,
                         screenshotPath: screenshotPath,
                         diagnosticPath: diagnosticPath,
-                        duration: duration
+                        duration: duration,
+                        networkMode: device.networkConfiguration?.mode
+                            ?? NetworkMode(rawValue: device.network.mode),
+                        audioConfigured: device.audioConfiguration?.outputEnabled == true
+                            && performance.audioSampleRateHz != nil,
+                        performance: performance
                     )
                     let passed = assertionResults.allSatisfy { !$0.assertion.isRequired || $0.passed }
                         && !cancellation.isCancelled
                     let passedAssertions = assertionResults.filter(\.passed).count
-                    return DeviceTestResult(
+                    let deviceResult = DeviceTestResult(
                         id: UUID(),
                         deviceName: device.name,
                         state: passed ? .passed : ((launch.cancelled || cancellation.isCancelled) ? .cancelled : .failed),
@@ -753,8 +881,10 @@ final class LabAppModel: ObservableObject {
                         startedAt: startedAt,
                         completedAt: .now,
                         assertionResults: assertionResults,
-                        performanceSummary: nil
+                        performanceSummary: performance.source
                     )
+                    await gate.release(memoryMB: reservedMemory)
+                    return deviceResult
                 }
             }
             var collected: [DeviceTestResult] = []
@@ -779,6 +909,17 @@ final class LabAppModel: ObservableObject {
         )
         await refreshDevices()
         persistLogs()
+    }
+
+    func updateResourcePolicy(_ policy: LabResourcePolicy) {
+        resourcePolicy = policy
+        do {
+            try ResourcePolicyStore.save(policy, paths: paths)
+            appendLog(.info, scope: "scheduler", "Resource policy updated: \(policy.maximumConcurrentVMs) concurrent VMs, \(policy.maximumAggregateMemoryMB) MB")
+            persistLogs()
+        } catch {
+            present(error, context: "Saving resource policy")
+        }
     }
 
     func runBaselineAcceptance(on source: VirtualDevice, packageURL: URL?) async {
@@ -1116,12 +1257,39 @@ final class LabAppModel: ObservableObject {
 
     func installXcodeDeploymentHelper() {
         do {
-            let helper = try DeveloperTools.installHelper(paths: paths, backendPath: readiness.binaryPath)
+            let embeddedCLI = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/vdlctl")
+            let helper = try DeveloperTools.installHelper(
+                paths: paths,
+                vdlctlPath: FileManager.default.isExecutableFile(atPath: embeddedCLI.path)
+                    ? embeddedCLI.path : "/opt/homebrew/bin/vdlctl"
+            )
             xcodeIntegration = DeveloperTools.inspect(paths: paths)
             appendLog(.success, scope: "developer-tools", "Installed Xcode deployment helper at \(helper.path)")
             persistLogs()
         } catch {
             present(error, context: "Installing Xcode deployment helper")
+        }
+    }
+
+    func checkForUpdates(automatic: Bool = false) async {
+        if !automatic { updateState = .checking }
+        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        do {
+            updateState = try await updateService.check(currentVersion: current)
+        } catch {
+            if !automatic { updateState = .failed(error.localizedDescription) }
+        }
+    }
+
+    func downloadAvailableUpdate() async {
+        do {
+            let destination = paths.stateRoot.appendingPathComponent("Updates", isDirectory: true)
+            updateState = try await updateService.downloadVerifiedUpdate(destinationRoot: destination)
+            if case let .downloaded(_, path) = updateState {
+                reveal(URL(fileURLWithPath: path))
+            }
+        } catch {
+            updateState = .failed(error.localizedDescription)
         }
     }
 

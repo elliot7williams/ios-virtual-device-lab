@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import XCTest
 @testable import IOSVirtualDeviceLab
 
@@ -152,6 +153,102 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertNotNil(validated[0].sha256)
     }
 
+    func testBuildManifestOverridesMisleadingIPSWFilename() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-inspection-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "ProductVersion": "14.8.1",
+            "ProductBuildVersion": "18H107",
+            "SupportedProductTypes": ["iPhone10,6"],
+            "BuildIdentities": [[
+                "ApBoardID": 10,
+                "ApChipID": 32784,
+                "Info": ["DeviceClass": "d221ap", "Variant": "Customer Erase Install"],
+            ]],
+        ]
+        let manifestData = try PropertyListSerialization.data(fromPropertyList: manifest, format: .binary, options: 0)
+        try manifestData.write(to: root.appendingPathComponent("BuildManifest.plist"))
+        let ipsw = root.appendingPathComponent("iPhone17,3_26.1_23B85_Restore.ipsw")
+        let zipped = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/zip"),
+            arguments: ["-q", ipsw.path, "BuildManifest.plist"],
+            currentDirectory: root
+        )
+        XCTAssertTrue(zipped.succeeded)
+
+        let backend = VPhoneBackend(paths: makePaths(root: root.appendingPathComponent("lab")))
+        try await backend.prepareStorage()
+        let imported = try await backend.importFirmware([ipsw], kind: .iPhone)
+        XCTAssertEqual(imported.first?.version, "14.8.1")
+        XCTAssertEqual(imported.first?.build, "18H107")
+        XCTAssertEqual(imported.first?.device, "iPhone10,6")
+        let validated = try await backend.validateFirmware(imported[0], compatibility: .empty)
+        XCTAssertEqual(validated[0].manifestMetadata?.buildIdentities.first?.deviceClass, "d221ap")
+        XCTAssertTrue(validated[0].validation?.issues.contains { $0.contains("Filename iOS") } == true)
+    }
+
+    func testDiagnosticSanitizerAndClassifier() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostic-sanitizer-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("raw")
+        let destination = root.appendingPathComponent("sanitized")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try "Authorization: Bearer secret-token-123456\nuser@example.com\nkernel panic detected\n"
+            .write(to: source.appendingPathComponent("panic.log"), atomically: true, encoding: .utf8)
+        try "serial number".write(
+            to: source.appendingPathComponent("host-system-profile.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let preview = try DiagnosticSanitizer.sanitize(
+            source: source,
+            destination: destination,
+            policy: .standard
+        )
+        XCTAssertGreaterThanOrEqual(preview.redactions, 2)
+        XCTAssertEqual(preview.filesExcluded, 1)
+        let sanitized = try String(contentsOf: destination.appendingPathComponent("panic.log"), encoding: .utf8)
+        XCTAssertFalse(sanitized.contains("secret-token"))
+        XCTAssertFalse(sanitized.contains("user@example.com"))
+        let report = try DiagnosticAnalyzer.analyze(destination)
+        XCTAssertTrue(report.findings.contains { $0.classification == .kernelPanic })
+        let encrypted = root.appendingPathComponent("diagnostics.vdlenc")
+        let decrypted = root.appendingPathComponent("diagnostics.zip")
+        _ = try DiagnosticSanitizer.encryptedArchive(
+            of: destination,
+            destination: encrypted,
+            passphrase: "correct horse battery staple"
+        )
+        _ = try DiagnosticSanitizer.decryptArchive(
+            encrypted,
+            destination: decrypted,
+            passphrase: "correct horse battery staple"
+        )
+        XCTAssertEqual(try Data(contentsOf: decrypted).prefix(2), Data([0x50, 0x4B]))
+    }
+
+    func testResourceGateQueuesBeyondConcurrencyAndMemoryBudget() async {
+        let gate = LabResourceGate(policy: LabResourcePolicy(
+            maximumConcurrentVMs: 1,
+            maximumAggregateMemoryMB: 4_096,
+            reservedHostMemoryMB: 1_024,
+            maximumHostCPUPercent: 100
+        ))
+        await gate.acquire(memoryMB: 4_096)
+        let waiter = Task { await gate.acquire(memoryMB: 4_096) }
+        try? await Task.sleep(for: .milliseconds(50))
+        let queuedState = await gate.state()
+        XCTAssertEqual(queuedState, LabResourceGate.State(runningCount: 1, reservedMemoryMB: 4_096, waitingCount: 1))
+        await gate.release(memoryMB: 4_096)
+        await waiter.value
+        let resumedState = await gate.state()
+        XCTAssertEqual(resumedState.runningCount, 1)
+        await gate.release(memoryMB: 4_096)
+    }
+
     func testProcessExecutorTimeoutAndCancellation() async {
         let timed = ProcessExecutor.run(
             executable: URL(fileURLWithPath: "/bin/sleep"),
@@ -281,6 +378,18 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
     }
 
     func testAssertionEvaluatorProducesExplicitPassFailEvidence() {
+        let screenshot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assertion-screen-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: screenshot) }
+        let image = NSImage(size: NSSize(width: 32, height: 32))
+        image.lockFocus()
+        NSColor.black.setFill()
+        NSRect(x: 0, y: 0, width: 16, height: 32).fill()
+        NSColor.white.setFill()
+        NSRect(x: 16, y: 0, width: 16, height: 32).fill()
+        image.unlockFocus()
+        let bitmap = image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+        try? bitmap?.representation(using: .png, properties: [:])?.write(to: screenshot)
         let assertions = TestAssertion.deploymentDefaults + [
             TestAssertion(.maximumDuration, expectedValue: "10")
         ]
@@ -295,7 +404,7 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             assertions,
             guestReady: true,
             launch: command,
-            screenshotPath: "/tmp/screen.png",
+            screenshotPath: screenshot.path,
             diagnosticPath: nil,
             duration: 4
         )
@@ -390,9 +499,10 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = makePaths(root: root)
         try paths.createDirectories()
-        let helper = try DeveloperTools.installHelper(paths: paths, backendPath: "/opt/homebrew/bin/vphone-cli")
+        let helper = try DeveloperTools.installHelper(paths: paths, vdlctlPath: "/opt/homebrew/bin/vdlctl")
         let text = try String(contentsOf: helper, encoding: .utf8)
-        XCTAssertTrue(text.contains("--install-ipa"))
+        XCTAssertTrue(text.contains("vdlctl"))
+        XCTAssertTrue(text.contains("deploy --device"))
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper.path))
     }
 

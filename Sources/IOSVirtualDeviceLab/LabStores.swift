@@ -11,6 +11,19 @@ enum TestRunStore {
     }
 }
 
+enum ResourcePolicyStore {
+    static func load(paths: LabPaths) -> LabResourcePolicy {
+        decodeFile(
+            LabResourcePolicy.self,
+            from: paths.stateRoot.appendingPathComponent("resource-policy.json")
+        ) ?? .standard
+    }
+
+    static func save(_ policy: LabResourcePolicy, paths: LabPaths) throws {
+        try encodeFile(policy, to: paths.stateRoot.appendingPathComponent("resource-policy.json"))
+    }
+}
+
 enum WorkflowStore {
     static let builtIns: [AutomationWorkflow] = [
         AutomationWorkflow(
@@ -118,6 +131,7 @@ enum PluginRegistry {
         capability: String,
         device: VirtualDevice?,
         paths: LabPaths,
+        additionalEnvironment: [String: String] = [:],
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult {
         guard plugin.capabilities.contains(capability) else {
@@ -175,7 +189,7 @@ enum PluginRegistry {
         var environment = [
             "LAB_DATA_ROOT": paths.dataRoot.path,
             "LAB_OUTPUT_ROOT": outputRoot.path,
-        ]
+        ].merging(additionalEnvironment) { _, new in new }
         if let device {
             environment["LAB_DEVICE_NAME"] = device.name
             environment["LAB_DEVICE_BUNDLE"] = device.bundleURL.path

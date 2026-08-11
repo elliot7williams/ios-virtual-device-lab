@@ -69,7 +69,7 @@ Test runs persist one result per selected VM. Every selected assertion produces 
 
 ### Automation and plugins
 
-Automation is an ordered typed sequence with values, delays, retries, conditions, scheduling metadata, headless metadata, and failure behavior. Plugins are user-installed executable descriptors with API versions, permissions, explicit trust, and executable checksum pinning. They never auto-run and receive device context through narrowly named environment variables.
+Automation is an ordered typed sequence with values, delays, retries, conditions, scheduling metadata, headless metadata, and failure behavior. The desktop orchestrator and the packaged `vdlctl` runner consume the same persisted workflow schema; the CLI adds resource admission, launchd installation, stable exit codes, and JSON/JUnit/HTML reports. Plugins are user-installed executable descriptors with API versions, permissions, explicit trust, and executable checksum pinning. They never auto-run and receive device context through narrowly named environment variables.
 
 ## Replaceable backend
 

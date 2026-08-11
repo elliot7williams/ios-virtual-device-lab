@@ -1,5 +1,7 @@
 import CryptoKit
+import CoreGraphics
 import Foundation
+import ImageIO
 
 enum HardwareProfilesCatalog {
     static func load(paths: LabPaths) -> HardwareProfileCatalog {
@@ -212,7 +214,10 @@ enum TestAssertionEvaluator {
         launch: CommandResult,
         screenshotPath: String?,
         diagnosticPath: String?,
-        duration: TimeInterval
+        duration: TimeInterval,
+        networkMode: NetworkMode? = nil,
+        audioConfigured: Bool = false,
+        performance: PerformanceSample? = nil
     ) -> [TestAssertionResult] {
         assertions.map { assertion in
             let passed: Bool
@@ -227,6 +232,54 @@ enum TestAssertionEvaluator {
             case .screenshotCaptured:
                 passed = screenshotPath != nil
                 message = passed ? "Screenshot artifact exists" : "Screenshot was not captured"
+            case .imageNotBlank:
+                let evidence = screenshotPath.flatMap { ImageEvidence.inspect(URL(fileURLWithPath: $0)) }
+                passed = evidence?.containsRenderedContent == true
+                message = evidence.map {
+                    String(format: "Rendered variance %.2f across %dx%d", $0.variance, $0.width, $0.height)
+                } ?? "Screenshot could not be decoded"
+            case .visualSimilarity:
+                guard let screenshotPath,
+                      let baselinePath = assertion.expectedValue,
+                      let similarity = ImageEvidence.similarity(
+                        URL(fileURLWithPath: screenshotPath),
+                        URL(fileURLWithPath: baselinePath)
+                      ) else {
+                    passed = false
+                    message = "A readable current screenshot and baseline path are required"
+                    break
+                }
+                passed = similarity >= 0.9
+                message = String(format: "Visual similarity %.1f%% (minimum 90%%)", similarity * 100)
+            case .textInLogs:
+                let expected = assertion.expectedValue ?? ""
+                passed = !expected.isEmpty && launch.output.localizedCaseInsensitiveContains(expected)
+                message = passed ? "Found expected text: \(expected)" : "Expected text was not found: \(expected)"
+            case .networkMode:
+                let expected = assertion.expectedValue ?? NetworkMode.nat.rawValue
+                passed = networkMode?.rawValue == expected
+                message = "Network mode: \(networkMode?.rawValue ?? "unknown") (expected \(expected))"
+            case .audioConfigured:
+                passed = audioConfigured
+                message = passed ? "Virtual audio input/output policy is configured" : "Audio is disabled or unavailable"
+            case .maximumCPU:
+                let limit = Double(assertion.expectedValue ?? "90") ?? 90
+                guard let actual = performance?.cpuPercent else {
+                    passed = false
+                    message = "CPU measurement unavailable"
+                    break
+                }
+                passed = actual <= limit
+                message = String(format: "CPU %.1f%% (limit %.1f%%)", actual, limit)
+            case .maximumMemory:
+                let limitMB = Int64(assertion.expectedValue ?? "4096") ?? 4_096
+                guard let actual = performance?.residentMemoryBytes else {
+                    passed = false
+                    message = "Memory measurement unavailable"
+                    break
+                }
+                passed = actual <= limitMB * 1_048_576
+                message = "Memory \(actual / 1_048_576) MB (limit \(limitMB) MB)"
             case .exitCodeZero:
                 passed = launch.exitCode == 0
                 message = "Backend exit code: \(launch.exitCode)"
@@ -240,6 +293,55 @@ enum TestAssertionEvaluator {
             }
             return TestAssertionResult(assertion: assertion, passed: passed, message: message)
         }
+    }
+}
+
+private enum ImageEvidence {
+    struct Summary {
+        let width: Int
+        let height: Int
+        let variance: Double
+        var containsRenderedContent: Bool { width > 1 && height > 1 && variance >= 2 }
+    }
+
+    static func inspect(_ url: URL) -> Summary? {
+        guard let pixels = grayscalePixels(url) else { return nil }
+        let mean = pixels.values.reduce(0.0) { $0 + Double($1) } / Double(pixels.values.count)
+        let variance = pixels.values.reduce(0.0) { partial, value in
+            let difference = Double(value) - mean
+            return partial + difference * difference
+        } / Double(pixels.values.count)
+        return Summary(width: pixels.originalWidth, height: pixels.originalHeight, variance: variance)
+    }
+
+    static func similarity(_ first: URL, _ second: URL) -> Double? {
+        guard let lhs = grayscalePixels(first)?.values,
+              let rhs = grayscalePixels(second)?.values,
+              lhs.count == rhs.count, !lhs.isEmpty else { return nil }
+        let difference = zip(lhs, rhs).reduce(0.0) { partial, pair in
+            partial + abs(Double(pair.0) - Double(pair.1))
+        } / Double(lhs.count)
+        return max(0, 1 - difference / 255)
+    }
+
+    private static func grayscalePixels(_ url: URL) -> (values: [UInt8], originalWidth: Int, originalHeight: Int)? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let width = 32
+        let height = 32
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return (pixels, image.width, image.height)
     }
 }
 
@@ -293,11 +395,11 @@ enum DeveloperTools {
         )
     }
 
-    static func installHelper(paths: LabPaths, backendPath: String?) throws -> URL {
+    static func installHelper(paths: LabPaths, vdlctlPath: String?) throws -> URL {
         let root = paths.stateRoot.appendingPathComponent("Developer Tools", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let helper = root.appendingPathComponent("vdl-deploy.sh")
-        let binary = backendPath ?? "/opt/homebrew/bin/vphone-cli"
+        let binary = vdlctlPath ?? "/Applications/iOS Virtual Device Lab.app/Contents/MacOS/vdlctl"
         let script = """
         #!/bin/zsh
         set -euo pipefail
@@ -307,8 +409,8 @@ enum DeveloperTools {
         fi
         DEVICE_NAME="$1"
         APP_PACKAGE="$2"
-        DEVICE_ROOT="\(paths.libraryRoot.path)/$DEVICE_NAME"
-        exec "\(binary)" boot --config "$DEVICE_ROOT/config.plist" --install-ipa "$APP_PACKAGE"
+        OUTPUT_ROOT="${DERIVED_FILE_DIR:-${TMPDIR:-/tmp}}/vdl-${DEVICE_NAME}"
+        exec "\(binary)" deploy --device "$DEVICE_NAME" --app "$APP_PACKAGE" --output "$OUTPUT_ROOT"
         """
         try script.write(to: helper, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)

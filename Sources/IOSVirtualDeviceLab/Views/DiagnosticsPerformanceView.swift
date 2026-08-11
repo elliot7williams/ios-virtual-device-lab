@@ -4,6 +4,8 @@ struct DiagnosticsPerformanceView: View {
     @EnvironmentObject private var model: LabAppModel
     @State private var selectedDeviceID: String?
     @State private var categories = Set(DiagnosticCategory.allCases)
+    @State private var useTrustedAnalyzer = false
+    @State private var diagnosticPassphrase = ""
 
     private var device: VirtualDevice? {
         model.devices.first { $0.id == selectedDeviceID }
@@ -21,8 +23,10 @@ struct DiagnosticsPerformanceView: View {
                 if let device {
                     VStack(alignment: .leading, spacing: 18) {
                         performance(device)
+                        capabilityMatrix
                         configuration(device)
                         diagnosticControls(device)
+                        privacyAndAnalysis(device)
                     }
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -37,6 +41,25 @@ struct DiagnosticsPerformanceView: View {
             }
         }
         .onAppear { selectedDeviceID = selectedDeviceID ?? model.devices.first?.id }
+    }
+
+    private var capabilityMatrix: some View {
+        GroupBox("Backend capability evidence") {
+            VStack(spacing: 8) {
+                ForEach(model.backendCapabilities.featureSupport) { feature in
+                    HStack(alignment: .top) {
+                        StatusPill(
+                            text: feature.state == .available ? "Available" : (feature.state == .extensionRequired ? "Extension" : "Unavailable"),
+                            color: feature.state == .available ? .green : (feature.state == .extensionRequired ? .orange : .secondary)
+                        )
+                        Text(feature.name).fontWeight(.medium)
+                        Spacer()
+                        Text(feature.reason).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.top, 6)
+        }
     }
 
     private var header: some View {
@@ -140,6 +163,7 @@ struct DiagnosticsPerformanceView: View {
                             if let bundle = await model.collectDiagnostics(for: device) { model.reveal(bundle.url) }
                         }
                     }
+                    .accessibilityLabel("Collect sanitized standard diagnostic bundle")
                     Button("Export Guest Diagnostics") {
                         Task {
                             let result = await model.exportGuestDiagnostics(for: device, categories: Array(categories))
@@ -148,10 +172,90 @@ struct DiagnosticsPerformanceView: View {
                         }
                     }
                     .disabled(categories.isEmpty)
+                    .accessibilityLabel("Export selected guest diagnostic categories")
                 }
             }
             .padding(.top, 6)
         }
+    }
+
+    private func privacyAndAnalysis(_ device: VirtualDevice) -> some View {
+        GroupBox("Privacy & Assisted Diagnostics") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 18) {
+                    Toggle("Redact secrets", isOn: privacyBinding(\.redactSecrets))
+                    Toggle("Redact personal data", isOn: privacyBinding(\.redactPersonalData))
+                    Toggle("Include host profile", isOn: privacyBinding(\.includeHostProfile))
+                    Toggle("Include screenshots", isOn: privacyBinding(\.includeScreenshots))
+                    Toggle("Encrypt exports", isOn: privacyBinding(\.encryptExports))
+                }
+                Text("Bundles are sanitized locally before they are shown or handed to an analyzer. Local deterministic classification does not use the network.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let preview = model.latestDiagnosticPreview {
+                    Label(
+                        "Privacy preview: \(preview.filesIncluded) included, \(preview.filesExcluded) excluded, \(preview.redactions) redactions",
+                        systemImage: "hand.raised.fill"
+                    )
+                    .font(.callout)
+                }
+
+                Toggle("Also run a trusted diagnostic-analysis plugin (explicit opt-in)", isOn: $useTrustedAnalyzer)
+                HStack {
+                    Button("Collect & Analyze") {
+                        Task {
+                            if let bundle = await model.collectDiagnostics(for: device) {
+                                await model.analyzeDiagnostics(bundle, useTrustedPlugin: useTrustedAnalyzer)
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("Collect sanitized diagnostics and run assisted analysis")
+                    if let bundle = model.diagnosticBundles.first(where: { $0.deviceName == device.name }) {
+                        Button("Analyze Latest Sanitized Bundle") {
+                            Task { await model.analyzeDiagnostics(bundle, useTrustedPlugin: useTrustedAnalyzer) }
+                        }
+                    }
+                    Spacer()
+                }
+                if model.diagnosticPrivacy.encryptExports,
+                   let bundle = model.diagnosticBundles.first(where: { $0.deviceName == device.name }) {
+                    HStack {
+                        SecureField("Export passphrase (12+ characters)", text: $diagnosticPassphrase)
+                        Button("Create Encrypted Export") {
+                            model.exportEncryptedDiagnostics(bundle, passphrase: diagnosticPassphrase)
+                            diagnosticPassphrase = ""
+                        }
+                        .disabled(diagnosticPassphrase.count < 12)
+                    }
+                }
+
+                if let report = model.diagnosticAnalysisReports.first {
+                    Divider()
+                    Text(report.summary).font(.headline)
+                    ForEach(report.findings.prefix(8)) { finding in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label(finding.title, systemImage: finding.severity == .critical ? "exclamationmark.octagon.fill" : "info.circle.fill")
+                                .fontWeight(.medium)
+                            Text(finding.recommendation).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    private func privacyBinding(_ keyPath: WritableKeyPath<DiagnosticPrivacyPolicy, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { model.diagnosticPrivacy[keyPath: keyPath] },
+            set: { value in
+                var policy = model.diagnosticPrivacy
+                policy[keyPath: keyPath] = value
+                model.updateDiagnosticPrivacy(policy)
+            }
+        )
     }
 
     private func percent(_ value: Double?) -> String {

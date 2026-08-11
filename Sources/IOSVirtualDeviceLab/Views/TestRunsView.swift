@@ -11,6 +11,11 @@ struct TestRunsView: View {
     @State private var artifactID: UUID?
     @State private var assertionKinds = Set(TestAssertion.deploymentDefaults.map(\.kind))
     @State private var maximumDurationSeconds = 300
+    @State private var expectedLogText = ""
+    @State private var visualBaselinePath = ""
+    @State private var expectedNetworkMode = NetworkMode.nat
+    @State private var maximumCPUPercent = 90
+    @State private var maximumMemoryMB = 4_096
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +24,7 @@ struct TestRunsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     controls
+                    schedulerPolicy
                     runHistory
                 }
                 .padding(18)
@@ -91,6 +97,23 @@ struct TestRunsView: View {
                             if assertionKinds.contains(.maximumDuration) {
                                 Stepper("Time limit: \(maximumDurationSeconds) seconds", value: $maximumDurationSeconds, in: 30...1_800, step: 30)
                             }
+                            if assertionKinds.contains(.textInLogs) {
+                                TextField("Expected log text", text: $expectedLogText)
+                            }
+                            if assertionKinds.contains(.visualSimilarity) {
+                                TextField("Baseline screenshot path", text: $visualBaselinePath)
+                            }
+                            if assertionKinds.contains(.networkMode) {
+                                Picker("Expected network", selection: $expectedNetworkMode) {
+                                    ForEach(NetworkMode.allCases) { Text($0.displayName).tag($0) }
+                                }
+                            }
+                            if assertionKinds.contains(.maximumCPU) {
+                                Stepper("CPU limit: \(maximumCPUPercent)%", value: $maximumCPUPercent, in: 10...400, step: 5)
+                            }
+                            if assertionKinds.contains(.maximumMemory) {
+                                Stepper("Memory limit: \(maximumMemoryMB) MB", value: $maximumMemoryMB, in: 512...32_768, step: 512)
+                            }
                         }
                         .padding(.top, 6)
                     }
@@ -127,6 +150,8 @@ struct TestRunsView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("Run deployment matrix on selected virtual devices")
+                    .accessibilityIdentifier("test-runs.start-matrix")
                     .disabled(packageURL == nil || selectedDeviceIDs.isEmpty)
                 }
                 .padding(.top, 6)
@@ -157,6 +182,8 @@ struct TestRunsView: View {
                         Task { await model.runBaselineAcceptance(on: device, packageURL: packageURL) }
                     }
                     .buttonStyle(.borderedProminent)
+                    .accessibilityLabel("Run full baseline acceptance on selected virtual device")
+                    .accessibilityIdentifier("test-runs.start-acceptance")
                     .disabled(baselineDeviceID == nil)
                 }
                 .padding(.top, 6)
@@ -165,13 +192,62 @@ struct TestRunsView: View {
         }
     }
 
+    private var schedulerPolicy: some View {
+        GroupBox("Resource-aware Scheduler") {
+            HStack(spacing: 22) {
+                Stepper(
+                    "Maximum concurrent VMs: \(model.resourcePolicy.maximumConcurrentVMs)",
+                    value: resourceBinding(\.maximumConcurrentVMs),
+                    in: 1...8
+                )
+                Stepper(
+                    "VM memory budget: \(model.resourcePolicy.maximumAggregateMemoryMB) MB",
+                    value: resourceBinding(\.maximumAggregateMemoryMB),
+                    in: 2_048...65_536,
+                    step: 1_024
+                )
+                Stepper(
+                    "Host reserve: \(model.resourcePolicy.reservedHostMemoryMB) MB",
+                    value: resourceBinding(\.reservedHostMemoryMB),
+                    in: 1_024...32_768,
+                    step: 1_024
+                )
+                Spacer()
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    private func resourceBinding(_ keyPath: WritableKeyPath<LabResourcePolicy, Int>) -> Binding<Int> {
+        Binding(
+            get: { model.resourcePolicy[keyPath: keyPath] },
+            set: { value in
+                var policy = model.resourcePolicy
+                policy[keyPath: keyPath] = value
+                model.updateResourcePolicy(policy)
+            }
+        )
+    }
+
     private var selectedAssertions: [TestAssertion] {
         TestAssertionKind.allCases.compactMap { kind in
             guard assertionKinds.contains(kind) else { return nil }
             return TestAssertion(
                 kind,
-                expectedValue: kind == .maximumDuration ? String(maximumDurationSeconds) : nil
+                expectedValue: expectedValue(for: kind)
             )
+        }
+    }
+
+    private func expectedValue(for kind: TestAssertionKind) -> String? {
+        switch kind {
+        case .maximumDuration: String(maximumDurationSeconds)
+        case .textInLogs: expectedLogText
+        case .visualSimilarity: visualBaselinePath
+        case .networkMode: expectedNetworkMode.rawValue
+        case .maximumCPU: String(maximumCPUPercent)
+        case .maximumMemory: String(maximumMemoryMB)
+        default: nil
         }
     }
 

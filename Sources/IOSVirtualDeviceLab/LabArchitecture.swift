@@ -292,6 +292,13 @@ enum TestAssertionKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case guestReady
     case launchSucceeded
     case screenshotCaptured
+    case imageNotBlank
+    case visualSimilarity
+    case textInLogs
+    case networkMode
+    case audioConfigured
+    case maximumCPU
+    case maximumMemory
     case exitCodeZero
     case diagnosticsCollected
     case maximumDuration
@@ -303,6 +310,13 @@ enum TestAssertionKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .guestReady: "Guest control connected"
         case .launchSucceeded: "App deployment completed"
         case .screenshotCaptured: "Screenshot captured"
+        case .imageNotBlank: "Screenshot contains rendered content"
+        case .visualSimilarity: "Screenshot matches baseline"
+        case .textInLogs: "Expected text appears in logs"
+        case .networkMode: "Network mode matches"
+        case .audioConfigured: "Audio route is configured"
+        case .maximumCPU: "CPU remains below limit"
+        case .maximumMemory: "Memory remains below limit"
         case .exitCodeZero: "VM exited cleanly"
         case .diagnosticsCollected: "Diagnostics collected"
         case .maximumDuration: "Completed within time limit"
@@ -327,6 +341,7 @@ struct TestAssertion: Identifiable, Codable, Hashable, Sendable {
         TestAssertion(.guestReady),
         TestAssertion(.launchSucceeded),
         TestAssertion(.screenshotCaptured),
+        TestAssertion(.imageNotBlank),
         TestAssertion(.exitCodeZero),
     ]
 }

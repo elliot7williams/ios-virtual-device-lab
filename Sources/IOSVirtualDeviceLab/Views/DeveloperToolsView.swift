@@ -13,6 +13,7 @@ struct DeveloperToolsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     backendContract
                     xcode
+                    updates
                     artifacts
                 }
                 .padding(18)
@@ -31,6 +32,27 @@ struct DeveloperToolsView: View {
             case let .success(urls): if let url = urls.first { model.importAppArtifact(url) }
             case let .failure(error): model.alertMessage = error.localizedDescription
             }
+        }
+    }
+
+    private var updates: some View {
+        GroupBox("Secure Updates") {
+            HStack {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(model.updateState.label).fontWeight(.medium)
+                    Text("Release downloads are accepted only when their published SHA-256 matches. Production builds are additionally Developer ID signed and notarized.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Check Now") { Task { await model.checkForUpdates() } }
+                    .disabled(model.updateState == .checking)
+                if case .available = model.updateState {
+                    Button("Download Verified Update") { Task { await model.downloadAvailableUpdate() } }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(.top, 6)
         }
     }
 

@@ -18,6 +18,7 @@ struct LabRootView: View {
                     ForEach(LabSection.allCases) { section in
                         Label(section.rawValue, systemImage: section.systemImage)
                             .tag(section)
+                            .accessibilityIdentifier("lab.section.\(section.rawValue.lowercased().replacingOccurrences(of: " ", with: "-"))")
                     }
                 }
 
@@ -58,6 +59,9 @@ struct LabRootView: View {
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .accessibilityLabel("Refresh virtual device lab")
+                .accessibilityIdentifier("lab.refresh")
+                .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.isBusy("refresh"))
 
                 Button {
@@ -65,6 +69,9 @@ struct LabRootView: View {
                 } label: {
                     Label("New Virtual Device", systemImage: "plus")
                 }
+                .accessibilityLabel("Create a new virtual device")
+                .accessibilityIdentifier("lab.create-device")
+                .keyboardShortcut("n", modifiers: .command)
             }
         }
         .sheet(isPresented: $showingCreateVM) {

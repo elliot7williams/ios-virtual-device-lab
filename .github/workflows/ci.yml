@@ -30,6 +30,10 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           test -f "$app/Contents/Resources/AppIcon.icns"
           test -f "$app/Contents/Resources/compatibility-manifest.json"
+          test -x "$app/Contents/MacOS/vdlctl"
+          "$app/Contents/MacOS/vdlctl" version
+          "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
+          test -f .build/vdl-dry-run/junit.xml
 
       - name: Upload app bundle
         uses: actions/upload-artifact@v4

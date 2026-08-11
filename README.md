@@ -27,6 +27,11 @@ A native macOS SwiftUI laboratory for virtual iOS research and cross-version app
 - Configurable test assertions, reusable IPA/TIPA artifacts, Markdown/JSON reports, and an ordered workflow editor.
 - Networking, audio-test, isolation, performance-monitoring, guest crash/log export, and snapshot-retention controls.
 - Xcode Run Script deployment helper plus trusted, checksum-pinned plugin permissions.
+- BuildManifest-based IPSW inspection that treats archive metadata—not the filename—as authoritative.
+- `vdlctl` headless workflows with resource budgets, launchd scheduling, and JSON/JUnit/HTML evidence.
+- Sanitized and optionally encrypted diagnostic exports, deterministic crash classification, and opt-in trusted analyzer plugins.
+- Real host-process disk-I/O telemetry, runtime audio capability evidence, richer visual/log/network/resource assertions, and explicit unsupported-feature reporting.
+- Developer ID/notarization/update-signing release infrastructure with verified update downloads.
 
 ## Requirements
 
@@ -56,6 +61,7 @@ For development:
 swift build
 swift test
 swift run IOSVirtualDeviceLab
+swift run vdlctl --help
 ```
 
 Homebrew and `/Applications/vphone-cli.app` installations are discovered automatically. For a local backend build, set `VPHONE_CLI_BIN` to its executable and, if needed, `VPHONE_VPHONED_PATH` to `vphoned.signed` before launching the manager.
@@ -69,7 +75,7 @@ To regenerate the macOS `.icns` bundle from the checked-in 1024 px master:
 To create a versioned ZIP and checksum:
 
 ```sh
-./scripts/release_app.sh 0.3.0
+./scripts/release_app.sh 0.4.0
 ```
 
 Developer ID signing and notarization are supported through `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE`; see [Release engineering](docs/RELEASES.md).

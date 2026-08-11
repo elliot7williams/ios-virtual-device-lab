@@ -20,6 +20,8 @@ The lab's [companion vphone patch](https://github.com/elliot7williams/vphone-cli
 
 Guest files that were never persisted, are protected from vphoned, or disappeared during a crash cannot be recovered by the manager.
 
+Standard diagnostic bundles are sanitized before presentation. Secret-like values, home paths, email addresses, and IP addresses are redacted according to the persisted privacy policy; large files and host profiles can be excluded. Redaction is best-effort and cannot guarantee that every project-specific secret format is recognized. Inspect the privacy preview before sharing a bundle.
+
 ## Pause behavior
 
 Pause uses `SIGSTOP`/`SIGCONT` on the VM processes holding the virtual disk. It freezes the process rather than creating a durable suspend image. Stop the VM before snapshots or host shutdown.
@@ -28,4 +30,10 @@ The backend resumes a paused VM before asking it to stop so the graceful-stop si
 
 ## Audio, network, and performance
 
-Network proxy injection, packet capture, virtual audio input/output fidelity, accessory simulation, GPU utilization, guest FPS, and guest disk-throughput counters depend on engine support. The UI stores these policies and reports unavailable measurements explicitly; it does not claim unsupported simulation.
+The current vphone engine provisions real Virtio host audio input and output. Its host-control capability response lets the manager distinguish a running audio-backed VM from a stored policy. Interruption behavior, Bluetooth/headphone simulation, and exact guest routing fidelity remain unavailable.
+
+CPU, resident memory, and process disk-I/O rates are measured from the real host VM processes. Virtualization.framework does not expose guest GPU utilization or rendered FPS, so those remain unavailable.
+
+NAT, bridged, and no-network modes are engine-backed. Proxy injection and packet capture require a separately trusted `network-policy` plugin; the app never claims that merely saving those fields changes guest traffic.
+
+Headless execution means unattended orchestration and reporting. vphone still creates the engine's required macOS VM process/window; this is not a display-less Virtualization.framework backend.

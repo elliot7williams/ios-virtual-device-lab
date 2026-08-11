@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.4.0
+
+- Added binary/XML `BuildManifest.plist` parsing for authoritative IPSW version, build, product-type, board, chip, and build-identity metadata.
+- Added the `vdlctl` headless runner, resource-aware multi-VM admission, launchd schedules, and JSON/JUnit/HTML reports.
+- Added secure diagnostic sanitization, privacy previews, encrypted exports, deterministic crash/boot/panic/resource/network/audio classification, and opt-in trusted analyzer plugins.
+- Added screenshot-content and baseline-diff assertions, expected-log/network/audio/CPU/memory assertions, and in-app resource policy controls.
+- Added runtime vphone audio capability evidence and real process disk-I/O rates while keeping proxy, packet capture, GPU, FPS, and accessory simulation explicitly gated.
+- Reworked the Xcode helper around stable `vdlctl deploy` exit codes and report artifacts.
+- Added Developer ID certificate import, App Store Connect notarization, signed update manifests, verified update downloads, and tagged GitHub Release infrastructure.
+- Added accessibility identifiers and labels for the main lab actions and diagnostic controls.
+
 ## 0.3.0
 
 - Expanded `LabBackend` into a typed, replaceable engine contract with backend identity, structured progress, performance sampling, and guest-diagnostic export.

@@ -106,6 +106,14 @@ private struct FirmwareRow: View {
                         .foregroundStyle(validation.state == .invalid ? .red : .secondary)
                         .lineLimit(2)
                 }
+                if let manifest = image.manifestMetadata {
+                    Text(
+                        "BuildManifest: iOS \(manifest.productVersion ?? "unknown") (\(manifest.productBuildVersion ?? "unknown")) • \(manifest.supportedProductTypes.count) product type(s) • \(manifest.buildIdentities.count) build identity record(s)"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                }
                 if image.kind == .iPhone {
                     let recommendation = model.firmwareRecommendation(for: image)
                     if let profile = recommendation.hardwareProfile {

@@ -19,16 +19,20 @@
 | Developer lab | App artifact library, configurable assertions/reports, workflow editor, Xcode helper |
 | Lab controls | Network/audio/isolation policy, performance dashboard, guest crash/log export, snapshot retention |
 | Extension security | Plugin API version, permissions, explicit trust, and checksum pinning |
+| Firmware truth | BuildManifest parsing overrides misleading filenames and preserves build identities |
+| Headless lab | `vdlctl`, resource admission, launchd schedules, and JSON/JUnit/HTML output |
+| Diagnostic privacy | Sanitization, preview, encrypted export, local classification, opt-in analyzer extension |
+| Production delivery | Developer ID/notary/update signing pipeline and verified update downloads |
 
 ## Next engineering milestones
 
 1. Complete and publish the first real baseline acceptance result after the required host restart and supported IPSW import.
 2. Validate guest diagnostic export against the companion vphone host-control build on a running guest.
 3. Run the ordered iOS 15 → 14 → 13 → 12 research matrix and update evidence only from reproducible results.
-4. Add UI-tree, screenshot-diff, audio-output, background-media, and app-specific assertions.
-5. Add real scheduling/CI execution around persisted workflow schedule/headless metadata.
-6. Populate Apple Developer credentials and publish a Developer ID signed, notarized release.
-7. Expand full application UI automation after a stable real-VM fixture exists.
+4. Add a guest accessibility-tree API before claiming UI-element assertions; screenshot-diff and host/log/resource assertions are implemented.
+5. Populate Apple Developer credentials and update-signing keys, then publish the first Developer ID signed and notarized release.
+6. Expand full application UI automation after a stable real-VM fixture exists.
+7. Research audio interruption/background-media and proxy/capture extensions without presenting unsupported simulation as available.
 
 ## Older-iOS compatibility research
 
