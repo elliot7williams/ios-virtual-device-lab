@@ -71,6 +71,12 @@ Test runs persist one result per selected VM. Every selected assertion produces 
 
 Automation is an ordered typed sequence with values, delays, retries, conditions, scheduling metadata, headless metadata, and failure behavior. The desktop orchestrator and the packaged `vdlctl` runner consume the same persisted workflow schema; the CLI adds resource admission, launchd installation, stable exit codes, and JSON/JUnit/HTML reports. Plugins are user-installed executable descriptors with API versions, permissions, explicit trust, and executable checksum pinning. They never auto-run and receive device context through narrowly named environment variables.
 
+### Operational readiness
+
+`ProductionHardeningState` loads migration history, interrupted-operation recovery, host compatibility evidence, environment profiles, storage policy, plugin audits, and remote-agent configuration away from the main actor. `AcceptanceEvaluator` derives a conservative release gate from real host, device, guest-protocol, assertion, and diagnostic evidence. `operation-journal.json` is written before destructive or multi-step backend work and is never used to delete data automatically.
+
+The guest protocol is negotiated through `LabBackend.guestProtocolHandshake`. Environment assignments remain stored test intent unless the backend or a trusted extension declares the corresponding capability. The remote/CI agent reuses `HeadlessRunner` through an HMAC-authenticated local queue rather than introducing a second orchestration engine.
+
 ## Replaceable backend
 
 Future backend implementations should conform to the same conceptual surface:

@@ -110,6 +110,8 @@ struct LabRootView: View {
             AutomationView()
         case .diagnostics:
             DiagnosticsPerformanceView()
+        case .operations:
+            LabOperationsView()
         case .developerTools:
             DeveloperToolsView()
         case .plugins:

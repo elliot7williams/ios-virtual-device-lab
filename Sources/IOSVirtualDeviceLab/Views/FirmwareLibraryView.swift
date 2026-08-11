@@ -114,6 +114,15 @@ private struct FirmwareRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                 }
+                if let provenance = image.provenance {
+                    Text(
+                        "Provenance: \(provenance.sourceKind.rawValue) • \(provenance.signingStatus.rawValue) • \(provenance.retentionPolicy.rawValue) • imported by \(provenance.importedBy)"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .help(provenance.ownershipNote)
+                }
                 if image.kind == .iPhone {
                     let recommendation = model.firmwareRecommendation(for: image)
                     if let profile = recommendation.hardwareProfile {

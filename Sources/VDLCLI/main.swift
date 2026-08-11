@@ -1,6 +1,7 @@
+import CryptoKit
 import Foundation
 
-private let cliVersion = "0.4.0"
+private let cliVersion = "0.5.0"
 
 struct CLIWorkflow: Codable, Sendable {
     let id: UUID
@@ -612,6 +613,236 @@ enum ScheduleInstaller {
     }
 }
 
+// MARK: - Authenticated file-queue agent
+
+struct AgentJobPayload: Codable, Sendable {
+    let schemaVersion: Int
+    let id: UUID
+    let createdAt: Date
+    let expiresAt: Date
+    let workflow: String
+    let devices: [String]
+    let appPath: String?
+    let outputDirectory: String
+    let dryRun: Bool
+    let resourcePolicy: ResourcePolicy
+}
+
+struct SignedAgentJob: Codable, Sendable {
+    let payload: AgentJobPayload
+    let signature: String
+}
+
+enum AgentJobState: String, Codable, Sendable {
+    case queued
+    case running
+    case passed
+    case failed
+    case rejected
+    case missing
+}
+
+struct AgentJobReceipt: Codable, Sendable {
+    let schemaVersion: Int
+    let jobID: UUID
+    let state: AgentJobState
+    let updatedAt: Date
+    let reportPath: String?
+    let message: String
+}
+
+enum AgentQueue {
+    static func initialize(queue: URL, tokenFile: URL) throws {
+        try prepare(queue)
+        guard !FileManager.default.fileExists(atPath: tokenFile.path) else {
+            throw CLIError.message("Token file already exists; refusing to overwrite it")
+        }
+        try FileManager.default.createDirectory(at: tokenFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let token = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
+        try token.write(to: tokenFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
+    }
+
+    static func submit(
+        queue: URL,
+        tokenFile: URL,
+        workflow: String,
+        devices: [String],
+        appPath: String?,
+        dryRun: Bool,
+        policy: ResourcePolicy,
+        validitySeconds: TimeInterval = 3_600
+    ) throws -> AgentJobPayload {
+        try prepare(queue)
+        let jobID = UUID()
+        let output = directory(queue, "Results")
+            .appendingPathComponent(jobID.uuidString, isDirectory: true)
+            .appendingPathComponent("Artifacts", isDirectory: true)
+        let payload = AgentJobPayload(
+            schemaVersion: 1,
+            id: jobID,
+            createdAt: .now,
+            expiresAt: Date().addingTimeInterval(max(60, validitySeconds)),
+            workflow: workflow,
+            devices: devices,
+            appPath: appPath,
+            outputDirectory: output.path,
+            dryRun: dryRun,
+            resourcePolicy: policy
+        )
+        let envelope = SignedAgentJob(payload: payload, signature: try signature(for: payload, tokenFile: tokenFile))
+        try JSONEncoder.lab.encode(envelope).write(
+            to: directory(queue, "Inbox").appendingPathComponent("\(jobID.uuidString).json"),
+            options: [.atomic, .completeFileProtectionUnlessOpen]
+        )
+        return payload
+    }
+
+    static func runOnce(queue: URL, tokenFile: URL) async throws -> AgentJobReceipt? {
+        try prepare(queue)
+        let inbox = directory(queue, "Inbox")
+        let candidates = try FileManager.default.contentsOfDirectory(
+            at: inbox,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension.lowercased() == "json" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard let source = candidates.first else { return nil }
+        let running = directory(queue, "Running").appendingPathComponent(source.lastPathComponent)
+        try FileManager.default.moveItem(at: source, to: running)
+
+        let envelope: SignedAgentJob
+        do {
+            envelope = try JSONDecoder.lab.decode(SignedAgentJob.self, from: Data(contentsOf: running))
+            guard try verify(envelope, tokenFile: tokenFile) else {
+                return try reject(envelope.payload.id, message: "HMAC signature is invalid", running: running, queue: queue)
+            }
+            guard envelope.payload.schemaVersion == 1 else {
+                return try reject(envelope.payload.id, message: "Unsupported job schema", running: running, queue: queue)
+            }
+            guard envelope.payload.expiresAt > .now else {
+                return try reject(envelope.payload.id, message: "Job expired before execution", running: running, queue: queue)
+            }
+            guard !envelope.payload.devices.isEmpty else {
+                return try reject(envelope.payload.id, message: "Job has no target devices", running: running, queue: queue)
+            }
+        } catch {
+            let fallbackID = UUID(uuidString: running.deletingPathExtension().lastPathComponent) ?? UUID()
+            return try reject(fallbackID, message: "Job envelope could not be decoded: \(error.localizedDescription)", running: running, queue: queue)
+        }
+
+        let payload = envelope.payload
+        let options = RunOptions(
+            workflowReference: payload.workflow,
+            devices: payload.devices,
+            appPath: payload.appPath,
+            outputDirectory: URL(fileURLWithPath: payload.outputDirectory),
+            dryRun: payload.dryRun,
+            policy: payload.resourcePolicy
+        )
+        let receipt: AgentJobReceipt
+        do {
+            let report = try await HeadlessRunner.run(options: options)
+            receipt = AgentJobReceipt(
+                schemaVersion: 1,
+                jobID: payload.id,
+                state: report.passed ? .passed : .failed,
+                updatedAt: .now,
+                reportPath: payload.outputDirectory,
+                message: report.passed ? "Headless workflow passed" : "Headless workflow completed with failures"
+            )
+        } catch {
+            receipt = AgentJobReceipt(
+                schemaVersion: 1,
+                jobID: payload.id,
+                state: .failed,
+                updatedAt: .now,
+                reportPath: payload.outputDirectory,
+                message: error.localizedDescription
+            )
+        }
+        try write(receipt, queue: queue)
+        try? FileManager.default.removeItem(at: running)
+        return receipt
+    }
+
+    static func status(queue: URL, jobID: UUID) -> AgentJobReceipt {
+        let receiptURL = directory(queue, "Results").appendingPathComponent("\(jobID.uuidString).json")
+        if let receipt = try? JSONDecoder.lab.decode(AgentJobReceipt.self, from: Data(contentsOf: receiptURL)) {
+            return receipt
+        }
+        if FileManager.default.fileExists(atPath: directory(queue, "Rejected").appendingPathComponent("\(jobID.uuidString).json").path) {
+            return AgentJobReceipt(schemaVersion: 1, jobID: jobID, state: .rejected, updatedAt: .now, reportPath: nil, message: "Job was rejected")
+        }
+        if FileManager.default.fileExists(atPath: directory(queue, "Running").appendingPathComponent("\(jobID.uuidString).json").path) {
+            return AgentJobReceipt(schemaVersion: 1, jobID: jobID, state: .running, updatedAt: .now, reportPath: nil, message: "Job is running")
+        }
+        if FileManager.default.fileExists(atPath: directory(queue, "Inbox").appendingPathComponent("\(jobID.uuidString).json").path) {
+            return AgentJobReceipt(schemaVersion: 1, jobID: jobID, state: .queued, updatedAt: .now, reportPath: nil, message: "Job is queued")
+        }
+        return AgentJobReceipt(schemaVersion: 1, jobID: jobID, state: .missing, updatedAt: .now, reportPath: nil, message: "Job was not found")
+    }
+
+    private static func prepare(_ queue: URL) throws {
+        for name in ["Inbox", "Running", "Results", "Rejected"] {
+            try FileManager.default.createDirectory(at: directory(queue, name), withIntermediateDirectories: true)
+        }
+    }
+
+    private static func directory(_ queue: URL, _ name: String) -> URL {
+        queue.appendingPathComponent(name, isDirectory: true)
+    }
+
+    private static func key(tokenFile: URL) throws -> SymmetricKey {
+        let text = try String(contentsOf: tokenFile, encoding: .utf8).trimmed
+        guard let data = Data(base64Encoded: text), data.count >= 32 else {
+            throw CLIError.message("Agent token is missing, malformed, or too short")
+        }
+        return SymmetricKey(data: data)
+    }
+
+    private static func signature(for payload: AgentJobPayload, tokenFile: URL) throws -> String {
+        let authentication = HMAC<SHA256>.authenticationCode(
+            for: try JSONEncoder.lab.encode(payload),
+            using: try key(tokenFile: tokenFile)
+        )
+        return Data(authentication).base64EncodedString()
+    }
+
+    private static func verify(_ envelope: SignedAgentJob, tokenFile: URL) throws -> Bool {
+        guard let signature = Data(base64Encoded: envelope.signature) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            signature,
+            authenticating: try JSONEncoder.lab.encode(envelope.payload),
+            using: try key(tokenFile: tokenFile)
+        )
+    }
+
+    private static func reject(
+        _ jobID: UUID,
+        message: String,
+        running: URL,
+        queue: URL
+    ) throws -> AgentJobReceipt {
+        let receipt = AgentJobReceipt(
+            schemaVersion: 1, jobID: jobID, state: .rejected,
+            updatedAt: .now, reportPath: nil, message: message
+        )
+        try JSONEncoder.lab.encode(receipt).write(
+            to: directory(queue, "Rejected").appendingPathComponent("\(jobID.uuidString).json"),
+            options: .atomic
+        )
+        try? FileManager.default.removeItem(at: running)
+        return receipt
+    }
+
+    private static func write(_ receipt: AgentJobReceipt, queue: URL) throws {
+        try JSONEncoder.lab.encode(receipt).write(
+            to: directory(queue, "Results").appendingPathComponent("\(receipt.jobID.uuidString).json"),
+            options: .atomic
+        )
+    }
+}
+
 enum CLIError: LocalizedError {
     case message(String)
     var errorDescription: String? {
@@ -621,6 +852,10 @@ enum CLIError: LocalizedError {
 }
 
 private let libraryRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vphone/VMs")
+private let defaultAgentRoot = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".vphone/VirtualDeviceLab/Remote Agent", isDirectory: true)
+private let defaultAgentQueue = defaultAgentRoot.appendingPathComponent("Queue", isDirectory: true)
+private let defaultAgentToken = defaultAgentRoot.appendingPathComponent("agent-token")
 private func vmRoot(_ name: String) -> URL { libraryRoot.appendingPathComponent(name) }
 private func resolveVPhone() -> String? {
     let environment = ProcessInfo.processInfo.environment["VPHONE_CLI_BIN"]
@@ -678,6 +913,11 @@ func usage() {
                  [--memory-budget-mb <n>] [--reserve-memory-mb <n>] [--max-cpu <percent>] [--dry-run]
       vdlctl deploy --device <name> --app <ipa> [--output <directory>]
       vdlctl schedule-install --workflow <file|id|name> --device <name> --interval-seconds <n> [--app <ipa>]
+      vdlctl agent-init [--queue <directory>] [--token-file <path>]
+      vdlctl agent-submit --workflow <file|id|name> --device <name> [--device <name> ...]
+                          [--app <ipa>] [--queue <directory>] [--token-file <path>] [--dry-run]
+      vdlctl agent-run-once [--queue <directory>] [--token-file <path>]
+      vdlctl agent-status --job <uuid> [--queue <directory>] [--json]
       vdlctl version
     """)
 }
@@ -740,6 +980,53 @@ enum VDLCLI {
                     appPath: value(after: "--app", in: arguments)
                 )
                 print("Installed schedule: \(url.path)")
+            case "agent-init":
+                let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
+                let token = value(after: "--token-file", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentToken
+                try AgentQueue.initialize(queue: queue, tokenFile: token)
+                print("Initialized authenticated agent queue: \(queue.path)")
+                print("Token file (0600): \(token.path)")
+            case "agent-submit":
+                guard let workflow = value(after: "--workflow", in: arguments) else {
+                    throw CLIError.message("--workflow is required")
+                }
+                let devices = values(after: "--device", in: arguments)
+                guard !devices.isEmpty else { throw CLIError.message("At least one --device is required") }
+                let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
+                let token = value(after: "--token-file", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentToken
+                var policy = ResourcePolicy.standard
+                if let value = value(after: "--max-concurrency", in: arguments).flatMap(Int.init) { policy.maximumConcurrentVMs = value }
+                if let value = value(after: "--memory-budget-mb", in: arguments).flatMap(Int.init) { policy.maximumAggregateMemoryMB = value }
+                let job = try AgentQueue.submit(
+                    queue: queue,
+                    tokenFile: token,
+                    workflow: workflow,
+                    devices: devices,
+                    appPath: value(after: "--app", in: arguments),
+                    dryRun: arguments.contains("--dry-run"),
+                    policy: policy
+                )
+                print("Queued authenticated job: \(job.id.uuidString)")
+            case "agent-run-once":
+                let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
+                let token = value(after: "--token-file", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentToken
+                if let receipt = try await AgentQueue.runOnce(queue: queue, tokenFile: token) {
+                    print("\(receipt.state.rawValue.uppercased()) — \(receipt.jobID.uuidString) — \(receipt.message)")
+                    exit(receipt.state == .passed ? 0 : 1)
+                }
+                print("No queued jobs")
+            case "agent-status":
+                guard let rawID = value(after: "--job", in: arguments), let jobID = UUID(uuidString: rawID) else {
+                    throw CLIError.message("--job must be a valid UUID")
+                }
+                let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
+                let receipt = AgentQueue.status(queue: queue, jobID: jobID)
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(receipt), as: UTF8.self))
+                } else {
+                    print("\(receipt.state.rawValue.uppercased()) — \(receipt.message)")
+                }
+                exit(receipt.state == .missing || receipt.state == .rejected ? 1 : 0)
             case "help", "--help", "-h":
                 usage()
             default:

@@ -30,10 +30,18 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           test -f "$app/Contents/Resources/AppIcon.icns"
           test -f "$app/Contents/Resources/compatibility-manifest.json"
+          test -f "$app/Contents/Resources/host-compatibility.json"
           test -x "$app/Contents/MacOS/vdlctl"
           "$app/Contents/MacOS/vdlctl" version
           "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
           test -f .build/vdl-dry-run/junit.xml
+          queue='.build/agent-smoke/Queue'
+          token='.build/agent-smoke/token'
+          "$app/Contents/MacOS/vdlctl" agent-init --queue "$queue" --token-file "$token"
+          job_output="$("$app/Contents/MacOS/vdlctl" agent-submit --workflow boot-smoke --device ci-placeholder --dry-run --queue "$queue" --token-file "$token")"
+          job_id="${job_output##*: }"
+          "$app/Contents/MacOS/vdlctl" agent-run-once --queue "$queue" --token-file "$token"
+          "$app/Contents/MacOS/vdlctl" agent-status --queue "$queue" --job "$job_id"
 
       - name: Upload app bundle
         uses: actions/upload-artifact@v4

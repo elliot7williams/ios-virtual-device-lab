@@ -271,6 +271,17 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertTrue(cancelled.cancelled)
     }
 
+    func testProcessExecutorEnforcesOutputLimitDuringExecution() {
+        let result = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/yes"),
+            timeout: 5,
+            maximumOutputBytes: 1_024
+        )
+        XCTAssertTrue(result.outputLimitExceeded)
+        XCTAssertLessThanOrEqual(result.output.lengthOfBytes(using: .utf8), 1_024)
+        XCTAssertTrue(result.cancelled)
+    }
+
     func testMockBackendAndBuiltInWorkflows() async {
         let backend: any LabBackend = MockLabBackend()
         let readiness = await backend.checkHost()
@@ -324,6 +335,9 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         )
         XCTAssertTrue(result.succeeded)
         XCTAssertTrue(result.output.contains("plugin diagnostics"))
+        let audit = PluginAuditStore.load(paths: paths)
+        XCTAssertEqual(audit.first?.pluginID, "test.echo")
+        XCTAssertTrue(audit.first?.sandboxed == true)
     }
 
     func testHardwareProfilesAndOlderIOSRecommendation() throws {
@@ -504,6 +518,160 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertTrue(text.contains("vdlctl"))
         XCTAssertTrue(text.contains("deploy --device"))
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper.path))
+    }
+
+    func testAcceptanceDefinitionRequiresRealEvidence() {
+        let device = VirtualDevice(
+            name: "music-lab", cpuCount: 6, memoryMB: 4_096, diskSizeBytes: 64 * 1_073_741_824,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil),
+            restoreInfo: RestoreInfoReport(
+                ios: OSVersionReport(version: "26.1", build: "23B85"),
+                cloudOS: OSVersionReport(version: "26.1", build: "23B85"),
+                variant: "regular", device: "iPhone17,3"
+            ),
+            udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/music-lab"),
+            diskURL: URL(fileURLWithPath: "/tmp/music-lab/Disk.img"), isRunning: false,
+            hardwareProfileID: "iphone-16-pro-a18"
+        )
+        let host = HostReadiness(
+            state: .ready, macOSVersion: "26.3", model: "Mac16,12", architecture: "arm64",
+            sipStatus: "enabled without debug", researchGuestsStatus: "enabled",
+            binaryPath: "/mock/vphone-cli", binaryExitCode: 0, nestedVirtualization: true, checkedAt: .now
+        )
+        let kinds: [TestAssertionKind] = [
+            .guestReady, .networkMode, .audioConfigured, .launchSucceeded,
+            .diagnosticsCollected, .maximumDuration,
+        ]
+        let results = kinds.map { kind in
+            TestAssertionResult(assertion: TestAssertion(kind), passed: true, message: "evidence")
+        }
+        let run = TestRunRecord(
+            id: UUID(), kind: .baselineAcceptance, name: "Baseline", packagePath: nil,
+            createdAt: .now, completedAt: .now, state: .passed,
+            results: [DeviceTestResult(
+                id: UUID(), deviceName: device.name, state: .passed, message: "passed",
+                screenshotPath: "/tmp/screen.png", diagnosticBundlePath: "/tmp/diagnostics",
+                startedAt: .now, completedAt: .now, assertionResults: results
+            )]
+        )
+        let handshake = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 2, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 2, capabilities: [.screenshots, .guestFiles],
+            maximumMessageBytes: 1_048_576, authenticated: true,
+            transport: "test", message: "compatible"
+        )
+        let report = AcceptanceEvaluator.evaluate(
+            host: host, device: device, testRuns: [run], capabilities: .vphone, handshake: handshake
+        )
+        XCTAssertTrue(report.isPassed)
+        XCTAssertEqual(report.gates.count, AcceptanceGateKind.allCases.count)
+    }
+
+    func testHostCompatibilityMatrixMatchesSpecificEvidence() {
+        let catalog = HostCompatibilityCatalog(
+            schemaVersion: 1,
+            records: [HostCompatibilityRecord(
+                id: "test", macOSPrefixes: ["26."], modelPrefixes: ["Mac16,"],
+                backendVersionPrefixes: ["*"], iosMajorVersions: [26], status: .validated,
+                evidence: "validated fixture", updatedAt: "2026-08-10"
+            )]
+        )
+        let host = HostReadiness(
+            state: .ready, macOSVersion: "26.3", model: "Mac16,12", architecture: "arm64",
+            sipStatus: "enabled", researchGuestsStatus: "enabled", binaryPath: "/mock",
+            binaryExitCode: 0, nestedVirtualization: true, checkedAt: .now
+        )
+        var device = VirtualDevice(
+            name: "test", cpuCount: 1, memoryMB: 1_024, diskSizeBytes: 1,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil),
+            restoreInfo: RestoreInfoReport(
+                ios: OSVersionReport(version: "26.1", build: "x"),
+                cloudOS: OSVersionReport(version: "26.1", build: "x"), variant: nil, device: nil
+            ), udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/test"),
+            diskURL: URL(fileURLWithPath: "/tmp/test/Disk.img"), isRunning: false
+        )
+        device.hardwareProfileID = "profile"
+        XCTAssertEqual(
+            HostCompatibilityDatabase.assess(catalog: catalog, host: host, backendVersion: nil, device: device).status,
+            .validated
+        )
+    }
+
+    func testSchemaMigrationBacksUpAndIsIdempotent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("migration-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        try Data("[]".utf8).write(to: paths.stateRoot.appendingPathComponent("activity.json"))
+        let first = try LabMigrationManager.migrate(paths: paths)
+        XCTAssertEqual(first.destinationVersion, LabMigrationManager.currentSchemaVersion)
+        XCTAssertFalse(first.applied.isEmpty)
+        XCTAssertNotNil(first.latestBackupPath)
+        let second = try LabMigrationManager.migrate(paths: paths)
+        XCTAssertTrue(second.applied.isEmpty)
+    }
+
+    func testOperationJournalRecoversInterruptedWork() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("journal-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let entry = OperationJournalEntry(
+            id: UUID(), kind: .restore, target: "restored-device", startedAt: .now,
+            updatedAt: .now, state: .running, phase: .restoring,
+            recoveryInstruction: "Verify the imported bundle", message: "running"
+        )
+        try OperationJournalStore.save([entry], paths: paths)
+        let recovered = try OperationJournalStore.recoverInterrupted(paths: paths)
+        XCTAssertEqual(recovered.first?.state, .interrupted)
+        XCTAssertEqual(recovered.first?.phase, .failed)
+    }
+
+    func testEnvironmentProfilesAndAssignmentsPersist() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("environment-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        XCTAssertGreaterThanOrEqual(EnvironmentProfileStore.load(paths: paths).count, 2)
+        let profileID = EnvironmentProfileStore.builtIns[0].id
+        try EnvironmentProfileStore.saveAssignments(["music-lab": profileID], paths: paths)
+        XCTAssertEqual(EnvironmentProfileStore.loadAssignments(paths: paths)["music-lab"], profileID)
+    }
+
+    func testGuestProtocolNegotiationRejectsUnknownVersion() {
+        let compatible = GuestProtocolNegotiator.negotiate(json: [
+            "protocol_version": 2,
+            "screenshots": true,
+            "maximum_message_bytes": 4096,
+            "authenticated": true,
+        ])
+        XCTAssertEqual(compatible.status, .compatible)
+        XCTAssertTrue(compatible.capabilities.contains(.screenshots))
+        XCTAssertEqual(compatible.maximumMessageBytes, 4096)
+        XCTAssertEqual(GuestProtocolNegotiator.negotiate(json: ["protocol_version": 99]).status, .incompatible)
+    }
+
+    func testStorageLifecycleDetectsDuplicateFirmware() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("storage-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        var first = FirmwareImage.inspect(root.appendingPathComponent("a.ipsw"))
+        var second = FirmwareImage.inspect(root.appendingPathComponent("b.ipsw"))
+        first.sha256 = "same"
+        second.sha256 = "same"
+        let inventory = StorageLifecycleManager.scan(
+            paths: paths, devices: [], firmware: [first, second], snapshots: [], policy: .standard
+        )
+        XCTAssertEqual(inventory.duplicateFirmware.count, 1)
+        XCTAssertTrue(inventory.warnings.contains { $0.contains("Duplicate") })
+    }
+
+    func testFirmwareInspectionRecordsProvenance() {
+        let image = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/test.ipsw"))
+        XCTAssertEqual(image.provenance?.sourceKind, .localImport)
+        XCTAssertEqual(image.provenance?.retentionPolicy, .keep)
+        XCTAssertTrue(image.provenance?.ownershipNote.contains("does not redistribute") == true)
     }
 
     private func makePaths(root: URL) -> LabPaths {

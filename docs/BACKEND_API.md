@@ -13,10 +13,13 @@ An adapter provides:
 - firmware import, structure validation, and compatibility association;
 - snapshot create, verify, restore, retention support, and deletion;
 - app deployment, screenshots, hardware input, and cancellation;
+- a versioned guest-protocol handshake with capabilities, payload limit, transport, and authentication status;
 - diagnostic bundles, bounded guest diagnostic export, and performance samples;
 - `LabProgressEvent` callbacks with operation, phase, fraction, and message.
 
 Unsupported capabilities must be reported as unavailable and return an explanatory result. They must not silently ignore a request while claiming success.
+
+Environment profiles are accepted as lab test intent. An adapter may apply only fields it can reproduce and must identify the rest as unsupported; saving a profile is not evidence that the guest changed.
 
 ## Engine adapter rule
 

@@ -14,6 +14,7 @@ private struct LocalBootstrapState: Sendable {
     let diagnosticPrivacy: DiagnosticPrivacyPolicy
     let xcodeIntegration: XcodeIntegrationStatus
     let logs: [LogEntry]
+    let hardening: ProductionHardeningState
 
     static func load(paths: LabPaths) throws -> LocalBootstrapState {
         try PluginRegistry.prepare(paths: paths)
@@ -23,6 +24,7 @@ private struct LocalBootstrapState: Sendable {
         decoder.dateDecodingStrategy = .iso8601
         let persistedLogs = (try? Data(contentsOf: activityURL))
             .flatMap { try? decoder.decode([LogEntry].self, from: $0) }
+        let hardening = try ProductionHardeningState.load(paths: paths)
 
         return LocalBootstrapState(
             compatibility: CompatibilityCatalog.load(paths: paths),
@@ -35,7 +37,8 @@ private struct LocalBootstrapState: Sendable {
             resourcePolicy: ResourcePolicyStore.load(paths: paths),
             diagnosticPrivacy: DiagnosticPrivacyStore.load(paths: paths),
             xcodeIntegration: DeveloperTools.inspect(paths: paths),
-            logs: Array((persistedLogs ?? []).suffix(2_000))
+            logs: Array((persistedLogs ?? []).suffix(2_000)),
+            hardening: hardening
         )
     }
 }
@@ -72,6 +75,18 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var updateState: UpdateState = .idle
     @Published private(set) var logs: [LogEntry] = []
     @Published private(set) var readiness: HostReadiness = .checking
+    @Published private(set) var acceptanceReport: AcceptanceReport = .empty
+    @Published private(set) var hostCompatibilityAssessment: HostCompatibilityAssessment = .unverified
+    @Published private(set) var hostCompatibilityCatalog: HostCompatibilityCatalog = .empty
+    @Published private(set) var migrationReport: LabMigrationReport = .none
+    @Published private(set) var operationJournalEntries: [OperationJournalEntry] = []
+    @Published private(set) var environmentProfiles: [EnvironmentProfile] = []
+    @Published private(set) var environmentAssignments: [String: UUID] = [:]
+    @Published private(set) var guestProtocolHandshakes: [String: GuestProtocolHandshake] = [:]
+    @Published private(set) var storagePolicy: LabStoragePolicy = .standard
+    @Published private(set) var storageInventory: LabStorageInventory = .empty
+    @Published private(set) var pluginAuditRecords: [PluginAuditRecord] = []
+    @Published private(set) var remoteAgentConfiguration: RemoteLabAgentConfiguration?
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
 
@@ -114,6 +129,14 @@ final class LabAppModel: ObservableObject {
             diagnosticPrivacy = localState.diagnosticPrivacy
             xcodeIntegration = localState.xcodeIntegration
             logs = localState.logs
+            migrationReport = localState.hardening.migrationReport
+            operationJournalEntries = localState.hardening.journalEntries
+            hostCompatibilityCatalog = localState.hardening.hostCatalog
+            environmentProfiles = localState.hardening.environmentProfiles
+            environmentAssignments = localState.hardening.environmentAssignments
+            storagePolicy = localState.hardening.storagePolicy
+            pluginAuditRecords = localState.hardening.pluginAudits
+            remoteAgentConfiguration = localState.hardening.remoteAgent
             backendDescriptor = await backend.descriptor
             backendCapabilities = await backend.capabilities
             appendLog(.info, scope: "lab", "Storage: \(paths.dataRoot.path)")
@@ -132,6 +155,7 @@ final class LabAppModel: ObservableObject {
         firmware = await backend.loadFirmware()
         normalizeSelection()
         busyKeys.remove("refresh")
+        await refreshOperationalReadiness()
 
         switch readiness.state {
         case .ready:
@@ -143,6 +167,120 @@ final class LabAppModel: ObservableObject {
             appendLog(.error, scope: "preflight", "This host cannot run the selected virtualization backend")
         }
         persistLogs()
+    }
+
+    // MARK: - Operational readiness
+
+    func refreshOperationalReadiness() async {
+        let device = selectedDevice ?? devices.first
+        if let device, device.isRunning {
+            guestProtocolHandshakes[device.id] = await backend.guestProtocolHandshake(for: device)
+        }
+        let handshake = device.flatMap { guestProtocolHandshakes[$0.id] }
+        acceptanceReport = AcceptanceEvaluator.evaluate(
+            host: readiness,
+            device: device,
+            testRuns: testRuns,
+            capabilities: backendCapabilities,
+            handshake: handshake
+        )
+        hostCompatibilityAssessment = HostCompatibilityDatabase.assess(
+            catalog: hostCompatibilityCatalog,
+            host: readiness,
+            backendVersion: backendDescriptor.version,
+            device: device
+        )
+
+        let labPaths = paths
+        let currentDevices = devices
+        let currentFirmware = firmware
+        let currentSnapshots = snapshots
+        let policy = storagePolicy
+        storageInventory = await Task.detached(priority: .utility) {
+            StorageLifecycleManager.scan(
+                paths: labPaths,
+                devices: currentDevices,
+                firmware: currentFirmware,
+                snapshots: currentSnapshots,
+                policy: policy
+            )
+        }.value
+        pluginAuditRecords = await Task.detached(priority: .utility) {
+            PluginAuditStore.load(paths: labPaths)
+        }.value
+    }
+
+    func probeGuestProtocol(for device: VirtualDevice) async {
+        guestProtocolHandshakes[device.id] = await backend.guestProtocolHandshake(for: device)
+        await refreshOperationalReadiness()
+    }
+
+    func applyEnvironmentProfile(_ profile: EnvironmentProfile, to device: VirtualDevice) async {
+        environmentAssignments[device.id] = profile.id
+        do {
+            try EnvironmentProfileStore.saveAssignments(environmentAssignments, paths: paths)
+            if let plugin = plugins.first(where: {
+                $0.capabilities.contains("environment-policy") && $0.trusted == true
+            }), let data = try? JSONEncoder().encode(profile), let json = String(data: data, encoding: .utf8) {
+                let result = await PluginRegistry.run(
+                    plugin,
+                    capability: "environment-policy",
+                    device: device,
+                    paths: paths,
+                    additionalEnvironment: ["LAB_ENVIRONMENT_PROFILE": json],
+                    onLine: logger(scope: "plugin:\(plugin.id)")
+                )
+                finish(result, scope: "plugin:\(plugin.id)", success: "Environment profile applied by trusted extension")
+            } else {
+                appendLog(
+                    .warning,
+                    scope: device.name,
+                    "Environment profile saved as test intent; unsupported guest simulations require a trusted environment-policy extension"
+                )
+                persistLogs()
+            }
+        } catch {
+            present(error, context: "Saving environment profile assignment")
+        }
+    }
+
+    func updateStoragePolicy(_ policy: LabStoragePolicy) async {
+        storagePolicy = policy
+        do {
+            try StorageLifecycleManager.savePolicy(policy, paths: paths)
+            await refreshOperationalReadiness()
+        } catch {
+            present(error, context: "Saving storage lifecycle policy")
+        }
+    }
+
+    func exportPortableConfiguration(to destination: URL) {
+        do {
+            let output = try StorageLifecycleManager.exportConfiguration(paths: paths, destination: destination)
+            appendLog(.success, scope: "storage", "Portable configuration exported without firmware, VM disks, or secrets")
+            persistLogs()
+            reveal(output)
+        } catch {
+            present(error, context: "Exporting portable lab configuration")
+        }
+    }
+
+    func initializeRemoteAgent() {
+        do {
+            remoteAgentConfiguration = try RemoteLabAgentBootstrap.initialize(paths: paths)
+            appendLog(.success, scope: "agent", "Initialized an authenticated local queue; the agent remains disabled until explicitly started")
+            persistLogs()
+        } catch {
+            present(error, context: "Initializing remote lab agent")
+        }
+    }
+
+    func resolveJournalEntry(_ entry: OperationJournalEntry) {
+        guard let index = operationJournalEntries.firstIndex(where: { $0.id == entry.id }) else { return }
+        operationJournalEntries[index].state = .resolved
+        operationJournalEntries[index].updatedAt = .now
+        operationJournalEntries[index].message = "Reviewed and resolved by the user."
+        try? OperationJournalStore.save(operationJournalEntries, paths: paths)
     }
 
     func refreshDevices() async {
@@ -224,6 +362,13 @@ final class LabAppModel: ObservableObject {
         }
         let key = "create:\(name)"
         busyKeys.insert(key)
+        beginJournal(
+            id: operationID,
+            kind: .create,
+            target: name,
+            phase: .preparing,
+            recovery: "Remove an incomplete VM bundle only after confirming no backend process is using its disk."
+        )
         appendLog(
             .command,
             scope: name,
@@ -234,6 +379,7 @@ final class LabAppModel: ObservableObject {
             onProgress: progressHandler(scope: name),
             onLine: logger(scope: name)
         )
+        finishJournal(id: operationID, result: result)
         finish(result, scope: name, success: "VM creation completed")
         busyKeys.remove(key)
         await refreshDevices()
@@ -249,7 +395,15 @@ final class LabAppModel: ObservableObject {
             return
         }
         let key = "launch:\(device.id)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .boot,
+            target: device.name,
+            phase: .booting,
+            recovery: "Re-scan the VM process and socket; stop the device before retrying if either remains active."
+        )
         let packageSuffix = installPackage.map { " and installing \($0.lastPathComponent)" } ?? ""
         appendLog(.command, scope: device.name, "Launching VM\(packageSuffix)")
 
@@ -263,6 +417,7 @@ final class LabAppModel: ObservableObject {
             installPackage: installPackage,
             onLine: logger(scope: device.name)
         )
+        finishJournal(id: journalID, result: result)
         finish(result, scope: device.name, success: "VM process exited cleanly")
         busyKeys.remove(key)
         await refreshDevices()
@@ -315,9 +470,18 @@ final class LabAppModel: ObservableObject {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { alertMessage = "Enter a name for the clone."; return }
         let key = "clone:\(device.id)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .create,
+            target: trimmed,
+            phase: .exporting,
+            recovery: "Verify the clone bundle and remove it only if its config or disk copy is incomplete."
+        )
         appendLog(.command, scope: device.name, "Cloning as \(trimmed)")
         let result = await backend.clone(device, as: trimmed, onLine: logger(scope: device.name))
+        finishJournal(id: journalID, result: result)
         finish(result, scope: device.name, success: "Clone created: \(trimmed)")
         busyKeys.remove(key)
         await refreshDevices()
@@ -398,9 +562,18 @@ final class LabAppModel: ObservableObject {
             return
         }
         let key = "delete:\(device.id)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .configure,
+            target: device.name,
+            phase: .cleaningUp,
+            recovery: "Re-scan the device library. Preserve any remaining bundle until its ownership is confirmed."
+        )
         appendLog(.command, scope: device.name, "Deleting VM bundle")
         let result = await backend.deleteVM(device, onLine: logger(scope: device.name))
+        finishJournal(id: journalID, result: result)
         finish(result, scope: device.name, success: "VM deleted")
         busyKeys.remove(key)
         await refreshDevices()
@@ -417,13 +590,22 @@ final class LabAppModel: ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { alertMessage = "Enter a snapshot name."; return }
         let key = "snapshot:\(device.id)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .snapshot,
+            target: "\(device.name)/\(trimmed)",
+            phase: .exporting,
+            recovery: "Discard an incomplete archive and its sidecar only after checksum verification fails."
+        )
         appendLog(.command, scope: device.name, "Creating snapshot “\(trimmed)”")
         let (result, _) = await backend.createSnapshot(
             of: device,
             named: trimmed,
             onLine: logger(scope: device.name)
         )
+        finishJournal(id: journalID, result: result)
         finish(result, scope: device.name, success: "Snapshot created")
         busyKeys.remove(key)
         snapshots = await backend.loadSnapshots()
@@ -437,13 +619,22 @@ final class LabAppModel: ObservableObject {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { alertMessage = "Enter a name for the restored VM."; return }
         let key = "restore:\(snapshot.id.uuidString)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .restore,
+            target: trimmed,
+            phase: .restoring,
+            recovery: "Preserve the source snapshot; verify or remove only the newly imported incomplete VM bundle."
+        )
         appendLog(.command, scope: snapshot.sourceVM, "Restoring “\(snapshot.name)” as \(trimmed)")
         let result = await backend.restoreSnapshot(
             snapshot,
             as: trimmed,
             onLine: logger(scope: snapshot.sourceVM)
         )
+        finishJournal(id: journalID, result: result)
         finish(result, scope: snapshot.sourceVM, success: "Snapshot restored as \(trimmed)")
         busyKeys.remove(key)
         await refreshDevices()
@@ -1405,6 +1596,41 @@ final class LabAppModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func beginJournal(
+        id: UUID = UUID(),
+        kind: LabOperationKind,
+        target: String,
+        phase: LabOperationPhase,
+        recovery: String
+    ) {
+        operationJournalEntries.insert(
+            OperationJournalEntry(
+                id: id,
+                kind: kind,
+                target: target,
+                startedAt: .now,
+                updatedAt: .now,
+                state: .running,
+                phase: phase,
+                recoveryInstruction: recovery,
+                message: "Operation started."
+            ),
+            at: 0
+        )
+        try? OperationJournalStore.save(operationJournalEntries, paths: paths)
+    }
+
+    private func finishJournal(id: UUID, result: CommandResult) {
+        guard let index = operationJournalEntries.firstIndex(where: { $0.id == id }) else { return }
+        operationJournalEntries[index].updatedAt = .now
+        operationJournalEntries[index].state = result.succeeded ? .completed : .failed
+        operationJournalEntries[index].phase = result.succeeded ? .completed : (result.cancelled ? .cancelled : .failed)
+        operationJournalEntries[index].message = result.succeeded
+            ? "Operation completed successfully."
+            : "Operation exited with status \(result.exitCode). Review logs before cleanup or retry."
+        try? OperationJournalStore.save(operationJournalEntries, paths: paths)
     }
 
     private func finish(_ result: CommandResult, scope: String, success: String) {

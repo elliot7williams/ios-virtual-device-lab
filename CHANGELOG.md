@@ -2,7 +2,18 @@
 
 ## Unreleased
 
-- Kept startup storage discovery and plugin trust operations off the SwiftUI main actor, and added deadlines to host probes so slow external volumes or helper commands cannot freeze the app window.
+## 0.5.0
+
+- Added explicit real-VM acceptance definitions and evidence-gated release status.
+- Added a versioned host/macOS/backend/iOS compatibility matrix and upgrade guard.
+- Added idempotent state migrations, automatic pre-migration backups, rollback support, and a crash-recovery operation journal.
+- Added reproducible environment profiles for locale, timezone, appearance, accessibility size, orientation, power/thermal/storage pressure, location, permissions, and network conditions.
+- Added versioned guest-control negotiation with capability, authentication, transport, and message-size reporting.
+- Added lab storage quotas, reserves, inventory, duplicate-IPSW detection, and configuration-only portable exports.
+- Added firmware source, checksum, signing, ownership, and retention provenance.
+- Added deny-by-default plugin write/network isolation, runtime/output limits, and persistent execution auditing.
+- Added an authenticated HMAC-signed `vdlctl` queue for remote and CI job submission, execution, and status reporting.
+- Kept startup storage discovery and plugin trust operations off the SwiftUI main actor, and bounded host probes so slow external volumes or helper commands cannot freeze the app window.
 
 ## 0.4.0
 

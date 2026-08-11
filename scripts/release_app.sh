@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-VERSION="${1:-0.4.0}"
+VERSION="${1:-0.5.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(plutil -extract CFBundleVersion raw "$ROOT/Info.plist")}"
 DIST="$ROOT/.dist"
 APP="$ROOT/.build/iOS Virtual Device Lab.app"

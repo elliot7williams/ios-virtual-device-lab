@@ -32,6 +32,9 @@ A native macOS SwiftUI laboratory for virtual iOS research and cross-version app
 - Sanitized and optionally encrypted diagnostic exports, deterministic crash classification, and opt-in trusted analyzer plugins.
 - Real host-process disk-I/O telemetry, runtime audio capability evidence, richer visual/log/network/resource assertions, and explicit unsupported-feature reporting.
 - Developer ID/notarization/update-signing release infrastructure with verified update downloads.
+- Operational-readiness dashboard with explicit acceptance gates, host compatibility evidence, migration/rollback status, and interrupted-operation recovery.
+- Reproducible environment profiles, versioned guest-protocol negotiation, storage lifecycle governance, and firmware provenance.
+- Sandboxed/audited plugins plus an authenticated HMAC-signed `vdlctl` queue for remote and CI execution.
 
 ## Requirements
 
@@ -75,7 +78,7 @@ To regenerate the macOS `.icns` bundle from the checked-in 1024 px master:
 To create a versioned ZIP and checksum:
 
 ```sh
-./scripts/release_app.sh 0.4.0
+./scripts/release_app.sh 0.5.0
 ```
 
 Developer ID signing and notarization are supported through `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE`; see [Release engineering](docs/RELEASES.md).
@@ -102,6 +105,6 @@ To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/
 - VM creation uses the backend’s native authentication dialog rather than storing a sudo password.
 - The manager never weakens SIP/AMFI itself.
 
-See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
+See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), [Operational readiness](docs/OPERATIONAL_READINESS.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
 
-Also read [Compatibility](docs/COMPATIBILITY.md), [Limitations](docs/LIMITATIONS.md), and [Plugin development](docs/PLUGINS.md). An entry marked `researching` or `unverified` is never a support claim.
+Also read [Compatibility](docs/COMPATIBILITY.md), [Limitations](docs/LIMITATIONS.md), [Remote agent](docs/REMOTE_AGENT.md), and [Plugin development](docs/PLUGINS.md). An entry marked `researching` or `unverified` is never a support claim.

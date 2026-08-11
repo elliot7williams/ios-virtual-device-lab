@@ -71,6 +71,7 @@ protocol LabBackend: Sendable {
     func storageCheck(requiredBytes: Int64) async -> StorageCheck
     func captureScreenshot(_ device: VirtualDevice, destination: URL) async -> ControlResponse
     func sendHardwareKey(_ device: VirtualDevice, name: String) async -> ControlResponse
+    func guestProtocolHandshake(for device: VirtualDevice) async -> GuestProtocolHandshake
     func createDiagnosticBundle(
         for device: VirtualDevice,
         activityLog: String
@@ -278,6 +279,20 @@ actor MockLabBackend: LabBackend {
 
     func sendHardwareKey(_ device: VirtualDevice, name: String) -> ControlResponse {
         ControlResponse(succeeded: true, path: nil, error: nil, imageData: nil)
+    }
+
+    func guestProtocolHandshake(for device: VirtualDevice) -> GuestProtocolHandshake {
+        GuestProtocolHandshake(
+            status: .compatible,
+            negotiatedVersion: 2,
+            minimumSupportedVersion: 1,
+            maximumSupportedVersion: 2,
+            capabilities: [.screenshots, .hardwareKeys, .guestFiles, .audioOutput, .networking],
+            maximumMessageBytes: 1_048_576,
+            authenticated: true,
+            transport: "Mock in-memory transport",
+            message: "Mock guest protocol v2"
+        )
     }
 
     func createDiagnosticBundle(for device: VirtualDevice, activityLog: String) -> DiagnosticBundle {

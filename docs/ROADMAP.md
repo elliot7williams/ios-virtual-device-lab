@@ -23,6 +23,15 @@
 | Headless lab | `vdlctl`, resource admission, launchd schedules, and JSON/JUnit/HTML output |
 | Diagnostic privacy | Sanitization, preview, encrypted export, local classification, opt-in analyzer extension |
 | Production delivery | Developer ID/notary/update signing pipeline and verified update downloads |
+| Operational acceptance | Explicit host, firmware, boot/control, network, audio, deployment, snapshot, diagnostic, and stability gates |
+| Host upgrade safety | Versioned macOS/model/backend/iOS compatibility evidence and unverified-host warnings |
+| State evolution | Idempotent schema migrations, automatic backups, rollback, and interrupted-operation journal |
+| Test reproducibility | Assignable locale/timezone/appearance/accessibility/power/pressure/location/network profiles with capability gating |
+| Guest contract | Protocol-version negotiation, declared capabilities, transport/authentication status, and payload limits |
+| Storage governance | Quotas, free-space reserves, category inventory, duplicate firmware detection, and configuration-only exports |
+| Firmware provenance | Source, importer, checksum, signing, ownership, and retention records |
+| Plugin containment | Sandboxed writes/network, bounded execution/output, audit history, trust, and per-run initiation |
+| Remote/CI execution | HMAC-authenticated file queue with submit, run-once, result, and status commands |
 
 ## Next engineering milestones
 
@@ -33,6 +42,8 @@
 5. Populate Apple Developer credentials and update-signing keys, then publish the first Developer ID signed and notarized release.
 6. Expand full application UI automation after a stable real-VM fixture exists.
 7. Research audio interruption/background-media and proxy/capture extensions without presenting unsupported simulation as available.
+8. Add a guest accessibility-tree capability before allowing UI-element assertions to pass.
+9. Convert the authenticated queue into a supervised self-hosted runner only after threat-model review and key-rotation support.
 
 ## Older-iOS compatibility research
 
@@ -53,4 +64,4 @@ For each release, record:
 - app deployment and developer API limitations;
 - reproducible failure logs and required patches.
 
-An IPSW appearing in the firmware catalog is not a support claim. The UI should eventually distinguish `supported`, `experimental`, `researching`, and `incompatible` pairings based on a versioned compatibility manifest.
+An IPSW appearing in the firmware catalog is not a support claim. The UI distinguishes `supported`, `experimental`, `researching`, `incompatible`, and `unverified` pairings from versioned evidence, while the acceptance report remains gated until a real workflow passes.

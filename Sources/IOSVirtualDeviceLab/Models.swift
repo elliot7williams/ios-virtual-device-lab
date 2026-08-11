@@ -9,6 +9,7 @@ enum LabSection: String, CaseIterable, Identifiable {
     case testRuns = "Test Runs"
     case automation = "Automation"
     case diagnostics = "Diagnostics & Performance"
+    case operations = "Lab Operations"
     case developerTools = "Developer Tools"
     case plugins = "Plugins"
     case activity = "Activity"
@@ -25,6 +26,7 @@ enum LabSection: String, CaseIterable, Identifiable {
         case .testRuns: "checklist"
         case .automation: "flowchart"
         case .diagnostics: "waveform.path.ecg"
+        case .operations: "checkmark.shield"
         case .developerTools: "hammer"
         case .plugins: "puzzlepiece.extension"
         case .activity: "text.alignleft"
@@ -153,6 +155,7 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
     var compatibilityStatus: CompatibilityStatus? = nil
     var recommendedProfileID: String? = nil
     var manifestMetadata: IPSWManifestMetadata? = nil
+    var provenance: FirmwareProvenance? = nil
 
     var url: URL { URL(fileURLWithPath: path) }
 
@@ -185,7 +188,8 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
             version: parsed.version,
             build: parsed.build,
             sizeBytes: size,
-            importedAt: importedAt
+            importedAt: importedAt,
+            provenance: .localImport(path: url.path, importedAt: importedAt)
         )
     }
 }
@@ -493,6 +497,7 @@ struct CommandResult: Sendable {
     let exitCode: Int32
     var timedOut: Bool = false
     var cancelled: Bool = false
+    var outputLimitExceeded: Bool = false
     var duration: TimeInterval = 0
 
     var succeeded: Bool { exitCode == 0 }
@@ -666,6 +671,7 @@ struct PluginDescriptor: Identifiable, Codable, Hashable, Sendable {
     var executableSHA256: String?
     var trusted: Bool?
     var permissions: [String]?
+    var sandbox: PluginSandboxPolicy?
 
     init(
         id: String,
@@ -678,7 +684,8 @@ struct PluginDescriptor: Identifiable, Codable, Hashable, Sendable {
         apiVersion: Int? = 1,
         executableSHA256: String? = nil,
         trusted: Bool? = false,
-        permissions: [String]? = nil
+        permissions: [String]? = nil,
+        sandbox: PluginSandboxPolicy? = nil
     ) {
         self.id = id
         self.name = name
@@ -691,6 +698,7 @@ struct PluginDescriptor: Identifiable, Codable, Hashable, Sendable {
         self.executableSHA256 = executableSHA256
         self.trusted = trusted
         self.permissions = permissions
+        self.sandbox = sandbox
     }
 }
 

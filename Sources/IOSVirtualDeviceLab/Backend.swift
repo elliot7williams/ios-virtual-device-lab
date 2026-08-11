@@ -41,9 +41,18 @@ final class StreamAccumulator: @unchecked Sendable {
     private var completeOutput = ""
     private var pendingLine = ""
     private let onLine: @Sendable (String) -> Void
+    private let maximumOutputBytes: Int?
+    private let onLimitExceeded: @Sendable () -> Void
+    private var exceededLimit = false
 
-    init(onLine: @escaping @Sendable (String) -> Void) {
+    init(
+        maximumOutputBytes: Int? = nil,
+        onLine: @escaping @Sendable (String) -> Void,
+        onLimitExceeded: @escaping @Sendable () -> Void = {}
+    ) {
+        self.maximumOutputBytes = maximumOutputBytes
         self.onLine = onLine
+        self.onLimitExceeded = onLimitExceeded
     }
 
     func consume(_ data: Data) {
@@ -53,9 +62,22 @@ final class StreamAccumulator: @unchecked Sendable {
 
     func consume(_ text: String) {
         var completed: [String] = []
+        var reachedLimit = false
         lock.lock()
-        completeOutput += text
-        pendingLine += text
+        guard !exceededLimit else { lock.unlock(); return }
+        var accepted = text
+        if let maximumOutputBytes {
+            let currentBytes = completeOutput.lengthOfBytes(using: .utf8)
+            let remaining = max(0, maximumOutputBytes - currentBytes)
+            let incoming = Data(text.utf8)
+            if incoming.count > remaining {
+                accepted = String(decoding: incoming.prefix(remaining), as: UTF8.self)
+                exceededLimit = true
+                reachedLimit = true
+            }
+        }
+        completeOutput += accepted
+        pendingLine += accepted
         let pieces = pendingLine.components(separatedBy: .newlines)
         if pieces.count > 1 {
             completed = Array(pieces.dropLast())
@@ -63,6 +85,7 @@ final class StreamAccumulator: @unchecked Sendable {
         }
         lock.unlock()
         for line in completed where !line.isEmpty { onLine(line) }
+        if reachedLimit { onLimitExceeded() }
     }
 
     func finish() -> String {
@@ -77,6 +100,12 @@ final class StreamAccumulator: @unchecked Sendable {
         if !tail.isEmpty { onLine(tail) }
         return output
     }
+
+    var outputLimitExceeded: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return exceededLimit
+    }
 }
 
 enum ProcessExecutor {
@@ -87,6 +116,7 @@ enum ProcessExecutor {
         environment additions: [String: String] = [:],
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
+        maximumOutputBytes: Int? = nil,
         control: ProcessControl? = nil,
         onLine: @escaping @Sendable (String) -> Void = { _ in }
     ) -> CommandResult {
@@ -94,7 +124,12 @@ enum ProcessExecutor {
         let process = Process()
         let outputPipe = Pipe()
         let inputPipe = Pipe()
-        let accumulator = StreamAccumulator(onLine: onLine)
+        let processControl = control ?? ProcessControl()
+        let accumulator = StreamAccumulator(
+            maximumOutputBytes: maximumOutputBytes,
+            onLine: onLine,
+            onLimitExceeded: { processControl.cancel() }
+        )
 
         process.executableURL = executable
         process.arguments = arguments
@@ -103,8 +138,8 @@ enum ProcessExecutor {
         process.standardError = outputPipe
         process.standardInput = inputPipe
         process.environment = ProcessInfo.processInfo.environment.merging(additions) { _, new in new }
-        control?.attach(process)
-        defer { control?.detach() }
+        processControl.attach(process)
+        defer { processControl.detach() }
 
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             accumulator.consume(handle.availableData)
@@ -116,7 +151,7 @@ enum ProcessExecutor {
                 inputPipe.fileHandleForWriting.write(standardInput)
             }
             try? inputPipe.fileHandleForWriting.close()
-            if control?.isCancellationRequested == true, process.isRunning {
+            if processControl.isCancellationRequested, process.isRunning {
                 process.interrupt()
             }
         } catch {
@@ -135,20 +170,20 @@ enum ProcessExecutor {
         var timedOut = false
         if let timeout {
             let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline && control?.isCancellationRequested != true {
+            while process.isRunning && Date() < deadline && !processControl.isCancellationRequested {
                 Thread.sleep(forTimeInterval: 0.05)
             }
-            if process.isRunning && control?.isCancellationRequested != true {
+            if process.isRunning && !processControl.isCancellationRequested {
                 timedOut = true
                 process.interrupt()
             }
         } else {
-            while process.isRunning && control?.isCancellationRequested != true {
+            while process.isRunning && !processControl.isCancellationRequested {
                 Thread.sleep(forTimeInterval: 0.05)
             }
         }
 
-        if process.isRunning && control?.isCancellationRequested == true {
+        if process.isRunning && processControl.isCancellationRequested {
             process.interrupt()
         }
         if process.isRunning {
@@ -174,7 +209,8 @@ enum ProcessExecutor {
             output: accumulator.finish(),
             exitCode: status,
             timedOut: timedOut,
-            cancelled: control?.isCancellationRequested == true,
+            cancelled: processControl.isCancellationRequested,
+            outputLimitExceeded: accumulator.outputLimitExceeded,
             duration: Date().timeIntervalSince(startedAt)
         )
     }
@@ -186,6 +222,7 @@ enum ProcessExecutor {
         environment additions: [String: String] = [:],
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
+        maximumOutputBytes: Int? = nil,
         control: ProcessControl? = nil,
         onLine: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> CommandResult {
@@ -199,6 +236,7 @@ enum ProcessExecutor {
                     environment: additions,
                     standardInput: standardInput,
                     timeout: timeout,
+                    maximumOutputBytes: maximumOutputBytes,
                     control: control,
                     onLine: onLine
                 )
@@ -949,6 +987,20 @@ actor VPhoneBackend: LabBackend {
         sendControl(to: device, payload: ["t": "key", "name": name, "screen": false])
     }
 
+    func guestProtocolHandshake(for device: VirtualDevice) -> GuestProtocolHandshake {
+        GuestProtocolNegotiator.negotiate(
+            json: sendControlJSON(
+                to: device,
+                payload: [
+                    "t": "capabilities",
+                    "protocol_min": GuestProtocolNegotiator.supported.lowerBound,
+                    "protocol_max": GuestProtocolNegotiator.supported.upperBound,
+                    "screen": false,
+                ]
+            ).json
+        )
+    }
+
     private func sendControl(to device: VirtualDevice, payload: [String: Any]) -> ControlResponse {
         let response = sendControlJSON(to: device, payload: payload)
         guard let json = response.json else {
@@ -1437,6 +1489,14 @@ actor VPhoneBackend: LabBackend {
             : (issues.isEmpty ? .valid : .warning)
 
         records[index].sha256 = digest
+        if records[index].provenance == nil {
+            records[index].provenance = .localImport(
+                path: records[index].path,
+                importedAt: records[index].importedAt
+            )
+        }
+        records[index].provenance?.checksumSHA256 = digest
+        records[index].provenance?.signingStatus = structurallyInvalid ? .invalid : .verifiedMetadata
         records[index].compatibilityStatus = compatibilityStatus
         records[index].validation = FirmwareValidation(
             state: state,

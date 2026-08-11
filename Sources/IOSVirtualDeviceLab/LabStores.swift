@@ -101,7 +101,16 @@ enum PluginRegistry {
               "description": "Optional diagnostics integration",
               "apiVersion": 1,
               "trusted": false,
-              "permissions": ["diagnostics"]
+              "permissions": ["diagnostics"],
+              "sandbox": {
+                "enabled": true,
+                "allowNetwork": false,
+                "allowDeviceRead": false,
+                "allowTemporaryFiles": true,
+                "timeoutSeconds": 120,
+                "maximumOutputBytes": 5242880,
+                "requirePerRunApproval": true
+              }
             }
             ```
 
@@ -194,13 +203,68 @@ enum PluginRegistry {
             environment["LAB_DEVICE_NAME"] = device.name
             environment["LAB_DEVICE_BUNDLE"] = device.bundleURL.path
         }
-        return await ProcessExecutor.runAsync(
-            executable: URL(fileURLWithPath: plugin.executable),
-            arguments: plugin.arguments + [capability],
+        let policy = plugin.sandbox ?? .standard
+        let sandboxExecutable = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+        if policy.enabled && !FileManager.default.isExecutableFile(atPath: sandboxExecutable.path) {
+            return CommandResult(
+                executable: plugin.executable,
+                arguments: plugin.arguments + [capability],
+                output: "The plugin requires sandbox isolation, but sandbox-exec is unavailable on this host",
+                exitCode: 69
+            )
+        }
+        let executable = policy.enabled ? sandboxExecutable : URL(fileURLWithPath: plugin.executable)
+        let arguments = policy.enabled
+            ? [
+                "-p",
+                PluginSandboxProfile.make(
+                    executable: plugin.executable,
+                    outputRoot: outputRoot,
+                    deviceRoot: device?.bundleURL,
+                    policy: policy
+                ),
+                plugin.executable,
+            ] + plugin.arguments + [capability]
+            : plugin.arguments + [capability]
+        let startedAt = Date()
+        let result = await ProcessExecutor.runAsync(
+            executable: executable,
+            arguments: arguments,
             environment: environment,
-            timeout: 300,
+            timeout: TimeInterval(max(1, policy.timeoutSeconds)),
+            maximumOutputBytes: max(1, policy.maximumOutputBytes),
             onLine: onLine
         )
+        let outputBytes = result.output.lengthOfBytes(using: .utf8)
+        try? PluginAuditStore.append(
+            PluginAuditRecord(
+                id: UUID(),
+                pluginID: plugin.id,
+                capability: capability,
+                startedAt: startedAt,
+                completedAt: .now,
+                deviceName: device?.name,
+                sandboxed: policy.enabled,
+                networkAllowed: policy.allowNetwork,
+                exitCode: result.exitCode,
+                timedOut: result.timedOut,
+                outputBytes: outputBytes
+            ),
+            paths: paths
+        )
+        if result.outputLimitExceeded {
+            return CommandResult(
+                executable: result.executable,
+                arguments: result.arguments,
+                output: "Plugin output exceeded the \(policy.maximumOutputBytes)-byte audit limit and was rejected",
+                exitCode: 70,
+                timedOut: result.timedOut,
+                cancelled: result.cancelled,
+                outputLimitExceeded: true,
+                duration: result.duration
+            )
+        }
+        return result
     }
 
     static func setTrusted(_ plugin: PluginDescriptor, trusted: Bool, paths: LabPaths) throws {

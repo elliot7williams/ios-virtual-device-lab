@@ -46,3 +46,5 @@ This writes and bootstraps a per-user plist in `~/Library/LaunchAgents`. The des
 ## CI boundary
 
 Public GitHub-hosted runners can build the app and dry-run workflow schemas, but they cannot enable Apple's research-guest policy or provide the required real VM fixture. Real VM execution therefore belongs on a physically controlled Apple-silicon self-hosted runner with no production Apple IDs or secrets inside guests.
+
+For authenticated job submission to such a host, use the file-queue commands documented in [Remote agent](REMOTE_AGENT.md): `agent-init`, `agent-submit`, `agent-run-once`, and `agent-status`. The queue deliberately has no network listener.
