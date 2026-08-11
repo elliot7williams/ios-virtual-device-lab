@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.6.0
+
+- Added a first-class backend registry that distinguishes active adapters, planned adapters, research-only projects, and non-executable product benchmarks.
+- Added per-backend capability/evidence records for boot, lifecycle, firmware, hardware, snapshots, graphics, audio, networking, deployment, debugging, automation, and older-iOS research.
+- Added conservative firmware-specific backend recommendations that never promote QEMU research or Corellium references into runnable fallbacks.
+- Added a machine-readable third-party provenance catalog covering sources, exact pins, license/terms, source-code use, modifications, distribution status, obligations, and review state.
+- Added the Backends & Attribution SwiftUI workspace and backend recommendations in the firmware library.
+- Reconciled project-comparison and attribution policy into the architecture, acceptance, limitations, roadmap, and third-party documentation.
+
 ## 0.5.0
 
 - Added explicit real-VM acceptance definitions and evidence-gated release status.

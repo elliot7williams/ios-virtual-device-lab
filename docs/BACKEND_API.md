@@ -30,3 +30,5 @@ The vphone adapter stores lab-only profile, network, audio, and isolation metada
 ## Combining projects
 
 New engines should be added as separate adapters. Code from another project should not be pasted into SwiftUI or merged wholesale. Record its provenance, preserve its license boundary, implement this contract, and expose only capabilities that were validated.
+
+The backend registry is descriptive, not executable. Adding an entry to `backend-catalog.json` does not register process launch code. A backend becomes selectable only after a concrete `LabBackend` implementation exists and its catalog record is marked `activeAdapter` and `selectable`. Reference-only entries are permanently excluded from recommendation candidates.

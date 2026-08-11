@@ -26,6 +26,8 @@ cp "$ROOT/Assets/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 cp "$ROOT/Resources/compatibility-manifest.json" "$CONTENTS/Resources/compatibility-manifest.json"
 cp "$ROOT/Resources/hardware-profiles.json" "$CONTENTS/Resources/hardware-profiles.json"
 cp "$ROOT/Resources/host-compatibility.json" "$CONTENTS/Resources/host-compatibility.json"
+cp "$ROOT/Resources/backend-catalog.json" "$CONTENTS/Resources/backend-catalog.json"
+cp "$ROOT/Resources/third-party-catalog.json" "$CONTENTS/Resources/third-party-catalog.json"
 if [[ -n "${UPDATE_PUBLIC_KEY_PATH:-}" ]]; then
     cp "$UPDATE_PUBLIC_KEY_PATH" "$CONTENTS/Resources/update-public-key.pem"
 fi

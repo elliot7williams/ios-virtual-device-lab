@@ -11,3 +11,5 @@ A release may be built without a runnable research guest, but it may not claim r
 An environment-blocked report is useful evidence but is not a pass. Host Recovery settings, missing IPSWs, unavailable Developer ID identities, unsupported guest capabilities, and insufficient storage remain explicit blockers rather than being mocked.
 
 The **Lab Operations** dashboard expands this into explicit host, firmware identity, boot/control, networking, audio, deployment, snapshot/restore, diagnostics, and sustained-stability gates. Every gate remains pending or blocked until its required evidence exists.
+
+A new backend cannot be promoted from `plannedAdapter` or `researchOnly` to selectable until its exact implementation is pinned, licensing obligations are reviewed, host readiness is implemented, capability claims have evidence, and at least one firmware-specific acceptance run passes. A commercial reference platform is never eligible for promotion without a separately authorized integration.

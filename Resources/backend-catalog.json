@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-11",
+  "entries": [
+    {
+      "id": "com.virtualdevicelab.vphone",
+      "name": "vphone-cli",
+      "role": "Primary VM and boot backend",
+      "sourceURL": "https://github.com/Lakr233/vphone-cli",
+      "license": "MIT",
+      "version": "upstream 545fd35 + companion eb6aba7",
+      "integrationState": "activeAdapter",
+      "selectable": true,
+      "capabilities": [
+        { "capability": "appleSilicon", "level": "supported", "evidence": "The adapter targets Apple Silicon and the host preflight reports architecture." },
+        { "capability": "iosBoot", "level": "supported", "evidence": "Boot is available for firmware pairings with recorded compatibility evidence." },
+        { "capability": "vmLifecycle", "level": "supported", "evidence": "Create, boot, stop, pause, resume, clone, and delete are mapped through the typed adapter." },
+        { "capability": "firmware", "level": "supported", "evidence": "The adapter handles local IPSWs and automatic supported pairings." },
+        { "capability": "virtualHardware", "level": "partial", "evidence": "CPU, memory, storage, display targeting, audio, and networking are configurable; fidelity remains profile- and guest-dependent." },
+        { "capability": "snapshots", "level": "partial", "evidence": "The lab provides verified export/import snapshots rather than engine-native live snapshots." },
+        { "capability": "cloning", "level": "supported", "evidence": "VM bundles can be cloned through the adapter." },
+        { "capability": "graphics", "level": "experimental", "evidence": "Display is available, but GPU acceleration and utilization evidence are not available." },
+        { "capability": "audio", "level": "partial", "evidence": "Host-backed Virtio input/output is reported; interruptions, accessories, and exact routing fidelity are unavailable." },
+        { "capability": "networking", "level": "partial", "evidence": "NAT, bridged, and no-network modes are mapped; proxy and capture require trusted extensions." },
+        { "capability": "appDeployment", "level": "supported", "evidence": "Development app deployment is mapped through the guest channel." },
+        { "capability": "debugging", "level": "partial", "evidence": "Logs, crashes, screenshots, and diagnostics are available; a general guest shell and accessibility tree are not." },
+        { "capability": "automation", "level": "supported", "evidence": "Typed workflows, vdlctl, test matrices, and the authenticated queue use the adapter." },
+        { "capability": "olderIOS", "level": "experimental", "evidence": "iOS 12–15 profiles are research targets without project boot evidence." }
+      ],
+      "notes": [
+        "This is the only runnable backend in version 0.6.",
+        "Availability still depends on host Recovery policy and supported firmware."
+      ]
+    },
+    {
+      "id": "org.qemu.qemu",
+      "name": "QEMU research",
+      "role": "Potential alternative emulation/research backend",
+      "sourceURL": "https://www.qemu.org/",
+      "license": "GPL-2.0 overall; individual components vary",
+      "version": "Unpinned — no adapter or redistributed component",
+      "integrationState": "plannedAdapter",
+      "selectable": false,
+      "capabilities": [
+        { "capability": "appleSilicon", "level": "partial", "evidence": "QEMU runs on macOS and can use Hypervisor.framework, but no lab adapter has been validated." },
+        { "capability": "iosBoot", "level": "experimental", "evidence": "iOS work is separate research; this project has no QEMU iOS boot evidence." },
+        { "capability": "vmLifecycle", "level": "unknown", "evidence": "Generic QEMU lifecycle exists, but no typed iOS adapter is implemented." },
+        { "capability": "firmware", "level": "experimental", "evidence": "Firmware and boot-chain handling would require a separate reviewed research integration." },
+        { "capability": "virtualHardware", "level": "experimental", "evidence": "QEMU is highly configurable, but iPhone hardware fidelity is unverified." },
+        { "capability": "snapshots", "level": "partial", "evidence": "QEMU supports generic VM state and disk mechanisms; iOS compatibility is unverified." },
+        { "capability": "cloning", "level": "unknown", "evidence": "No lab adapter exists." },
+        { "capability": "graphics", "level": "experimental", "evidence": "iOS graphics/device emulation remains a research problem." },
+        { "capability": "audio", "level": "experimental", "evidence": "Generic audio backends do not establish iOS audio fidelity." },
+        { "capability": "networking", "level": "partial", "evidence": "Generic networking exists, but the proposed iOS profile has not been validated." },
+        { "capability": "appDeployment", "level": "unknown", "evidence": "No guest deployment channel is integrated." },
+        { "capability": "debugging", "level": "experimental", "evidence": "QEMU research tooling is potentially useful but not connected to the lab." },
+        { "capability": "automation", "level": "partial", "evidence": "QEMU is scriptable; the lab has no QEMU adapter." },
+        { "capability": "olderIOS", "level": "experimental", "evidence": "A research candidate only, with no support claim or automatic fallback." }
+      ],
+      "notes": [
+        "Shown to guide adapter research, not as an install or launch option.",
+        "A pinned component-level license review is required before code or binaries are distributed."
+      ]
+    },
+    {
+      "id": "com.corellium.reference",
+      "name": "Corellium benchmark",
+      "role": "Commercial product and developer-experience benchmark",
+      "sourceURL": "https://www.corellium.com/",
+      "license": "Proprietary / commercial",
+      "version": "Not applicable — reference only",
+      "integrationState": "referenceOnly",
+      "selectable": false,
+      "capabilities": [
+        { "capability": "appleSilicon", "level": "benchmark", "evidence": "Public product behavior may inform independent UX goals." },
+        { "capability": "iosBoot", "level": "benchmark", "evidence": "Feature benchmark only; no code or service integration." },
+        { "capability": "vmLifecycle", "level": "benchmark", "evidence": "Feature benchmark only." },
+        { "capability": "firmware", "level": "benchmark", "evidence": "Feature benchmark only." },
+        { "capability": "virtualHardware", "level": "benchmark", "evidence": "Feature benchmark only." },
+        { "capability": "snapshots", "level": "benchmark", "evidence": "Workflow benchmark only." },
+        { "capability": "cloning", "level": "benchmark", "evidence": "Workflow benchmark only." },
+        { "capability": "graphics", "level": "benchmark", "evidence": "Feature benchmark only." },
+        { "capability": "audio", "level": "benchmark", "evidence": "Testing-experience benchmark only." },
+        { "capability": "networking", "level": "benchmark", "evidence": "Testing-experience benchmark only." },
+        { "capability": "appDeployment", "level": "benchmark", "evidence": "Developer-workflow benchmark only." },
+        { "capability": "debugging", "level": "benchmark", "evidence": "Research-workflow benchmark only." },
+        { "capability": "automation", "level": "benchmark", "evidence": "Automation-experience benchmark only." },
+        { "capability": "olderIOS", "level": "benchmark", "evidence": "Compatibility-experience benchmark only." }
+      ],
+      "notes": [
+        "Never selectable as a backend.",
+        "No proprietary source, binary, API, or service is incorporated."
+      ]
+    }
+  ]
+}

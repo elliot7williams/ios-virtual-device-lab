@@ -674,6 +674,51 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertTrue(image.provenance?.ownershipNote.contains("does not redistribute") == true)
     }
 
+    func testBackendAndAttributionCatalogsPreserveIntegrationBoundaries() {
+        let paths = makePaths(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let backends = ProjectCatalogLoader.loadBackends(paths: paths)
+        let attribution = ProjectCatalogLoader.loadAttribution(paths: paths)
+
+        XCTAssertEqual(backends.entries.filter(\.isRunnable).map(\.id), ["com.virtualdevicelab.vphone"])
+        XCTAssertEqual(backends.entry(id: "org.qemu.qemu")?.integrationState, .plannedAdapter)
+        XCTAssertFalse(backends.entry(id: "org.qemu.qemu")?.selectable ?? true)
+        XCTAssertEqual(backends.entry(id: "com.corellium.reference")?.integrationState, .referenceOnly)
+        XCTAssertFalse(backends.entry(id: "com.corellium.reference")?.selectable ?? true)
+        XCTAssertTrue(attribution.completenessIssues.isEmpty)
+        XCTAssertEqual(attribution.records.first(where: { $0.id == "vphone-cli" })?.license, "MIT")
+        XCTAssertFalse(attribution.records.first(where: { $0.id == "qemu" })?.distributedWithApp ?? true)
+    }
+
+    func testBackendRecommendationDoesNotPromoteResearchCandidateToRunnable() {
+        let paths = makePaths(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let backends = ProjectCatalogLoader.loadBackends(paths: paths)
+        let compatibility = CompatibilityCatalog.load(paths: paths)
+        let supported = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/iPhone17,3_18.6.2_22G100_Restore.ipsw"))
+        let oldResearch = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/iPhone10,6_14.8_18H17_Restore.ipsw"))
+
+        let supportedRecommendation = BackendRecommendationEvaluator.recommend(
+            firmware: supported,
+            catalog: backends,
+            compatibility: compatibility,
+            activeBackendID: "com.virtualdevicelab.vphone",
+            hostReady: true
+        )
+        XCTAssertEqual(supportedRecommendation.verdict, .ready)
+        XCTAssertEqual(supportedRecommendation.selectedBackendID, "com.virtualdevicelab.vphone")
+
+        let researchRecommendation = BackendRecommendationEvaluator.recommend(
+            firmware: oldResearch,
+            catalog: backends,
+            compatibility: compatibility,
+            activeBackendID: "com.virtualdevicelab.vphone",
+            hostReady: true
+        )
+        XCTAssertEqual(researchRecommendation.verdict, .unavailable)
+        XCTAssertNil(researchRecommendation.selectedBackendID)
+        XCTAssertTrue(researchRecommendation.researchCandidateIDs.contains("org.qemu.qemu"))
+        XCTAssertFalse(researchRecommendation.researchCandidateIDs.contains("com.corellium.reference"))
+    }
+
     private func makePaths(root: URL) -> LabPaths {
         LabPaths(
             dataRoot: root,

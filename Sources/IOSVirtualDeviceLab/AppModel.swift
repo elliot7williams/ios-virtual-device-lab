@@ -5,6 +5,8 @@ import SwiftUI
 private struct LocalBootstrapState: Sendable {
     let compatibility: CompatibilityManifest
     let hardwareProfiles: HardwareProfileCatalog
+    let backendCatalog: BackendCatalog
+    let attributionCatalog: AttributionCatalog
     let testRuns: [TestRunRecord]
     let workflows: [AutomationWorkflow]
     let plugins: [PluginDescriptor]
@@ -29,6 +31,8 @@ private struct LocalBootstrapState: Sendable {
         return LocalBootstrapState(
             compatibility: CompatibilityCatalog.load(paths: paths),
             hardwareProfiles: HardwareProfilesCatalog.load(paths: paths),
+            backendCatalog: ProjectCatalogLoader.loadBackends(paths: paths),
+            attributionCatalog: ProjectCatalogLoader.loadAttribution(paths: paths),
             testRuns: TestRunStore.load(paths: paths),
             workflows: WorkflowStore.load(paths: paths),
             plugins: PluginRegistry.loadPlugins(paths: paths),
@@ -50,6 +54,8 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var devices: [VirtualDevice] = []
     @Published private(set) var firmware: [FirmwareImage] = []
     @Published private(set) var hardwareProfiles: HardwareProfileCatalog = .empty
+    @Published private(set) var backendCatalog: BackendCatalog = .empty
+    @Published private(set) var attributionCatalog: AttributionCatalog = .empty
     @Published private(set) var snapshots: [SnapshotRecord] = []
     @Published private(set) var compatibility: CompatibilityManifest = .empty
     @Published private(set) var testRuns: [TestRunRecord] = []
@@ -120,6 +126,8 @@ final class LabAppModel: ObservableObject {
             }.value
             compatibility = localState.compatibility
             hardwareProfiles = localState.hardwareProfiles
+            backendCatalog = localState.backendCatalog
+            attributionCatalog = localState.attributionCatalog
             testRuns = localState.testRuns
             workflows = localState.workflows
             plugins = localState.plugins
@@ -800,6 +808,16 @@ final class LabAppModel: ObservableObject {
             catalog: compatibility,
             profiles: hardwareProfiles,
             availableFirmware: firmware
+        )
+    }
+
+    func backendRecommendation(for image: FirmwareImage) -> BackendRecommendation {
+        BackendRecommendationEvaluator.recommend(
+            firmware: image,
+            catalog: backendCatalog,
+            compatibility: compatibility,
+            activeBackendID: backendDescriptor.id,
+            hostReady: readiness.isReady
         )
     }
 

@@ -102,6 +102,8 @@ struct LabRootView: View {
             HardwareProfilesView()
         case .compatibility:
             CompatibilityView()
+        case .backends:
+            BackendAttributionView()
         case .snapshots:
             SnapshotsView()
         case .testRuns:

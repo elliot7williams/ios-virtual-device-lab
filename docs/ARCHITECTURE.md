@@ -43,6 +43,10 @@ LabBackend protocol
 
 `hardware-profiles.json` describes virtual device identity, SoC, CPU, memory, disk, display, GPU, networking, and iOS version range. `compatibility-manifest.json` records boot status, device profiles, cloudOS pairing, evidence, known issues, required patches, and app-deployment support. Importing an IPSW identifies its version/build/device and combines both databases into a recommendation. VM creation blocks incompatible or mismatched inputs and requires acknowledgement for experimental or unverified inputs.
 
+`backend-catalog.json` is separate from runtime adapters. It records implemented, planned, research-only, and reference-only engines plus capability evidence. `BackendRecommendationEvaluator` may select only a catalog entry that is both an active adapter and selectable. A QEMU research record can explain a future direction but cannot become an automatic fallback. A Corellium benchmark record can never execute.
+
+`third-party-catalog.json` is the machine-readable provenance registry surfaced by the app. It records source, license or terms, exact version/pinning status, integration state, source-code use, modifications, distribution status, and obligations. Human-readable policy remains in `THIRD_PARTY.md`.
+
 ### Read-only scanner
 
 VM discovery reads the backend-compatible `config.plist` and `restore-info.json` formats directly. This lets the library remain visible when the entitled backend binary is blocked by host policy.
@@ -91,3 +95,5 @@ Future backend implementations should conform to the same conceptual surface:
 - accept network, audio, isolation, and hardware-profile policy even when reporting a capability as unsupported.
 
 No UI view should need to know the command-line syntax of a backend.
+
+Before an adapter becomes selectable it must also have a pinned source/version, completed license review, host preflight, capability evidence, failure-safe implementation, and at least one reproducible firmware acceptance record. Catalog presence alone is never enablement.

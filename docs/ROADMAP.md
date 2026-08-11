@@ -32,6 +32,8 @@
 | Firmware provenance | Source, importer, checksum, signing, ownership, and retention records |
 | Plugin containment | Sandboxed writes/network, bounded execution/output, audit history, trust, and per-run initiation |
 | Remote/CI execution | HMAC-authenticated file queue with submit, run-once, result, and status commands |
+| Multi-backend governance | Capability/evidence registry, conservative firmware recommendation, non-selectable research/reference entries |
+| Attribution governance | Machine-readable source/license/version/modification/obligation records surfaced in the app |
 
 ## Next engineering milestones
 
@@ -44,6 +46,7 @@
 7. Research audio interruption/background-media and proxy/capture extensions without presenting unsupported simulation as available.
 8. Add a guest accessibility-tree capability before allowing UI-element assertions to pass.
 9. Convert the authenticated queue into a supervised self-hosted runner only after threat-model review and key-rotation support.
+10. Prototype a QEMU adapter only after choosing a pinned research implementation, completing component-level licensing review, and recording a reproducible iOS boot experiment.
 
 ## Older-iOS compatibility research
 

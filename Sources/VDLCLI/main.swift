@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-private let cliVersion = "0.5.0"
+private let cliVersion = "0.6.0"
 
 struct CLIWorkflow: Codable, Sendable {
     let id: UUID

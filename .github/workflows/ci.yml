@@ -31,6 +31,8 @@ jobs:
           test -f "$app/Contents/Resources/AppIcon.icns"
           test -f "$app/Contents/Resources/compatibility-manifest.json"
           test -f "$app/Contents/Resources/host-compatibility.json"
+          test -f "$app/Contents/Resources/backend-catalog.json"
+          test -f "$app/Contents/Resources/third-party-catalog.json"
           test -x "$app/Contents/MacOS/vdlctl"
           "$app/Contents/MacOS/vdlctl" version
           "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run

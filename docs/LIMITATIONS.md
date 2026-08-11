@@ -37,3 +37,7 @@ CPU, resident memory, and process disk-I/O rates are measured from the real host
 NAT, bridged, and no-network modes are engine-backed. Proxy injection and packet capture require a separately trusted `network-policy` plugin; the app never claims that merely saving those fields changes guest traffic.
 
 Headless execution means unattended orchestration and reporting. vphone still creates the engine's required macOS VM process/window; this is not a display-less Virtualization.framework backend.
+
+## Backend catalog
+
+Version 0.6 has one runnable adapter: vphone-cli. The QEMU entry is a planned research candidate with no integrated executable, iOS boot evidence, or automatic fallback. The Corellium entry is a reference-only product benchmark; no proprietary code, binary, API, account, or service is incorporated. Capability labels describe recorded evidence and must not be interpreted as equivalence between these projects.
