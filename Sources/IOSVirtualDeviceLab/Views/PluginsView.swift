@@ -66,7 +66,9 @@ struct PluginsView: View {
             }
             Spacer()
             Button("Reveal Folder") { model.reveal(PluginRegistry.root(paths: model.paths)) }
-            Button("Reload", systemImage: "arrow.clockwise") { model.reloadPlugins() }
+            Button("Reload", systemImage: "arrow.clockwise") {
+                Task { await model.reloadPlugins() }
+            }
         }
         .padding(18)
     }
@@ -83,7 +85,7 @@ struct PluginsView: View {
                 LabeledContent("Permissions", value: (plugin.permissions ?? plugin.capabilities).joined(separator: ", "))
                 if let description = plugin.description { Text(description).foregroundStyle(.secondary) }
                 Button(plugin.trusted == true ? "Revoke Trust" : "Review and Trust…", role: plugin.trusted == true ? .destructive : nil) {
-                    model.setPluginTrusted(plugin, trusted: plugin.trusted != true)
+                    Task { await model.setPluginTrusted(plugin, trusted: plugin.trusted != true) }
                 }
             }
             Section("Run") {

@@ -242,19 +242,36 @@ actor VPhoneBackend: LabBackend {
 
     func checkHost() -> HostReadiness {
         let swVers = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/bin/sw_vers"), arguments: ["-productVersion"])
+            executable: URL(fileURLWithPath: "/usr/bin/sw_vers"),
+            arguments: ["-productVersion"],
+            timeout: 5
+        )
         let architecture = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/bin/uname"), arguments: ["-m"])
+            executable: URL(fileURLWithPath: "/usr/bin/uname"),
+            arguments: ["-m"],
+            timeout: 5
+        )
         let model = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/sbin/sysctl"), arguments: ["-n", "hw.model"])
+            executable: URL(fileURLWithPath: "/usr/sbin/sysctl"),
+            arguments: ["-n", "hw.model"],
+            timeout: 5
+        )
         let hypervisor = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/sbin/sysctl"), arguments: ["-n", "kern.hv_vmm_present"])
+            executable: URL(fileURLWithPath: "/usr/sbin/sysctl"),
+            arguments: ["-n", "kern.hv_vmm_present"],
+            timeout: 5
+        )
         let sip = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/bin/csrutil"), arguments: ["status"])
+            executable: URL(fileURLWithPath: "/usr/bin/csrutil"),
+            arguments: ["status"],
+            timeout: 10
+        )
 
         let research = researchGuestStatus()
         let binary = resolveBinary()
-        let binaryCheck = binary.map { ProcessExecutor.run(executable: $0, arguments: ["--help"]) }
+        let binaryCheck = binary.map {
+            ProcessExecutor.run(executable: $0, arguments: ["--help"], timeout: 20)
+        }
 
         let arch = architecture.output.trimmed
         let nested = hypervisor.output.trimmed == "1"
@@ -289,8 +306,10 @@ actor VPhoneBackend: LabBackend {
         let initial = ProcessExecutor.run(
             executable: csrutil,
             arguments: ["allow-research-guests", "status"],
-            standardInput: Data()
+            standardInput: Data(),
+            timeout: 10
         )
+        if initial.timedOut { return "Research-guest policy check timed out" }
         guard initial.output.contains("Pick a macOS installation") else {
             return initial.output.trimmed.nilIfEmpty ?? "Unavailable"
         }
@@ -306,8 +325,10 @@ actor VPhoneBackend: LabBackend {
         let chosen = ProcessExecutor.run(
             executable: csrutil,
             arguments: ["allow-research-guests", "status"],
-            standardInput: Data("\(number)\n".utf8)
+            standardInput: Data("\(number)\n".utf8),
+            timeout: 10
         )
+        if chosen.timedOut { return "Research-guest policy selection timed out" }
         if let statusRange = chosen.output.range(of: "Allow Research Guests status:") {
             return String(chosen.output[statusRange.lowerBound...])
                 .components(separatedBy: .newlines)

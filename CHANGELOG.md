@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Kept startup storage discovery and plugin trust operations off the SwiftUI main actor, and added deadlines to host probes so slow external volumes or helper commands cannot freeze the app window.
+
 ## 0.4.0
 
 - Added binary/XML `BuildManifest.plist` parsing for authoritative IPSW version, build, product-type, board, chip, and build-identity metadata.

@@ -2,6 +2,44 @@ import AppKit
 import Foundation
 import SwiftUI
 
+private struct LocalBootstrapState: Sendable {
+    let compatibility: CompatibilityManifest
+    let hardwareProfiles: HardwareProfileCatalog
+    let testRuns: [TestRunRecord]
+    let workflows: [AutomationWorkflow]
+    let plugins: [PluginDescriptor]
+    let appArtifacts: [AppArtifact]
+    let snapshotRetention: SnapshotRetentionPolicy
+    let resourcePolicy: LabResourcePolicy
+    let diagnosticPrivacy: DiagnosticPrivacyPolicy
+    let xcodeIntegration: XcodeIntegrationStatus
+    let logs: [LogEntry]
+
+    static func load(paths: LabPaths) throws -> LocalBootstrapState {
+        try PluginRegistry.prepare(paths: paths)
+
+        let activityURL = paths.stateRoot.appendingPathComponent("activity.json")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let persistedLogs = (try? Data(contentsOf: activityURL))
+            .flatMap { try? decoder.decode([LogEntry].self, from: $0) }
+
+        return LocalBootstrapState(
+            compatibility: CompatibilityCatalog.load(paths: paths),
+            hardwareProfiles: HardwareProfilesCatalog.load(paths: paths),
+            testRuns: TestRunStore.load(paths: paths),
+            workflows: WorkflowStore.load(paths: paths),
+            plugins: PluginRegistry.loadPlugins(paths: paths),
+            appArtifacts: AppArtifactStore.load(paths: paths),
+            snapshotRetention: SnapshotRetentionStore.load(paths: paths),
+            resourcePolicy: ResourcePolicyStore.load(paths: paths),
+            diagnosticPrivacy: DiagnosticPrivacyStore.load(paths: paths),
+            xcodeIntegration: DeveloperTools.inspect(paths: paths),
+            logs: Array((persistedLogs ?? []).suffix(2_000))
+        )
+    }
+}
+
 @MainActor
 final class LabAppModel: ObservableObject {
     @Published var selectedSection: LabSection = .devices
@@ -61,20 +99,23 @@ final class LabAppModel: ObservableObject {
         didBootstrap = true
         do {
             try await backend.prepareStorage()
-            try PluginRegistry.prepare(paths: paths)
-            compatibility = CompatibilityCatalog.load(paths: paths)
-            hardwareProfiles = HardwareProfilesCatalog.load(paths: paths)
-            testRuns = TestRunStore.load(paths: paths)
-            workflows = WorkflowStore.load(paths: paths)
-            plugins = PluginRegistry.loadPlugins(paths: paths)
-            appArtifacts = AppArtifactStore.load(paths: paths)
-            snapshotRetention = SnapshotRetentionStore.load(paths: paths)
-            resourcePolicy = ResourcePolicyStore.load(paths: paths)
-            diagnosticPrivacy = DiagnosticPrivacyStore.load(paths: paths)
-            xcodeIntegration = DeveloperTools.inspect(paths: paths)
+            let labPaths = paths
+            let localState = try await Task.detached(priority: .userInitiated) {
+                try LocalBootstrapState.load(paths: labPaths)
+            }.value
+            compatibility = localState.compatibility
+            hardwareProfiles = localState.hardwareProfiles
+            testRuns = localState.testRuns
+            workflows = localState.workflows
+            plugins = localState.plugins
+            appArtifacts = localState.appArtifacts
+            snapshotRetention = localState.snapshotRetention
+            resourcePolicy = localState.resourcePolicy
+            diagnosticPrivacy = localState.diagnosticPrivacy
+            xcodeIntegration = localState.xcodeIntegration
+            logs = localState.logs
             backendDescriptor = await backend.descriptor
             backendCapabilities = await backend.capabilities
-            loadPersistedLogs()
             appendLog(.info, scope: "lab", "Storage: \(paths.dataRoot.path)")
             await refreshAll()
             Task { await checkForUpdates(automatic: true) }
@@ -1223,14 +1264,20 @@ final class LabAppModel: ObservableObject {
         persistLogs()
     }
 
-    func reloadPlugins() {
-        plugins = PluginRegistry.loadPlugins(paths: paths)
+    func reloadPlugins() async {
+        let labPaths = paths
+        plugins = await Task.detached(priority: .utility) {
+            PluginRegistry.loadPlugins(paths: labPaths)
+        }.value
     }
 
-    func setPluginTrusted(_ plugin: PluginDescriptor, trusted: Bool) {
+    func setPluginTrusted(_ plugin: PluginDescriptor, trusted: Bool) async {
         do {
-            try PluginRegistry.setTrusted(plugin, trusted: trusted, paths: paths)
-            reloadPlugins()
+            let labPaths = paths
+            plugins = try await Task.detached(priority: .userInitiated) {
+                try PluginRegistry.setTrusted(plugin, trusted: trusted, paths: labPaths)
+                return PluginRegistry.loadPlugins(paths: labPaths)
+            }.value
             appendLog(
                 trusted ? .warning : .info,
                 scope: "plugin:\(plugin.id)",
@@ -1402,15 +1449,6 @@ final class LabAppModel: ObservableObject {
 
     private var activityURL: URL {
         paths.stateRoot.appendingPathComponent("activity.json")
-    }
-
-    private func loadPersistedLogs() {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let data = try? Data(contentsOf: activityURL),
-              let records = try? decoder.decode([LogEntry].self, from: data)
-        else { return }
-        logs = Array(records.suffix(2_000))
     }
 
     private func persistLogs() {
