@@ -555,9 +555,10 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             )]
         )
         let handshake = GuestProtocolHandshake(
-            status: .compatible, negotiatedVersion: 2, minimumSupportedVersion: 1,
-            maximumSupportedVersion: 2, capabilities: [.screenshots, .guestFiles],
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.screenshots, .guestFiles],
             maximumMessageBytes: 1_048_576, authenticated: true,
+            replayProtected: true, authenticationClockSkewSeconds: 30,
             transport: "test", message: "compatible"
         )
         let report = AcceptanceEvaluator.evaluate(
@@ -644,10 +645,14 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             "screenshots": true,
             "maximum_message_bytes": 4096,
             "authenticated": true,
+            "replay_protection": true,
+            "authentication_clock_skew_seconds": 30,
         ])
         XCTAssertEqual(compatible.status, .compatible)
         XCTAssertTrue(compatible.capabilities.contains(.screenshots))
         XCTAssertEqual(compatible.maximumMessageBytes, 4096)
+        XCTAssertTrue(compatible.replayProtected)
+        XCTAssertEqual(compatible.authenticationClockSkewSeconds, 30)
         XCTAssertEqual(GuestProtocolNegotiator.negotiate(json: ["protocol_version": 99]).status, .incompatible)
     }
 
@@ -717,6 +722,172 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertNil(researchRecommendation.selectedBackendID)
         XCTAssertTrue(researchRecommendation.researchCandidateIDs.contains("org.qemu.qemu"))
         XCTAssertFalse(researchRecommendation.researchCandidateIDs.contains("com.corellium.reference"))
+    }
+
+    func testQualificationCampaignPinsFixtureAndBlocksIncompleteEvidence() {
+        let host = testHost()
+        let campaign = QualificationCampaignStore.create(
+            host: host, backend: .vphone, device: nil, firmware: nil, acceptance: .empty
+        )
+        XCTAssertEqual(campaign.state, .blocked)
+        XCTAssertEqual(campaign.backendID, BackendDescriptor.vphone.id)
+        XCTAssertTrue(campaign.hostFingerprint.contains(host.model))
+        XCTAssertGreaterThanOrEqual(campaign.blockers.count, 3)
+    }
+
+    func testSetupAssistantRepairsOnlySafeDirectories() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("setup-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try SetupAssistant.repairSafeDirectories(paths: paths)
+        let report = SetupAssistant.inspect(paths: paths, host: testHost())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.stateRoot.appendingPathComponent("Evidence").path))
+        XCTAssertTrue(report.checks.first(where: { $0.id == "host" })?.canRepairInApp == false)
+        XCTAssertEqual(report.schemaVersion, 1)
+    }
+
+    func testGuestTrustAndAccessibilityFailClosed() {
+        let unauthenticated = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.screenshots, .accessibilityTree],
+            maximumMessageBytes: 1_048_576, authenticated: false,
+            replayProtected: true, authenticationClockSkewSeconds: 30,
+            transport: "fixture", message: "fixture"
+        )
+        XCTAssertFalse(GuestTrustEvaluator.evaluate(unauthenticated, policy: .strict).trustedForMutation)
+        XCTAssertFalse(UIAutomationReadiness.assess(handshake: unauthenticated).available)
+        let authenticated = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.accessibilityTree],
+            maximumMessageBytes: 1_048_576, authenticated: true,
+            replayProtected: true, authenticationClockSkewSeconds: 30,
+            transport: "fixture", message: "fixture"
+        )
+        XCTAssertTrue(UIAutomationReadiness.assess(handshake: authenticated).available)
+    }
+
+    func testEvidenceLedgerDetectsPayloadTamperingAndSurvivesReview() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("evidence-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let first = try EvidenceLedger.seal(
+            ["gate": "passed"], subject: "Acceptance fixture", host: testHost(),
+            appVersion: "0.7.0", backend: .vphone, paths: paths
+        )
+        _ = try EvidenceLedger.review(
+            id: first.id, state: .approved, reviewer: "Test Reviewer", note: "Reviewed", paths: paths
+        )
+        _ = try EvidenceLedger.seal(
+            ["gate": "passed-again"], subject: "Second fixture", host: testHost(),
+            appVersion: "0.7.0", backend: .vphone, paths: paths
+        )
+        XCTAssertTrue(EvidenceLedger.verify(paths: paths).isEmpty)
+        let payload = paths.stateRoot.appendingPathComponent("Evidence/\(first.id.uuidString)-payload.json")
+        try Data("tampered".utf8).write(to: payload, options: .atomic)
+        XCTAssertTrue(EvidenceLedger.verify(paths: paths).contains { $0.contains("payload checksum") })
+    }
+
+    func testBackupVerificationAndRestoreStagingExcludeCredentials() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("backup-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root.appendingPathComponent("lab"))
+        let destination = root.appendingPathComponent("backups")
+        try paths.createDirectories()
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data("state".utf8).write(to: paths.stateRoot.appendingPathComponent("settings.json"))
+        try Data("secret".utf8).write(to: paths.stateRoot.appendingPathComponent("agent-token"))
+        let backup = try LabBackupManager.create(
+            paths: paths, destination: destination, policy: .standard, appVersion: "0.7.0"
+        )
+        let verification = LabBackupManager.verify(backup)
+        XCTAssertTrue(verification.passed)
+        XCTAssertFalse(verification.manifest?.entries.contains { $0.relativePath.contains("agent-token") } ?? true)
+        let injected = backup.appendingPathComponent("Payload/injected.txt")
+        try Data("unexpected".utf8).write(to: injected)
+        XCTAssertFalse(LabBackupManager.verify(backup).passed)
+        try FileManager.default.removeItem(at: injected)
+        let staged = try LabBackupManager.stageRestore(backup, paths: paths)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged.appendingPathComponent("VirtualDeviceLab/settings.json").path))
+    }
+
+    func testRemoteAgentBootstrapCreatesV2ProtectedKeyring() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("agent-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let configuration = try RemoteLabAgentBootstrap.initialize(paths: paths)
+        XCTAssertEqual(configuration.schemaVersion, 2)
+        XCTAssertNotNil(configuration.activeKeyID)
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: configuration.tokenFilePath))) as? [String: Any]
+        XCTAssertEqual(object?["schemaVersion"] as? Int, 2)
+        let permissions = try FileManager.default.attributesOfItem(atPath: configuration.tokenFilePath)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue ?? 0, 0o600)
+    }
+
+    func testResilienceSuiteExercisesEveryDeclaredScenario() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("resilience-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try SetupAssistant.repairSafeDirectories(paths: paths)
+        let report = ResilienceSuite.run(paths: paths)
+        XCTAssertTrue(report.passed)
+        XCTAssertEqual(Set(report.results.map(\.scenario)), Set(ResilienceScenario.allCases))
+    }
+
+    func testUpdateStagingCreatesExplicitInstallAndRollbackCommands() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("updates-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root.appendingPathComponent("lab"))
+        try paths.createDirectories()
+        let newApp = root.appendingPathComponent("New.app")
+        let currentApp = root.appendingPathComponent("Current.app")
+        try makeSignedFixtureApp(newApp)
+        try FileManager.default.copyItem(at: newApp, to: currentApp)
+        let archive = root.appendingPathComponent("update.zip")
+        let zipped = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/ditto"),
+            arguments: ["-c", "-k", "--keepParent", newApp.path, archive.path], timeout: 30
+        )
+        XCTAssertTrue(zipped.succeeded)
+        let record = try UpdateLifecycleManager.stage(
+            archive: archive, currentApp: currentApp, version: "0.7.1", paths: paths,
+            policy: UpdateLifecyclePolicy(
+                channel: .beta, requireSignedManifest: false,
+                requireNotarization: false, retainRollbackVersions: 2
+            )
+        )
+        XCTAssertTrue(record.signatureVerified)
+        XCTAssertTrue(record.installerScriptPath.map(FileManager.default.isExecutableFile) ?? false)
+        XCTAssertTrue(record.rollbackScriptPath.map(FileManager.default.isExecutableFile) ?? false)
+        XCTAssertFalse(record.installationApproved)
+    }
+
+    private func testHost() -> HostReadiness {
+        HostReadiness(
+            state: .ready, macOSVersion: "26.3", model: "Mac16,12", architecture: "arm64",
+            sipStatus: "enabled", researchGuestsStatus: "enabled", binaryPath: "/mock/vphone-cli",
+            binaryExitCode: 0, nestedVirtualization: true, checkedAt: .now
+        )
+    }
+
+    private func makeSignedFixtureApp(_ app: URL) throws {
+        let contents = app.appendingPathComponent("Contents")
+        let macOS = contents.appendingPathComponent("MacOS")
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: macOS.appendingPathComponent("Fixture"))
+        let plist: [String: Any] = [
+            "CFBundleIdentifier": "dev.virtualdevicelab.fixture",
+            "CFBundleExecutable": "Fixture", "CFBundlePackageType": "APPL",
+            "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: contents.appendingPathComponent("Info.plist"))
+        let signed = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+            arguments: ["--force", "--deep", "--sign", "-", app.path], timeout: 30
+        )
+        XCTAssertTrue(signed.succeeded, signed.output)
     }
 
     private func makePaths(root: URL) -> LabPaths {

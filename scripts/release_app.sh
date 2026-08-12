@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-VERSION="${1:-0.6.0}"
+VERSION="${1:-0.7.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(plutil -extract CFBundleVersion raw "$ROOT/Info.plist")}"
 DIST="$ROOT/.dist"
 APP="$ROOT/.build/iOS Virtual Device Lab.app"
@@ -41,6 +41,9 @@ if [[ -n "${NOTARYTOOL_PROFILE:-}" || -n "${NOTARY_KEY_PATH:-}" ]]; then
 fi
 
 shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+cp "$APP/Contents/Resources/sbom.cdx.json" "$DIST/sbom.cdx.json"
+cp "$APP/Contents/Resources/build-provenance.json" "$DIST/build-provenance.json"
+cp "$APP/Contents/Resources/supply-chain-manifest.json" "$DIST/supply-chain-manifest.json"
 
 UPDATE_MANIFEST="$DIST/update-manifest.json"
 plutil -create xml1 "$UPDATE_MANIFEST"
@@ -53,6 +56,7 @@ plutil -convert json "$UPDATE_MANIFEST"
 
 if [[ -n "${UPDATE_SIGNING_KEY:-}" ]]; then
     openssl dgst -sha256 -sign "$UPDATE_SIGNING_KEY" -out "$UPDATE_MANIFEST.sig" "$UPDATE_MANIFEST"
+    openssl dgst -sha256 -sign "$UPDATE_SIGNING_KEY" -out "$DIST/build-provenance.json.sig" "$DIST/build-provenance.json"
 fi
 codesign --verify --deep --strict --verbose=2 "$APP"
 if [[ "${CODE_SIGN_IDENTITY:--}" != "-" ]]; then

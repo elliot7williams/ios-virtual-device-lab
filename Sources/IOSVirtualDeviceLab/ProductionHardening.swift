@@ -103,13 +103,18 @@ enum AcceptanceEvaluator {
             evidence: identityPassed ? "\(device?.iosLabel ?? "iOS") is paired with hardware profile \(device?.hardwareProfileID ?? "")" : "No validated device/profile pairing",
             required: "BuildManifest identity must match a versioned virtual hardware profile"
         )
-        let guestPassed = assertion(.guestReady) && handshake?.status == .compatible
+        let guestPassed = assertion(.guestReady)
+            && handshake?.status == .compatible
+            && handshake?.negotiatedVersion == 3
+            && handshake?.authenticated == true
+            && handshake?.replayProtected == true
+            && (handshake?.authenticationClockSkewSeconds ?? .max) <= 30
         let bootGate = result(
             .bootAndGuestControl,
             guestPassed,
             available: host.isReady && device != nil,
-            evidence: guestPassed ? "Baseline run connected using guest protocol v\(handshake?.negotiatedVersion ?? 0)" : "No compatible real-guest handshake evidence",
-            required: "Boot, input, screenshot, and a negotiated guest-control handshake"
+            evidence: guestPassed ? "Baseline run connected using authenticated guest protocol v\(handshake?.negotiatedVersion ?? 0)" : "No authenticated real-guest handshake evidence",
+            required: "Boot, input, screenshot, and an authenticated negotiated guest-control handshake"
         )
         let networkGate = result(
             .networking,
@@ -273,13 +278,15 @@ struct LabMigrationReport: Codable, Hashable, Sendable {
 }
 
 enum LabMigrationManager {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
     private static let managedFiles = [
         "activity.json", "automation-workflows.json", "compatibility-manifest.json",
         "diagnostic-privacy.json", "environment-assignments.json", "environment-profiles.json",
         "firmware-catalog.json", "operation-journal.json", "plugin-audit.json",
         "remote-agent.json", "resource-policy.json", "snapshot-retention.json",
-        "storage-policy.json", "test-runs.json",
+        "storage-policy.json", "test-runs.json", "qualification-campaigns.json",
+        "guest-trust-policy.json", "backup-policy.json", "update-lifecycle-policy.json",
+        "evidence-ledger.json", "resilience-reports.json",
     ]
 
     static func migrate(paths: LabPaths) throws -> LabMigrationReport {
@@ -297,9 +304,15 @@ enum LabMigrationManager {
         let backup = try backupManagedState(paths: paths, fromVersion: source)
         var applied: [LabMigrationRecord] = []
         for destination in (source + 1)...currentSchemaVersion {
-            let summary = destination == 1
-                ? "Established versioned lab state and rollback metadata."
-                : "Added operational-readiness, provenance, environment, journal, and agent schemas."
+            let summary: String
+            switch destination {
+            case 1:
+                summary = "Established versioned lab state and rollback metadata."
+            case 2:
+                summary = "Added operational-readiness, provenance, environment, journal, and agent schemas."
+            default:
+                summary = "Added qualification, guest trust, evidence governance, backup, update, supply-chain, and resilience schemas."
+            }
             let record = LabMigrationRecord(
                 id: UUID(),
                 fromVersion: destination - 1,
@@ -526,18 +539,21 @@ struct GuestProtocolHandshake: Codable, Hashable, Sendable {
     let capabilities: Set<GuestCapability>
     let maximumMessageBytes: Int
     let authenticated: Bool
+    let replayProtected: Bool
+    let authenticationClockSkewSeconds: Int?
     let transport: String
     let message: String
 
     static let unavailable = GuestProtocolHandshake(
         status: .unavailable, negotiatedVersion: nil, minimumSupportedVersion: 1,
-        maximumSupportedVersion: 2, capabilities: [], maximumMessageBytes: 0,
-        authenticated: false, transport: "Unix domain socket", message: "Guest control is unavailable."
+        maximumSupportedVersion: 3, capabilities: [], maximumMessageBytes: 0,
+        authenticated: false, replayProtected: false, authenticationClockSkewSeconds: nil,
+        transport: "Unix domain socket", message: "Guest control is unavailable."
     )
 }
 
 enum GuestProtocolNegotiator {
-    static let supported = 1...2
+    static let supported = 1...3
 
     static func negotiate(json: [String: Any]?) -> GuestProtocolHandshake {
         guard let json else { return .unavailable }
@@ -556,6 +572,8 @@ enum GuestProtocolNegotiator {
             capabilities: capabilities,
             maximumMessageBytes: json["maximum_message_bytes"] as? Int ?? 1_048_576,
             authenticated: json["authenticated"] as? Bool ?? false,
+            replayProtected: json["replay_protection"] as? Bool ?? false,
+            authenticationClockSkewSeconds: json["authentication_clock_skew_seconds"] as? Int,
             transport: "Unix domain socket",
             message: status == .incompatible
                 ? "Guest protocol v\(version) is outside the supported range \(supported.lowerBound)-\(supported.upperBound)."
@@ -824,12 +842,38 @@ struct RemoteLabAgentConfiguration: Codable, Hashable, Sendable {
     let queuePath: String
     let tokenFilePath: String
     let createdAt: Date
+    var activeKeyID: String?
+    var rotatedAt: Date?
     var enabled: Bool
     var maximumConcurrentJobs: Int
     var jobTimeoutSeconds: Int
 }
 
+struct RemoteAgentHealthSnapshot: Codable, Hashable, Sendable {
+    let schemaVersion: Int
+    let checkedAt: Date
+    let queuePath: String
+    let activeKeyID: String?
+    let queued: Int
+    let running: Int
+    let results: Int
+    let rejected: Int
+    let cancelled: Int
+    let replayLedgerEntries: Int
+    let healthy: Bool
+    let issues: [String]
+}
+
 enum RemoteLabAgentBootstrap {
+    private struct KeyringFile: Codable {
+        let schemaVersion: Int
+        let activeKeyID: String
+        let keys: [String: String]
+        let keyCreatedAt: [String: Date]
+        let revokedKeyIDs: [String]
+        let rotatedAt: Date
+    }
+
     static func load(paths: LabPaths) -> RemoteLabAgentConfiguration? {
         try? HardeningJSON.load(RemoteLabAgentConfiguration.self, from: paths.stateRoot.appendingPathComponent("remote-agent.json"))
     }
@@ -837,20 +881,38 @@ enum RemoteLabAgentBootstrap {
     static func initialize(paths: LabPaths) throws -> RemoteLabAgentConfiguration {
         let root = paths.stateRoot.appendingPathComponent("Remote Agent", isDirectory: true)
         let queue = root.appendingPathComponent("Queue", isDirectory: true)
-        for component in [queue.appendingPathComponent("Inbox"), queue.appendingPathComponent("Running"), queue.appendingPathComponent("Results"), queue.appendingPathComponent("Rejected")] {
+        for component in [
+            queue.appendingPathComponent("Inbox"), queue.appendingPathComponent("Running"),
+            queue.appendingPathComponent("Results"), queue.appendingPathComponent("Rejected"),
+            queue.appendingPathComponent("Cancelled"),
+        ] {
             try FileManager.default.createDirectory(at: component, withIntermediateDirectories: true)
+        }
+        let tokenURL = root.appendingPathComponent("agent-token")
+        guard !FileManager.default.fileExists(atPath: tokenURL.path) else {
+            throw CocoaError(.fileWriteFileExists)
         }
         var bytes = [UInt8](repeating: 0, count: 32)
         guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
             throw CocoaError(.fileWriteUnknown)
         }
-        let token = Data(bytes).base64EncodedString()
-        let tokenURL = root.appendingPathComponent("agent-token")
-        try token.write(to: tokenURL, atomically: true, encoding: .utf8)
+        let keyID = UUID().uuidString
+        let rotatedAt = Date()
+        let keyring = KeyringFile(
+            schemaVersion: 2, activeKeyID: keyID,
+            keys: [keyID: Data(bytes).base64EncodedString()], keyCreatedAt: [keyID: rotatedAt],
+            revokedKeyIDs: [],
+            rotatedAt: rotatedAt
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(keyring).write(to: tokenURL, options: [.atomic, .completeFileProtectionUnlessOpen])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenURL.path)
         let configuration = RemoteLabAgentConfiguration(
-            schemaVersion: 1, agentID: UUID(), queuePath: queue.path, tokenFilePath: tokenURL.path,
-            createdAt: .now, enabled: false, maximumConcurrentJobs: 1, jobTimeoutSeconds: 7_200
+            schemaVersion: 2, agentID: UUID(), queuePath: queue.path, tokenFilePath: tokenURL.path,
+            createdAt: .now, activeKeyID: keyID, rotatedAt: rotatedAt,
+            enabled: false, maximumConcurrentJobs: 1, jobTimeoutSeconds: 7_200
         )
         try HardeningJSON.save(configuration, to: paths.stateRoot.appendingPathComponent("remote-agent.json"))
         return configuration
@@ -868,6 +930,15 @@ struct ProductionHardeningState: Sendable {
     let storagePolicy: LabStoragePolicy
     let pluginAudits: [PluginAuditRecord]
     let remoteAgent: RemoteLabAgentConfiguration?
+    let qualificationCampaigns: [QualificationCampaign]
+    let guestTrustPolicy: GuestTrustPolicy
+    let evidenceSeals: [EvidenceSeal]
+    let backupPolicy: LabBackupPolicy
+    let updateLifecyclePolicy: UpdateLifecyclePolicy
+    let stagedUpdate: StagedUpdateRecord?
+    let supplyChain: SupplyChainAssessment
+    let setupReport: SetupAssistantReport
+    let resilienceReport: ResilienceReport?
 
     static func load(paths: LabPaths) throws -> ProductionHardeningState {
         let migration = try LabMigrationManager.migrate(paths: paths)
@@ -879,7 +950,25 @@ struct ProductionHardeningState: Sendable {
             environmentAssignments: EnvironmentProfileStore.loadAssignments(paths: paths),
             storagePolicy: StorageLifecycleManager.loadPolicy(paths: paths),
             pluginAudits: PluginAuditStore.load(paths: paths),
-            remoteAgent: RemoteLabAgentBootstrap.load(paths: paths)
+            remoteAgent: RemoteLabAgentBootstrap.load(paths: paths),
+            qualificationCampaigns: QualificationCampaignStore.load(paths: paths),
+            guestTrustPolicy: (try? HardeningJSON.load(
+                GuestTrustPolicy.self,
+                from: paths.stateRoot.appendingPathComponent("guest-trust-policy.json")
+            )) ?? .strict,
+            evidenceSeals: EvidenceLedger.load(paths: paths),
+            backupPolicy: (try? HardeningJSON.load(
+                LabBackupPolicy.self,
+                from: paths.stateRoot.appendingPathComponent("backup-policy.json")
+            )) ?? .standard,
+            updateLifecyclePolicy: (try? HardeningJSON.load(
+                UpdateLifecyclePolicy.self,
+                from: paths.stateRoot.appendingPathComponent("update-lifecycle-policy.json")
+            )) ?? .standard,
+            stagedUpdate: UpdateLifecycleManager.load(paths: paths),
+            supplyChain: SupplyChainInspector.inspect(),
+            setupReport: SetupAssistant.inspect(paths: paths, host: .checking),
+            resilienceReport: ResilienceSuite.loadLatest(paths: paths)
         )
     }
 }

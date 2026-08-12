@@ -35,11 +35,15 @@ struct GitHubRelease: Decodable, Sendable {
     let tagName: String
     let htmlURL: URL
     let assets: [Asset]
+    let prerelease: Bool
+    let draft: Bool
 
     enum CodingKeys: String, CodingKey {
-        case tagName = "tag_name"
-        case htmlURL = "html_url"
-        case assets
+            case tagName = "tag_name"
+            case htmlURL = "html_url"
+            case assets
+            case prerelease
+            case draft
     }
 }
 
@@ -55,9 +59,10 @@ actor UpdateService {
     static let repository = "elliot7williams/ios-virtual-device-lab"
     private var latestRelease: GitHubRelease?
 
-    func check(currentVersion: String) async throws -> UpdateState {
+    func check(currentVersion: String, channel: UpdateChannel = .stable) async throws -> UpdateState {
+        let path = channel == .stable ? "releases/latest" : "releases?per_page=20"
         var request = URLRequest(
-            url: URL(string: "https://api.github.com/repos/\(Self.repository)/releases/latest")!
+            url: URL(string: "https://api.github.com/repos/\(Self.repository)/\(path)")!
         )
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("iOS-Virtual-Device-Lab/\(currentVersion)", forHTTPHeaderField: "User-Agent")
@@ -65,13 +70,25 @@ actor UpdateService {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
-        let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        let release: GitHubRelease
+        if channel == .stable {
+            release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        } else {
+            let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
+            guard let candidate = releases.first(where: { !$0.draft }) else {
+                throw URLError(.resourceUnavailable)
+            }
+            release = candidate
+        }
         latestRelease = release
         let remote = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
         return isNewer(remote, than: currentVersion) ? .available(version: remote) : .upToDate
     }
 
-    func downloadVerifiedUpdate(destinationRoot: URL) async throws -> UpdateState {
+    func downloadVerifiedUpdate(
+        destinationRoot: URL,
+        requireSignedManifest: Bool = true
+    ) async throws -> UpdateState {
         guard let release = latestRelease else { throw URLError(.resourceUnavailable) }
         let version = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
         guard let archive = release.assets.first(where: { $0.name.hasSuffix(".zip") }),
@@ -92,7 +109,8 @@ actor UpdateService {
             release: release,
             archiveName: archive.name,
             archiveSHA256: actual,
-            version: version
+            version: version,
+            required: requireSignedManifest
         )
         try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
         let destination = destinationRoot.appendingPathComponent(archive.name)
@@ -106,9 +124,11 @@ actor UpdateService {
         release: GitHubRelease,
         archiveName: String,
         archiveSHA256: String,
-        version: String
+        version: String,
+        required: Bool
     ) async throws {
         guard let publicKey = Bundle.main.url(forResource: "update-public-key", withExtension: "pem") else {
+            if required { throw URLError(.userAuthenticationRequired) }
             return
         }
         guard let manifestAsset = release.assets.first(where: { $0.name == "update-manifest.json" }),

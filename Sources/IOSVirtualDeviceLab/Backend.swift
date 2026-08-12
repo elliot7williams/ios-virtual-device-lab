@@ -1002,6 +1002,15 @@ actor VPhoneBackend: LabBackend {
     }
 
     private func sendControl(to device: VirtualDevice, payload: [String: Any]) -> ControlResponse {
+        let handshake = guestProtocolHandshake(for: device)
+        guard isTrustedMutationHandshake(handshake) else {
+            return ControlResponse(
+                succeeded: false,
+                path: nil,
+                error: "Guest-control mutation was blocked because protocol v3 authentication did not complete.",
+                imageData: nil
+            )
+        }
         let response = sendControlJSON(to: device, payload: payload)
         guard let json = response.json else {
             return ControlResponse(
@@ -1028,7 +1037,20 @@ actor VPhoneBackend: LabBackend {
         guard FileManager.default.fileExists(atPath: socket.path) else {
             return (nil, "Host control socket is not available; boot the VM with its window visible")
         }
-        guard var request = try? JSONSerialization.data(withJSONObject: payload) else {
+        var authenticatedPayload = payload
+        do {
+            let keyData = try guestControlKey(for: device)
+            authenticatedPayload["auth_timestamp"] = Int(Date().timeIntervalSince1970)
+            authenticatedPayload["auth_nonce"] = UUID().uuidString
+            authenticatedPayload["auth_key_id"] = "local-v1"
+            let canonical = try JSONSerialization.data(withJSONObject: authenticatedPayload, options: [.sortedKeys])
+            authenticatedPayload["auth_signature"] = Data(HMAC<SHA256>.authenticationCode(
+                for: canonical, using: SymmetricKey(data: keyData)
+            )).base64EncodedString()
+        } catch {
+            return (nil, "Could not provision the per-VM host-control credential: \(error.localizedDescription)")
+        }
+        guard var request = try? JSONSerialization.data(withJSONObject: authenticatedPayload, options: [.sortedKeys]) else {
             return (nil, "Could not encode control request")
         }
         request.append(0x0A)
@@ -1047,6 +1069,27 @@ actor VPhoneBackend: LabBackend {
             return (nil, result.timedOut ? "Control request timed out" : result.output.trimmed)
         }
         return (json, json["error"] as? String)
+    }
+
+    private func guestControlKey(for device: VirtualDevice) throws -> Data {
+        let url = device.bundleURL.appendingPathComponent(".vdl-host-control-key")
+        if let text = try? String(contentsOf: url, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           let data = Data(base64Encoded: text), data.count >= 32 {
+            return data
+        }
+        let data = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
+        try data.base64EncodedString().write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return data
+    }
+
+    private func isTrustedMutationHandshake(_ handshake: GuestProtocolHandshake) -> Bool {
+        handshake.status == .compatible
+            && handshake.negotiatedVersion == 3
+            && handshake.authenticated
+            && handshake.replayProtected
+            && (handshake.authenticationClockSkewSeconds ?? .max) <= 30
     }
 
     func createDiagnosticBundle(
@@ -1196,6 +1239,15 @@ actor VPhoneBackend: LabBackend {
         categories: [DiagnosticCategory],
         destination: URL
     ) -> DiagnosticExportResult {
+        let handshake = guestProtocolHandshake(for: device)
+        guard isTrustedMutationHandshake(handshake) else {
+            return DiagnosticExportResult(
+                supported: false,
+                categories: categories,
+                outputURL: nil,
+                message: "Guest diagnostic export requires an authenticated protocol v3 channel."
+            )
+        }
         let requestedRoots = guestDiagnosticRoots(for: categories)
         guard !requestedRoots.isEmpty else {
             return DiagnosticExportResult(

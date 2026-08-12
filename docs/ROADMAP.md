@@ -34,18 +34,26 @@
 | Remote/CI execution | HMAC-authenticated file queue with submit, run-once, result, and status commands |
 | Multi-backend governance | Capability/evidence registry, conservative firmware recommendation, non-selectable research/reference entries |
 | Attribution governance | Machine-readable source/license/version/modification/obligation records surfaced in the app |
+| Production qualification | Pinned host/backend/firmware/profile campaigns linked to signed acceptance evidence |
+| Setup recovery | First-run readiness checks and in-app repair limited to safe filesystem items |
+| Guest trust | Per-VM HMAC protocol v3, owner-only socket/key, clock window, and replay rejection |
+| Evidence and recovery | Curve25519 evidence chain, reviewer workflow, manifest backups, verified restore staging |
+| Agent operations | V2 keyring, rotation/revocation, nonces, replay ledger, cancellation, cleanup, health |
+| Update lifecycle | Signed download enforcement, code/notary/migration staging, rollback copy and commands |
+| Software supply chain | CycloneDX SBOM, SLSA-style provenance, resource hashes, CodeQL/dependency/secret checks |
+| Fault tolerance | Non-destructive corruption, volume, disk, journal, output, expiry, and digest fixtures |
 
 ## Next engineering milestones
 
 1. Complete and publish the first real baseline acceptance result after the required host restart and supported IPSW import.
 2. Validate guest diagnostic export against the companion vphone host-control build on a running guest.
 3. Run the ordered iOS 15 → 14 → 13 → 12 research matrix and update evidence only from reproducible results.
-4. Add a guest accessibility-tree API before claiming UI-element assertions; screenshot-diff and host/log/resource assertions are implemented.
+4. Implement the defined guest accessibility-tree API before claiming UI-element assertions; screenshot-diff and host/log/resource assertions are implemented.
 5. Populate Apple Developer credentials and update-signing keys, then publish the first Developer ID signed and notarized release.
 6. Expand full application UI automation after a stable real-VM fixture exists.
 7. Research audio interruption/background-media and proxy/capture extensions without presenting unsupported simulation as available.
-8. Add a guest accessibility-tree capability before allowing UI-element assertions to pass.
-9. Convert the authenticated queue into a supervised self-hosted runner only after threat-model review and key-rotation support.
+8. Exercise disaster-recovery staging on a second APFS volume and document operator recovery time.
+9. Convert the authenticated queue into a supervised self-hosted runner only after threat-model review and mid-execution cancellation design.
 10. Prototype a QEMU adapter only after choosing a pinned research implementation, completing component-level licensing review, and recording a reproducible iOS boot experiment.
 
 ## Older-iOS compatibility research

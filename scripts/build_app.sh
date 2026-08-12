@@ -39,6 +39,10 @@ if [[ -n "${BUILD_NUMBER:-}" ]]; then
     plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$CONTENTS/Info.plist"
 fi
 
+PACKAGE_VERSION="$(plutil -extract CFBundleShortVersionString raw "$CONTENTS/Info.plist")"
+SOURCE_REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+swift "$ROOT/scripts/generate_supply_chain.swift" "$APP" "$PACKAGE_VERSION" "$SOURCE_REVISION"
+
 echo "=== Signing app bundle ==="
 SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 if [[ "$SIGN_IDENTITY" == "-" ]]; then

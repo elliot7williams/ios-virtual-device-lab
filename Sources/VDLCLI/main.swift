@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-private let cliVersion = "0.6.0"
+private let cliVersion = "0.7.0"
 
 struct CLIWorkflow: Codable, Sendable {
     let id: UUID
@@ -618,6 +618,8 @@ enum ScheduleInstaller {
 struct AgentJobPayload: Codable, Sendable {
     let schemaVersion: Int
     let id: UUID
+    let keyID: String
+    let nonce: UUID
     let createdAt: Date
     let expiresAt: Date
     let workflow: String
@@ -638,6 +640,7 @@ enum AgentJobState: String, Codable, Sendable {
     case running
     case passed
     case failed
+    case cancelled
     case rejected
     case missing
 }
@@ -651,6 +654,30 @@ struct AgentJobReceipt: Codable, Sendable {
     let message: String
 }
 
+struct AgentKeyring: Codable, Sendable {
+    let schemaVersion: Int
+    var activeKeyID: String
+    var keys: [String: String]
+    var keyCreatedAt: [String: Date]?
+    var revokedKeyIDs: [String]
+    var rotatedAt: Date
+}
+
+struct AgentHealthReport: Codable, Sendable {
+    let schemaVersion: Int
+    let checkedAt: Date
+    let queuePath: String
+    let activeKeyID: String?
+    let queued: Int
+    let running: Int
+    let results: Int
+    let rejected: Int
+    let cancelled: Int
+    let replayLedgerEntries: Int
+    let healthy: Bool
+    let issues: [String]
+}
+
 enum AgentQueue {
     static func initialize(queue: URL, tokenFile: URL) throws {
         try prepare(queue)
@@ -658,8 +685,15 @@ enum AgentQueue {
             throw CLIError.message("Token file already exists; refusing to overwrite it")
         }
         try FileManager.default.createDirectory(at: tokenFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let keyID = UUID().uuidString
         let token = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
-        try token.write(to: tokenFile, atomically: true, encoding: .utf8)
+        let keyring = AgentKeyring(
+            schemaVersion: 2, activeKeyID: keyID, keys: [keyID: token], keyCreatedAt: [keyID: .now],
+            revokedKeyIDs: [], rotatedAt: .now
+        )
+        try JSONEncoder.lab.encode(keyring).write(
+            to: tokenFile, options: [.atomic, .completeFileProtectionUnlessOpen]
+        )
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
     }
 
@@ -678,9 +712,12 @@ enum AgentQueue {
         let output = directory(queue, "Results")
             .appendingPathComponent(jobID.uuidString, isDirectory: true)
             .appendingPathComponent("Artifacts", isDirectory: true)
+        let keyring = try loadKeyring(tokenFile: tokenFile)
         let payload = AgentJobPayload(
-            schemaVersion: 1,
+            schemaVersion: 2,
             id: jobID,
+            keyID: keyring.activeKeyID,
+            nonce: UUID(),
             createdAt: .now,
             expiresAt: Date().addingTimeInterval(max(60, validitySeconds)),
             workflow: workflow,
@@ -716,7 +753,7 @@ enum AgentQueue {
             guard try verify(envelope, tokenFile: tokenFile) else {
                 return try reject(envelope.payload.id, message: "HMAC signature is invalid", running: running, queue: queue)
             }
-            guard envelope.payload.schemaVersion == 1 else {
+            guard envelope.payload.schemaVersion == 2 else {
                 return try reject(envelope.payload.id, message: "Unsupported job schema", running: running, queue: queue)
             }
             guard envelope.payload.expiresAt > .now else {
@@ -724,6 +761,15 @@ enum AgentQueue {
             }
             guard !envelope.payload.devices.isEmpty else {
                 return try reject(envelope.payload.id, message: "Job has no target devices", running: running, queue: queue)
+            }
+            guard !isCancelled(envelope.payload.id, queue: queue) else {
+                return try reject(
+                    envelope.payload.id, message: "Job was cancelled before execution",
+                    running: running, queue: queue, state: .cancelled
+                )
+            }
+            guard try recordNonce(envelope.payload.nonce, jobID: envelope.payload.id, queue: queue) else {
+                return try reject(envelope.payload.id, message: "Job nonce was already used; possible replay", running: running, queue: queue)
             }
         } catch {
             let fallbackID = UUID(uuidString: running.deletingPathExtension().lastPathComponent) ?? UUID()
@@ -743,7 +789,7 @@ enum AgentQueue {
         do {
             let report = try await HeadlessRunner.run(options: options)
             receipt = AgentJobReceipt(
-                schemaVersion: 1,
+                schemaVersion: 2,
                 jobID: payload.id,
                 state: report.passed ? .passed : .failed,
                 updatedAt: .now,
@@ -752,7 +798,7 @@ enum AgentQueue {
             )
         } catch {
             receipt = AgentJobReceipt(
-                schemaVersion: 1,
+                schemaVersion: 2,
                 jobID: payload.id,
                 state: .failed,
                 updatedAt: .now,
@@ -770,20 +816,115 @@ enum AgentQueue {
         if let receipt = try? JSONDecoder.lab.decode(AgentJobReceipt.self, from: Data(contentsOf: receiptURL)) {
             return receipt
         }
+        let cancellationURL = directory(queue, "Cancelled").appendingPathComponent("\(jobID.uuidString).json")
+        if let receipt = try? JSONDecoder.lab.decode(AgentJobReceipt.self, from: Data(contentsOf: cancellationURL)) {
+            return receipt
+        }
         if FileManager.default.fileExists(atPath: directory(queue, "Rejected").appendingPathComponent("\(jobID.uuidString).json").path) {
-            return AgentJobReceipt(schemaVersion: 1, jobID: jobID, state: .rejected, updatedAt: .now, reportPath: nil, message: "Job was rejected")
+            return AgentJobReceipt(schemaVersion: 2, jobID: jobID, state: .rejected, updatedAt: .now, reportPath: nil, message: "Job was rejected")
         }
         if FileManager.default.fileExists(atPath: directory(queue, "Running").appendingPathComponent("\(jobID.uuidString).json").path) {
-            return AgentJobReceipt(schemaVersion: 1, jobID: jobID, state: .running, updatedAt: .now, reportPath: nil, message: "Job is running")
+            return AgentJobReceipt(schemaVersion: 2, jobID: jobID, state: .running, updatedAt: .now, reportPath: nil, message: "Job is running")
         }
         if FileManager.default.fileExists(atPath: directory(queue, "Inbox").appendingPathComponent("\(jobID.uuidString).json").path) {
-            return AgentJobReceipt(schemaVersion: 1, jobID: jobID, state: .queued, updatedAt: .now, reportPath: nil, message: "Job is queued")
+            return AgentJobReceipt(schemaVersion: 2, jobID: jobID, state: .queued, updatedAt: .now, reportPath: nil, message: "Job is queued")
         }
-        return AgentJobReceipt(schemaVersion: 1, jobID: jobID, state: .missing, updatedAt: .now, reportPath: nil, message: "Job was not found")
+        return AgentJobReceipt(schemaVersion: 2, jobID: jobID, state: .missing, updatedAt: .now, reportPath: nil, message: "Job was not found")
+    }
+
+    static func rotateKey(tokenFile: URL, revokePrevious: Bool) throws -> String {
+        var keyring = try loadKeyring(tokenFile: tokenFile)
+        let previous = keyring.activeKeyID
+        let keyID = UUID().uuidString
+        keyring.keys[keyID] = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
+        var created = keyring.keyCreatedAt ?? Dictionary(
+            uniqueKeysWithValues: keyring.keys.keys.map { ($0, Date.distantPast) }
+        )
+        created[keyID] = .now
+        keyring.activeKeyID = keyID
+        keyring.rotatedAt = .now
+        if revokePrevious {
+            keyring.revokedKeyIDs.append(previous)
+            keyring.keys.removeValue(forKey: previous)
+            created.removeValue(forKey: previous)
+        }
+        while keyring.keys.count > 3, let oldest = keyring.keys.keys.filter({ $0 != keyID }).min(by: {
+            created[$0, default: .distantPast] < created[$1, default: .distantPast]
+        }) {
+            keyring.keys.removeValue(forKey: oldest)
+            created.removeValue(forKey: oldest)
+            keyring.revokedKeyIDs.append(oldest)
+        }
+        keyring.keyCreatedAt = created
+        try JSONEncoder.lab.encode(keyring).write(
+            to: tokenFile, options: [.atomic, .completeFileProtectionUnlessOpen]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
+        return keyID
+    }
+
+    static func cancel(queue: URL, jobID: UUID) throws -> AgentJobReceipt {
+        try prepare(queue)
+        let marker = directory(queue, "Cancelled").appendingPathComponent("\(jobID.uuidString).json")
+        let receipt = AgentJobReceipt(
+            schemaVersion: 2, jobID: jobID, state: .cancelled, updatedAt: .now,
+            reportPath: nil, message: "Cancellation requested"
+        )
+        try JSONEncoder.lab.encode(receipt).write(to: marker, options: .atomic)
+        let inbox = directory(queue, "Inbox").appendingPathComponent("\(jobID.uuidString).json")
+        if FileManager.default.fileExists(atPath: inbox.path) {
+            try? FileManager.default.removeItem(at: inbox)
+        }
+        return receipt
+    }
+
+    static func cleanup(queue: URL, olderThanDays: Int) throws -> Int {
+        try prepare(queue)
+        let cutoff = Date().addingTimeInterval(-Double(max(1, olderThanDays)) * 86_400)
+        var removed = 0
+        for name in ["Results", "Rejected", "Cancelled"] {
+            let root = directory(queue, name)
+            let items = try FileManager.default.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]
+            )
+            for item in items {
+                let date = try item.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantFuture
+                if date < cutoff {
+                    try FileManager.default.removeItem(at: item)
+                    removed += 1
+                }
+            }
+        }
+        return removed
+    }
+
+    static func health(queue: URL, tokenFile: URL) -> AgentHealthReport {
+        var issues: [String] = []
+        let keyring = try? loadKeyring(tokenFile: tokenFile)
+        if keyring == nil { issues.append("Keyring is missing or invalid.") }
+        if let keyring,
+           keyring.revokedKeyIDs.contains(keyring.activeKeyID) || keyring.keys[keyring.activeKeyID] == nil {
+            issues.append("The active key ID is missing or revoked.")
+        }
+        if let permissions = (try? FileManager.default.attributesOfItem(atPath: tokenFile.path)[.posixPermissions] as? NSNumber)?.intValue,
+           permissions & 0o077 != 0 {
+            issues.append("Keyring permissions are broader than 0600.")
+        }
+        func count(_ name: String) -> Int {
+            (try? FileManager.default.contentsOfDirectory(atPath: directory(queue, name).path)
+                .filter { URL(fileURLWithPath: $0).pathExtension.lowercased() == "json" }.count) ?? 0
+        }
+        let replay = (try? loadReplayLedger(queue: queue).count) ?? 0
+        return AgentHealthReport(
+            schemaVersion: 2, checkedAt: .now, queuePath: queue.path,
+            activeKeyID: keyring?.activeKeyID, queued: count("Inbox"), running: count("Running"),
+            results: count("Results"), rejected: count("Rejected"), cancelled: count("Cancelled"),
+            replayLedgerEntries: replay, healthy: issues.isEmpty, issues: issues
+        )
     }
 
     private static func prepare(_ queue: URL) throws {
-        for name in ["Inbox", "Running", "Results", "Rejected"] {
+        for name in ["Inbox", "Running", "Results", "Rejected", "Cancelled"] {
             try FileManager.default.createDirectory(at: directory(queue, name), withIntermediateDirectories: true)
         }
     }
@@ -792,10 +933,27 @@ enum AgentQueue {
         queue.appendingPathComponent(name, isDirectory: true)
     }
 
-    private static func key(tokenFile: URL) throws -> SymmetricKey {
-        let text = try String(contentsOf: tokenFile, encoding: .utf8).trimmed
-        guard let data = Data(base64Encoded: text), data.count >= 32 else {
+    private static func loadKeyring(tokenFile: URL) throws -> AgentKeyring {
+        let data = try Data(contentsOf: tokenFile)
+        if let keyring = try? JSONDecoder.lab.decode(AgentKeyring.self, from: data), keyring.schemaVersion == 2 {
+            return keyring
+        }
+        let legacy = String(decoding: data, as: UTF8.self).trimmed
+        guard let legacyData = Data(base64Encoded: legacy), legacyData.count >= 32 else {
             throw CLIError.message("Agent token is missing, malformed, or too short")
+        }
+        return AgentKeyring(
+            schemaVersion: 2, activeKeyID: "legacy", keys: ["legacy": legacyData.base64EncodedString()],
+            keyCreatedAt: ["legacy": .distantPast],
+            revokedKeyIDs: [], rotatedAt: .distantPast
+        )
+    }
+
+    private static func key(tokenFile: URL, keyID: String) throws -> SymmetricKey {
+        let keyring = try loadKeyring(tokenFile: tokenFile)
+        guard !keyring.revokedKeyIDs.contains(keyID),
+              let encoded = keyring.keys[keyID], let data = Data(base64Encoded: encoded), data.count >= 32 else {
+            throw CLIError.message("Agent key ID is unknown, revoked, or malformed")
         }
         return SymmetricKey(data: data)
     }
@@ -803,7 +961,7 @@ enum AgentQueue {
     private static func signature(for payload: AgentJobPayload, tokenFile: URL) throws -> String {
         let authentication = HMAC<SHA256>.authenticationCode(
             for: try JSONEncoder.lab.encode(payload),
-            using: try key(tokenFile: tokenFile)
+            using: try key(tokenFile: tokenFile, keyID: payload.keyID)
         )
         return Data(authentication).base64EncodedString()
     }
@@ -813,22 +971,52 @@ enum AgentQueue {
         return HMAC<SHA256>.isValidAuthenticationCode(
             signature,
             authenticating: try JSONEncoder.lab.encode(envelope.payload),
-            using: try key(tokenFile: tokenFile)
+            using: try key(tokenFile: tokenFile, keyID: envelope.payload.keyID)
         )
+    }
+
+    private static func isCancelled(_ jobID: UUID, queue: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: directory(queue, "Cancelled").appendingPathComponent("\(jobID.uuidString).json").path
+        )
+    }
+
+    private static func replayLedgerURL(queue: URL) -> URL {
+        queue.appendingPathComponent("replay-ledger.json")
+    }
+
+    private static func loadReplayLedger(queue: URL) throws -> [String: String] {
+        let url = replayLedgerURL(queue: queue)
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        return try JSONDecoder.lab.decode([String: String].self, from: Data(contentsOf: url))
+    }
+
+    private static func recordNonce(_ nonce: UUID, jobID: UUID, queue: URL) throws -> Bool {
+        var ledger = try loadReplayLedger(queue: queue)
+        let key = nonce.uuidString
+        guard ledger[key] == nil else { return false }
+        ledger[key] = jobID.uuidString
+        if ledger.count > 10_000 {
+            ledger = Dictionary(uniqueKeysWithValues: ledger.sorted { $0.key > $1.key }.prefix(10_000).map { ($0.key, $0.value) })
+        }
+        try JSONEncoder.lab.encode(ledger).write(to: replayLedgerURL(queue: queue), options: .atomic)
+        return true
     }
 
     private static func reject(
         _ jobID: UUID,
         message: String,
         running: URL,
-        queue: URL
+        queue: URL,
+        state: AgentJobState = .rejected
     ) throws -> AgentJobReceipt {
         let receipt = AgentJobReceipt(
-            schemaVersion: 1, jobID: jobID, state: .rejected,
+            schemaVersion: 2, jobID: jobID, state: state,
             updatedAt: .now, reportPath: nil, message: message
         )
         try JSONEncoder.lab.encode(receipt).write(
-            to: directory(queue, "Rejected").appendingPathComponent("\(jobID.uuidString).json"),
+            to: directory(queue, state == .cancelled ? "Cancelled" : "Rejected")
+                .appendingPathComponent("\(jobID.uuidString).json"),
             options: .atomic
         )
         try? FileManager.default.removeItem(at: running)
@@ -918,6 +1106,10 @@ func usage() {
                           [--app <ipa>] [--queue <directory>] [--token-file <path>] [--dry-run]
       vdlctl agent-run-once [--queue <directory>] [--token-file <path>]
       vdlctl agent-status --job <uuid> [--queue <directory>] [--json]
+      vdlctl agent-cancel --job <uuid> [--queue <directory>]
+      vdlctl agent-key-rotate [--token-file <path>] [--revoke-previous]
+      vdlctl agent-cleanup [--queue <directory>] [--older-than-days <n>]
+      vdlctl agent-health [--queue <directory>] [--token-file <path>] [--json]
       vdlctl version
     """)
 }
@@ -1027,6 +1219,34 @@ enum VDLCLI {
                     print("\(receipt.state.rawValue.uppercased()) — \(receipt.message)")
                 }
                 exit(receipt.state == .missing || receipt.state == .rejected ? 1 : 0)
+            case "agent-cancel":
+                guard let rawID = value(after: "--job", in: arguments), let jobID = UUID(uuidString: rawID) else {
+                    throw CLIError.message("--job must be a valid UUID")
+                }
+                let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
+                let receipt = try AgentQueue.cancel(queue: queue, jobID: jobID)
+                print("CANCELLED — \(receipt.jobID.uuidString) — \(receipt.message)")
+            case "agent-key-rotate":
+                let token = value(after: "--token-file", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentToken
+                let keyID = try AgentQueue.rotateKey(tokenFile: token, revokePrevious: arguments.contains("--revoke-previous"))
+                print("Rotated agent key: \(keyID)")
+            case "agent-cleanup":
+                let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
+                let days = value(after: "--older-than-days", in: arguments).flatMap(Int.init) ?? 30
+                let removed = try AgentQueue.cleanup(queue: queue, olderThanDays: days)
+                print("Removed \(removed) expired queue artifact(s)")
+            case "agent-health":
+                let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
+                let token = value(after: "--token-file", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentToken
+                let report = AgentQueue.health(queue: queue, tokenFile: token)
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(report), as: UTF8.self))
+                } else {
+                    print(report.healthy ? "Agent health: HEALTHY" : "Agent health: ACTION REQUIRED")
+                    print("Key: \(report.activeKeyID ?? "unavailable") • queued \(report.queued) • running \(report.running) • results \(report.results)")
+                    for issue in report.issues { print("- \(issue)") }
+                }
+                exit(report.healthy ? 0 : 2)
             case "help", "--help", "-h":
                 usage()
             default:

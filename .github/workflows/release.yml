@@ -72,5 +72,9 @@ jobs:
             .dist/iOS-Virtual-Device-Lab-*.sha256 \
             .dist/update-manifest.json \
             .dist/update-manifest.json.sig \
+            .dist/sbom.cdx.json \
+            .dist/supply-chain-manifest.json \
+            .dist/build-provenance.json \
+            .dist/build-provenance.json.sig \
             --generate-notes \
             --title "iOS Virtual Device Lab $GITHUB_REF_NAME"

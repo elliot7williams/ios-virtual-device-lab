@@ -1,0 +1,24 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 8 * * 3'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze-swift:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: swift
+      - name: Build analyzed targets
+        run: swift build
+      - uses: github/codeql-action/analyze@v3

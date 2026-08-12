@@ -8,12 +8,18 @@ The manager and vphone companion negotiate a small versioned contract over the V
 {
   "t": "capabilities",
   "protocol_min": 1,
-  "protocol_max": 2,
+  "protocol_max": 3,
   "screen": false
 }
 ```
 
-## Version 2 response fields
+## Version 3 authentication
+
+Protocol v3 adds a per-VM HMAC-SHA256 credential and replay protection. The request includes `auth_timestamp`, a UUID `auth_nonce`, `auth_key_id: "local-v1"`, and `auth_signature` over the sorted JSON request before the signature field is added. The key is stored beside the VM socket as `.vdl-host-control-key` with mode `0600`; the socket is also restricted to its owner.
+
+The companion accepts a 30-second timestamp window and remembers accepted nonces for 120 seconds. Every command except capability negotiation rejects unauthenticated requests. The app also performs an authenticated v3 capability preflight before screenshot, input, or guest-diagnostic operations, so a legacy companion cannot accidentally receive mutations.
+
+## Response fields
 
 | Field | Meaning |
 |---|---|
@@ -21,11 +27,13 @@ The manager and vphone companion negotiate a small versioned contract over the V
 | `capabilities` | Stable capability identifiers |
 | `maximum_message_bytes` | Declared payload ceiling |
 | `authenticated` | Whether the protocol itself authenticated the peer |
+| `replay_protection` | Whether accepted nonces are rejected on reuse |
+| `authentication_clock_skew_seconds` | Maximum accepted request timestamp window |
 | `screenshots`, `hardware_keys`, `guest_files`, `audio_input`, `audio_output` | Boolean compatibility fields |
 | `network_modes` | Actual modes supported by the runtime |
 
 Known capability identifiers are `screenshots`, `hardware_keys`, `guest_files`, `audio_input`, `audio_output`, `network_modes`, `environment_policy`, and `accessibility_tree`.
 
-Version 1 responses without `protocol_version` remain readable as legacy responses. A response outside the supported range is incompatible, and unavailable sockets never become passing acceptance evidence.
+Version 1 responses without `protocol_version` remain readable as legacy metadata. Version 2 remains negotiable for compatibility inspection, but its unauthenticated channel cannot pass mutation or acceptance policy. A response outside versions 1–3 is incompatible, and unavailable sockets never become passing acceptance evidence.
 
-The transport is local, bounded, newline-delimited JSON. The current host socket is not a cryptographically authenticated guest channel, so the response reports `authenticated: false`. Future authentication must include replay protection, key provisioning/rotation, and an explicit protocol-version transition.
+The transport is local, bounded, newline-delimited JSON. Authentication proves possession of the local per-VM host-control key; it does not authenticate an iOS account or expose a network endpoint. `accessibility_tree` remains false until a real guest provider is implemented.

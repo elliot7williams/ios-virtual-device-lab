@@ -33,6 +33,9 @@ jobs:
           test -f "$app/Contents/Resources/host-compatibility.json"
           test -f "$app/Contents/Resources/backend-catalog.json"
           test -f "$app/Contents/Resources/third-party-catalog.json"
+          test -f "$app/Contents/Resources/supply-chain-manifest.json"
+          test -f "$app/Contents/Resources/sbom.cdx.json"
+          test -f "$app/Contents/Resources/build-provenance.json"
           test -x "$app/Contents/MacOS/vdlctl"
           "$app/Contents/MacOS/vdlctl" version
           "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
@@ -44,6 +47,13 @@ jobs:
           job_id="${job_output##*: }"
           "$app/Contents/MacOS/vdlctl" agent-run-once --queue "$queue" --token-file "$token"
           "$app/Contents/MacOS/vdlctl" agent-status --queue "$queue" --job "$job_id"
+          "$app/Contents/MacOS/vdlctl" agent-health --queue "$queue" --token-file "$token" --json
+          "$app/Contents/MacOS/vdlctl" agent-key-rotate --token-file "$token" --revoke-previous
+          cancel_output="$("$app/Contents/MacOS/vdlctl" agent-submit --workflow boot-smoke --device cancelled-placeholder --dry-run --queue "$queue" --token-file "$token")"
+          cancel_id="${cancel_output##*: }"
+          "$app/Contents/MacOS/vdlctl" agent-cancel --queue "$queue" --job "$cancel_id"
+          test -f "$queue/Cancelled/$cancel_id.json"
+          "$app/Contents/MacOS/vdlctl" agent-cleanup --queue "$queue" --older-than-days 30
 
       - name: Upload app bundle
         uses: actions/upload-artifact@v4

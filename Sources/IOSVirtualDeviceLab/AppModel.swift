@@ -93,6 +93,19 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var storageInventory: LabStorageInventory = .empty
     @Published private(set) var pluginAuditRecords: [PluginAuditRecord] = []
     @Published private(set) var remoteAgentConfiguration: RemoteLabAgentConfiguration?
+    @Published private(set) var remoteAgentHealth: RemoteAgentHealthSnapshot?
+    @Published private(set) var qualificationCampaigns: [QualificationCampaign] = []
+    @Published private(set) var setupAssistantReport: SetupAssistantReport = .empty
+    @Published private(set) var guestTrustPolicy: GuestTrustPolicy = .strict
+    @Published private(set) var guestTrustAssessments: [String: GuestTrustAssessment] = [:]
+    @Published private(set) var evidenceSeals: [EvidenceSeal] = []
+    @Published private(set) var evidenceVerificationIssues: [String] = []
+    @Published private(set) var backupPolicy: LabBackupPolicy = .standard
+    @Published private(set) var latestBackupVerification: BackupVerification?
+    @Published private(set) var updateLifecyclePolicy: UpdateLifecyclePolicy = .standard
+    @Published private(set) var stagedUpdate: StagedUpdateRecord?
+    @Published private(set) var supplyChainAssessment: SupplyChainAssessment = .unavailable
+    @Published private(set) var resilienceReport: ResilienceReport?
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
 
@@ -145,10 +158,21 @@ final class LabAppModel: ObservableObject {
             storagePolicy = localState.hardening.storagePolicy
             pluginAuditRecords = localState.hardening.pluginAudits
             remoteAgentConfiguration = localState.hardening.remoteAgent
+            qualificationCampaigns = localState.hardening.qualificationCampaigns
+            setupAssistantReport = localState.hardening.setupReport
+            guestTrustPolicy = localState.hardening.guestTrustPolicy
+            evidenceSeals = localState.hardening.evidenceSeals
+            backupPolicy = localState.hardening.backupPolicy
+            updateLifecyclePolicy = localState.hardening.updateLifecyclePolicy
+            stagedUpdate = localState.hardening.stagedUpdate
+            supplyChainAssessment = localState.hardening.supplyChain
+            resilienceReport = localState.hardening.resilienceReport
+            evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
             backendDescriptor = await backend.descriptor
             backendCapabilities = await backend.capabilities
             appendLog(.info, scope: "lab", "Storage: \(paths.dataRoot.path)")
             await refreshAll()
+            if remoteAgentConfiguration != nil { await refreshRemoteAgentHealth() }
             Task { await checkForUpdates(automatic: true) }
         } catch {
             present(error, context: "Preparing lab storage")
@@ -216,6 +240,160 @@ final class LabAppModel: ObservableObject {
         pluginAuditRecords = await Task.detached(priority: .utility) {
             PluginAuditStore.load(paths: labPaths)
         }.value
+        setupAssistantReport = SetupAssistant.inspect(paths: paths, host: readiness)
+        guestTrustAssessments = guestProtocolHandshakes.mapValues {
+            GuestTrustEvaluator.evaluate($0, policy: guestTrustPolicy)
+        }
+    }
+
+    // MARK: - Production qualification and recovery
+
+    func createQualificationCampaign() {
+        let device = selectedDevice ?? devices.first
+        let firmwareFixture = firmware.first { image in
+            guard image.kind == .iPhone, image.validation?.state == .valid else { return false }
+            if let version = device?.restoreInfo?.ios.version, image.version != nil {
+                return image.version == version && (image.device == nil || image.device == device?.restoreInfo?.device)
+            }
+            return image.sha256 != nil
+        }
+        let campaign = QualificationCampaignStore.create(
+            host: readiness,
+            backend: backendDescriptor,
+            device: device,
+            firmware: firmwareFixture,
+            acceptance: acceptanceReport
+        )
+        qualificationCampaigns.insert(campaign, at: 0)
+        do {
+            try QualificationCampaignStore.save(qualificationCampaigns, paths: paths)
+            appendLog(
+                campaign.state == .passed ? .success : .warning,
+                scope: "qualification",
+                campaign.state == .passed ? "Recorded a passing real-VM qualification campaign" : "Created a gated qualification campaign with \(campaign.blockers.count) blocker(s)"
+            )
+            persistLogs()
+        } catch { present(error, context: "Saving qualification campaign") }
+    }
+
+    func repairSafeSetup() {
+        do {
+            try SetupAssistant.repairSafeDirectories(paths: paths)
+            setupAssistantReport = SetupAssistant.inspect(paths: paths, host: readiness)
+            appendLog(.success, scope: "setup", "Created and verified safe lab support directories; host security settings were unchanged")
+            persistLogs()
+        } catch { present(error, context: "Repairing safe setup items") }
+    }
+
+    func updateGuestTrustPolicy(_ policy: GuestTrustPolicy) {
+        guestTrustPolicy = policy
+        do {
+            try HardeningJSON.save(policy, to: paths.stateRoot.appendingPathComponent("guest-trust-policy.json"))
+            guestTrustAssessments = guestProtocolHandshakes.mapValues { GuestTrustEvaluator.evaluate($0, policy: policy) }
+        } catch { present(error, context: "Saving guest trust policy") }
+    }
+
+    func sealCurrentAcceptanceEvidence() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        do {
+            let seal = try EvidenceLedger.seal(
+                acceptanceReport,
+                subject: "Baseline acceptance for \(acceptanceReport.deviceName ?? "unselected device")",
+                host: readiness,
+                appVersion: version,
+                backend: backendDescriptor,
+                paths: paths
+            )
+            evidenceSeals.append(seal)
+            evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
+            appendLog(.success, scope: "evidence", "Sealed acceptance evidence \(seal.id.uuidString)")
+            persistLogs()
+        } catch { present(error, context: "Sealing acceptance evidence") }
+    }
+
+    func reviewEvidence(_ seal: EvidenceSeal, approved: Bool, reviewer: String) {
+        do {
+            evidenceSeals = try EvidenceLedger.review(
+                id: seal.id,
+                state: approved ? .approved : .rejected,
+                reviewer: reviewer,
+                note: approved ? "Reviewed for compatibility promotion." : "Rejected; collect new evidence.",
+                paths: paths
+            )
+            evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
+        } catch { present(error, context: "Reviewing evidence") }
+    }
+
+    func updateBackupPolicy(_ policy: LabBackupPolicy) {
+        backupPolicy = policy
+        do { try HardeningJSON.save(policy, to: paths.stateRoot.appendingPathComponent("backup-policy.json")) }
+        catch { present(error, context: "Saving backup policy") }
+    }
+
+    func createLabBackup(destination: URL) {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        do {
+            let backup = try LabBackupManager.create(
+                paths: paths, destination: destination, policy: backupPolicy, appVersion: version
+            )
+            latestBackupVerification = LabBackupManager.verify(backup)
+            appendLog(.success, scope: "backup", "Created and verified lab backup at \(backup.path)")
+            persistLogs()
+            reveal(backup)
+        } catch { present(error, context: "Creating lab backup") }
+    }
+
+    func verifyLabBackup(_ backup: URL) {
+        latestBackupVerification = LabBackupManager.verify(backup)
+        if latestBackupVerification?.passed == true {
+            appendLog(.success, scope: "backup", "Backup verification passed")
+        } else {
+            appendLog(.error, scope: "backup", "Backup verification failed")
+        }
+        persistLogs()
+    }
+
+    func stageLabRestore(_ backup: URL) {
+        do {
+            let staged = try LabBackupManager.stageRestore(backup, paths: paths)
+            appendLog(.success, scope: "backup", "Verified restore staged at \(staged.path); live state was not overwritten")
+            persistLogs()
+            reveal(staged)
+        } catch { present(error, context: "Staging backup restore") }
+    }
+
+    func updateUpdateLifecyclePolicy(_ policy: UpdateLifecyclePolicy) {
+        updateLifecyclePolicy = policy
+        do { try HardeningJSON.save(policy, to: paths.stateRoot.appendingPathComponent("update-lifecycle-policy.json")) }
+        catch { present(error, context: "Saving update lifecycle policy") }
+    }
+
+    func stageDownloadedUpdate() {
+        guard case let .downloaded(version, path) = updateState else {
+            alertMessage = "Download and verify an update before staging installation."
+            return
+        }
+        do {
+            stagedUpdate = try UpdateLifecycleManager.stage(
+                archive: URL(fileURLWithPath: path),
+                currentApp: Bundle.main.bundleURL,
+                version: version,
+                paths: paths,
+                policy: updateLifecyclePolicy
+            )
+            appendLog(.success, scope: "updates", "Staged update \(version) with a rollback copy; installation still requires explicit approval")
+            persistLogs()
+        } catch { present(error, context: "Staging verified update") }
+    }
+
+    func runResilienceSuite() {
+        resilienceReport = ResilienceSuite.run(paths: paths)
+        appendLog(
+            resilienceReport?.passed == true ? .success : .error,
+            scope: "resilience",
+            "Resilience suite completed: \(resilienceReport?.results.filter(\.passed).count ?? 0)/\(resilienceReport?.results.count ?? 0) passed"
+        )
+        persistLogs()
     }
 
     func probeGuestProtocol(for device: VirtualDevice) async {
@@ -281,6 +459,88 @@ final class LabAppModel: ObservableObject {
         } catch {
             present(error, context: "Initializing remote lab agent")
         }
+    }
+
+    func refreshRemoteAgentHealth() async {
+        guard let result = await runRemoteAgentCommand(["agent-health", "--json"]) else { return }
+        do {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            remoteAgentHealth = try decoder.decode(RemoteAgentHealthSnapshot.self, from: Data(result.output.utf8))
+            if remoteAgentHealth?.healthy == false {
+                appendLog(.error, scope: "agent", remoteAgentHealth?.issues.joined(separator: " • ") ?? "Agent health check failed")
+                persistLogs()
+            }
+        } catch {
+            if !result.succeeded { alertMessage = "Remote-agent health: \(cleanAgentOutput(result.output))" }
+            else { present(error, context: "Reading remote-agent health") }
+        }
+    }
+
+    func rotateRemoteAgentKey(revokePrevious: Bool) async {
+        var arguments = ["agent-key-rotate"]
+        if revokePrevious { arguments.append("--revoke-previous") }
+        guard let result = await runRemoteAgentCommand(arguments) else { return }
+        guard result.succeeded else {
+            alertMessage = "Rotating remote-agent key: \(cleanAgentOutput(result.output))"
+            return
+        }
+        await refreshRemoteAgentHealth()
+        if var configuration = remoteAgentConfiguration {
+            configuration.activeKeyID = remoteAgentHealth?.activeKeyID
+            configuration.rotatedAt = .now
+            remoteAgentConfiguration = configuration
+            try? HardeningJSON.save(configuration, to: paths.stateRoot.appendingPathComponent("remote-agent.json"))
+        }
+        appendLog(.success, scope: "agent", cleanAgentOutput(result.output))
+        persistLogs()
+    }
+
+    func cancelRemoteAgentJob(_ rawID: String) async {
+        guard UUID(uuidString: rawID.trimmingCharacters(in: .whitespacesAndNewlines)) != nil else {
+            alertMessage = "Enter a valid remote-agent job UUID."
+            return
+        }
+        guard let result = await runRemoteAgentCommand(["agent-cancel", "--job", rawID]) else { return }
+        if result.succeeded { appendLog(.success, scope: "agent", cleanAgentOutput(result.output)) }
+        else { alertMessage = "Cancelling remote-agent job: \(cleanAgentOutput(result.output))" }
+        persistLogs()
+        await refreshRemoteAgentHealth()
+    }
+
+    func cleanupRemoteAgentQueue() async {
+        guard let result = await runRemoteAgentCommand(["agent-cleanup", "--older-than-days", "30"]) else { return }
+        if result.succeeded { appendLog(.success, scope: "agent", cleanAgentOutput(result.output)) }
+        else { alertMessage = "Cleaning remote-agent queue: \(cleanAgentOutput(result.output))" }
+        persistLogs()
+        await refreshRemoteAgentHealth()
+    }
+
+    private func runRemoteAgentCommand(_ command: [String]) async -> CommandResult? {
+        guard let configuration = remoteAgentConfiguration else {
+            alertMessage = "Initialize the remote agent first."
+            return nil
+        }
+        let candidates = [
+            Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/vdlctl"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/debug/vdlctl"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/release/vdlctl"),
+        ]
+        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+            alertMessage = "The bundled vdlctl executable is unavailable."
+            return nil
+        }
+        let arguments = command + [
+            "--queue", configuration.queuePath,
+            "--token-file", configuration.tokenFilePath,
+        ]
+        return await Task.detached(priority: .utility) {
+            ProcessExecutor.run(executable: executable, arguments: arguments, timeout: 30)
+        }.value
+    }
+
+    private func cleanAgentOutput(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func resolveJournalEntry(_ entry: OperationJournalEntry) {
@@ -1531,7 +1791,9 @@ final class LabAppModel: ObservableObject {
         if !automatic { updateState = .checking }
         let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
         do {
-            updateState = try await updateService.check(currentVersion: current)
+            updateState = try await updateService.check(
+                currentVersion: current, channel: updateLifecyclePolicy.channel
+            )
         } catch {
             if !automatic { updateState = .failed(error.localizedDescription) }
         }
@@ -1540,7 +1802,10 @@ final class LabAppModel: ObservableObject {
     func downloadAvailableUpdate() async {
         do {
             let destination = paths.stateRoot.appendingPathComponent("Updates", isDirectory: true)
-            updateState = try await updateService.downloadVerifiedUpdate(destinationRoot: destination)
+            updateState = try await updateService.downloadVerifiedUpdate(
+                destinationRoot: destination,
+                requireSignedManifest: updateLifecyclePolicy.requireSignedManifest
+            )
             if case let .downloaded(_, path) = updateState {
                 reveal(URL(fileURLWithPath: path))
             }

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.7.0
+
+- Added a Production Readiness workspace covering ten final operational areas: pinned real-VM qualification, safe setup repair, guest trust, accessibility contracts, evidence review, backup/restore, remote agent v2, staged updates, supply chain, and resilience.
+- Added authenticated guest-control protocol v3 with per-VM HMAC keys, owner-only socket/key permissions, timestamps, nonces, replay rejection, and fail-closed mutation/diagnostic gates.
+- Added Curve25519-signed evidence payloads, immutable hash chaining, reviewer approval/rejection, and payload tamper detection.
+- Added manifest/checksum lab backups with credential exclusions and verified restore staging that never overwrites live state.
+- Upgraded the CLI queue to schema v2 with key IDs, rotation/revocation, nonce replay protection, explicit cancellation, cleanup, and health reporting.
+- Added signed-update policy enforcement, code-sign/notarization/migration staging, rollback copies, and explicit installer/rollback command generation.
+- Added embedded resource manifests, CycloneDX SBOM, SLSA-style provenance, CodeQL, dependency review, Dependabot, and secret scanning.
+- Added eight non-destructive fault-injection scenarios and expanded the test suite from 32 to 40 tests.
+
 ## 0.6.0
 
 - Added a first-class backend registry that distinguishes active adapters, planned adapters, research-only projects, and non-executable product benchmarks.

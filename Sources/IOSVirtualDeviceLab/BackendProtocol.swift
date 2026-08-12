@@ -284,14 +284,16 @@ actor MockLabBackend: LabBackend {
     func guestProtocolHandshake(for device: VirtualDevice) -> GuestProtocolHandshake {
         GuestProtocolHandshake(
             status: .compatible,
-            negotiatedVersion: 2,
+            negotiatedVersion: 3,
             minimumSupportedVersion: 1,
-            maximumSupportedVersion: 2,
+            maximumSupportedVersion: 3,
             capabilities: [.screenshots, .hardwareKeys, .guestFiles, .audioOutput, .networking],
             maximumMessageBytes: 1_048_576,
             authenticated: true,
+            replayProtected: true,
+            authenticationClockSkewSeconds: 30,
             transport: "Mock in-memory transport",
-            message: "Mock guest protocol v2"
+            message: "Mock authenticated guest protocol v3"
         )
     }
 
