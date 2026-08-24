@@ -819,9 +819,8 @@ struct LabPaths: Sendable {
     }
 
     func createDirectories() throws {
-        let fm = FileManager.default
         for url in [dataRoot, libraryRoot, firmwareRoot, snapshotsRoot, stateRoot] {
-            try fm.createDirectory(at: url, withIntermediateDirectories: true)
+            try SecureFilesystem.prepareDirectory(url)
         }
     }
 }

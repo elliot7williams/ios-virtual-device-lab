@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.8.0
+
+- Added a fast, versioned companion contract and fail-closed host enforcement for backend 0.8, protocol v3, and credential-free VM exports.
+- Added Keychain-backed per-VM guest-control credentials with explicit rotation/revocation and automatic regeneration after clone, import, snapshot restore, and full-lab restore.
+- Expanded backup and disaster recovery to cover VM libraries, optional owned firmware, snapshots, state, incremental hard links, streaming chunk-authenticated encryption, capacity/conflict planning, isolated staging, explicit apply commands, and rollback directories.
+- Linked evidence seals to an exact passing qualification campaign and required an identified sealing requester and reviewer.
+- Added cross-process file locks, atomic owner-only state and remote-agent queues, concurrent worker claiming, and replay-ledger protection.
+- Added launch/crash markers, main-thread hang reports, three-strike safe mode, and a UI surface for recovery status.
+- Hardened updates with streamed downloads, archive traversal/symlink/expansion checks, historical migration fixtures, version-specific launch health checks, and automatic rollback.
+- Added critical-action accessibility identifiers and keyboard shortcuts, localization resources, a 10,000-record load fixture, watchdog actor-isolation coverage, and expanded service/security coverage to 48 tests.
+- Pinned every GitHub Action to a full commit SHA, added release artifact attestations, enabled the dependency graph and Dependabot security updates, and added security, support, firmware, and governance policy.
+
 ## 0.7.0
 
 - Added a Production Readiness workspace covering ten final operational areas: pinned real-VM qualification, safe setup repair, guest trust, accessibility contracts, evidence review, backup/restore, remote agent v2, staged updates, supply chain, and resilience.

@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 // MARK: - Real-VM qualification campaigns
@@ -109,7 +110,7 @@ enum SetupAssistant {
         let stateWritable = fm.isWritableFile(atPath: paths.stateRoot.path)
         let hasFirmware = ((try? fm.contentsOfDirectory(at: paths.firmwareRoot, includingPropertiesForKeys: nil)) ?? [])
             .contains { $0.pathExtension.lowercased() == "ipsw" }
-        let free = (try? paths.dataRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+        let free = (try? paths.dataRoot.resolvingSymlinksInPath().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage ?? 0
         let checks = [
             SetupCheck(
@@ -455,17 +456,62 @@ enum EvidenceLedger {
 // MARK: - Full lab backup and disaster recovery
 
 struct LabBackupPolicy: Codable, Hashable, Sendable {
+    var includeVirtualDevices: Bool
+    var includeFirmware: Bool
     var includeSnapshots: Bool
     var includeTestArtifacts: Bool
     var includeDiagnosticBundles: Bool
+    var incremental: Bool
+    var encryptArchive: Bool
     var maximumBackups: Int
 
     static let standard = LabBackupPolicy(
+        includeVirtualDevices: true,
+        includeFirmware: false,
         includeSnapshots: false,
         includeTestArtifacts: true,
         includeDiagnosticBundles: false,
+        incremental: true,
+        encryptArchive: false,
         maximumBackups: 5
     )
+
+    init(
+        includeVirtualDevices: Bool = true,
+        includeFirmware: Bool = false,
+        includeSnapshots: Bool,
+        includeTestArtifacts: Bool,
+        includeDiagnosticBundles: Bool,
+        incremental: Bool = true,
+        encryptArchive: Bool = false,
+        maximumBackups: Int
+    ) {
+        self.includeVirtualDevices = includeVirtualDevices
+        self.includeFirmware = includeFirmware
+        self.includeSnapshots = includeSnapshots
+        self.includeTestArtifacts = includeTestArtifacts
+        self.includeDiagnosticBundles = includeDiagnosticBundles
+        self.incremental = incremental
+        self.encryptArchive = encryptArchive
+        self.maximumBackups = maximumBackups
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case includeVirtualDevices, includeFirmware, includeSnapshots, includeTestArtifacts
+        case includeDiagnosticBundles, incremental, encryptArchive, maximumBackups
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        includeVirtualDevices = try values.decodeIfPresent(Bool.self, forKey: .includeVirtualDevices) ?? true
+        includeFirmware = try values.decodeIfPresent(Bool.self, forKey: .includeFirmware) ?? false
+        includeSnapshots = try values.decodeIfPresent(Bool.self, forKey: .includeSnapshots) ?? false
+        includeTestArtifacts = try values.decodeIfPresent(Bool.self, forKey: .includeTestArtifacts) ?? true
+        includeDiagnosticBundles = try values.decodeIfPresent(Bool.self, forKey: .includeDiagnosticBundles) ?? false
+        incremental = try values.decodeIfPresent(Bool.self, forKey: .incremental) ?? true
+        encryptArchive = try values.decodeIfPresent(Bool.self, forKey: .encryptArchive) ?? false
+        maximumBackups = try values.decodeIfPresent(Int.self, forKey: .maximumBackups) ?? 5
+    }
 }
 
 struct BackupManifestEntry: Codable, Hashable, Sendable {
@@ -480,8 +526,70 @@ struct LabBackupManifest: Identifiable, Codable, Hashable, Sendable {
     let createdAt: Date
     let appVersion: String
     let sourceRoot: String
+    let includesVirtualDevices: Bool
+    let includesFirmware: Bool
     let includesSnapshots: Bool
+    let incrementalBaseID: UUID?
+    let encryptedArchive: Bool
     let entries: [BackupManifestEntry]
+
+    private enum CodingKeys: String, CodingKey {
+        case id, schemaVersion, createdAt, appVersion, sourceRoot, includesVirtualDevices
+        case includesFirmware, includesSnapshots, incrementalBaseID, encryptedArchive, entries
+    }
+
+    init(
+        id: UUID,
+        schemaVersion: Int,
+        createdAt: Date,
+        appVersion: String,
+        sourceRoot: String,
+        includesVirtualDevices: Bool,
+        includesFirmware: Bool,
+        includesSnapshots: Bool,
+        incrementalBaseID: UUID?,
+        encryptedArchive: Bool,
+        entries: [BackupManifestEntry]
+    ) {
+        self.id = id
+        self.schemaVersion = schemaVersion
+        self.createdAt = createdAt
+        self.appVersion = appVersion
+        self.sourceRoot = sourceRoot
+        self.includesVirtualDevices = includesVirtualDevices
+        self.includesFirmware = includesFirmware
+        self.includesSnapshots = includesSnapshots
+        self.incrementalBaseID = incrementalBaseID
+        self.encryptedArchive = encryptedArchive
+        self.entries = entries
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        appVersion = try values.decode(String.self, forKey: .appVersion)
+        sourceRoot = try values.decode(String.self, forKey: .sourceRoot)
+        includesVirtualDevices = try values.decodeIfPresent(Bool.self, forKey: .includesVirtualDevices) ?? false
+        includesFirmware = try values.decodeIfPresent(Bool.self, forKey: .includesFirmware) ?? false
+        includesSnapshots = try values.decodeIfPresent(Bool.self, forKey: .includesSnapshots) ?? false
+        incrementalBaseID = try values.decodeIfPresent(UUID.self, forKey: .incrementalBaseID)
+        encryptedArchive = try values.decodeIfPresent(Bool.self, forKey: .encryptedArchive) ?? false
+        entries = try values.decode([BackupManifestEntry].self, forKey: .entries)
+    }
+}
+
+struct LabRestorePlan: Codable, Hashable, Sendable {
+    let backupID: UUID?
+    let verified: Bool
+    let requiredBytes: Int64
+    let availableBytes: Int64
+    let targets: [String]
+    let conflicts: [String]
+    let issues: [String]
+
+    var canStage: Bool { verified && requiredBytes <= availableBytes && issues.isEmpty }
 }
 
 struct BackupVerification: Codable, Hashable, Sendable {
@@ -492,32 +600,99 @@ struct BackupVerification: Codable, Hashable, Sendable {
 }
 
 enum LabBackupManager {
-    private static let excludedNames = Set(["agent-token", "signing-key", "Updates", "Migration Backups"])
+    private static let excludedNames = Set([
+        "agent-token", "signing-key", "Updates", "Migration Backups",
+        "Restore Staging", "Restore Rollbacks", GuestCredentialVault.fileName, "*.lock",
+    ])
 
     static func create(
         paths: LabPaths,
         destination: URL,
         policy: LabBackupPolicy,
-        appVersion: String
+        appVersion: String,
+        passphrase: String? = nil
     ) throws -> URL {
+        try SecureFilesystem.prepareDirectory(destination)
         let backup = destination.appendingPathComponent("VDL-Backup-\(timestamp())", isDirectory: true)
         let payload = backup.appendingPathComponent("Payload", isDirectory: true)
-        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: true)
-        try copyTree(from: paths.stateRoot, to: payload.appendingPathComponent("VirtualDeviceLab"), policy: policy)
+        try SecureFilesystem.prepareDirectory(payload)
+        let previous = policy.incremental ? latestBackup(in: destination, excluding: backup) : nil
+        let previousPayload = previous?.url.appendingPathComponent("Payload", isDirectory: true)
+        try copyTree(
+            from: paths.stateRoot,
+            to: payload.appendingPathComponent("VirtualDeviceLab"),
+            policy: policy,
+            previous: previousPayload?.appendingPathComponent("VirtualDeviceLab")
+        )
+        if policy.includeVirtualDevices {
+            try copyTree(
+                from: paths.libraryRoot,
+                to: payload.appendingPathComponent("VMs"),
+                policy: policy,
+                previous: previousPayload?.appendingPathComponent("VMs")
+            )
+        }
+        if policy.includeFirmware {
+            try copyTree(
+                from: paths.firmwareRoot,
+                to: payload.appendingPathComponent("Firmware"),
+                policy: policy,
+                previous: previousPayload?.appendingPathComponent("Firmware")
+            )
+        }
         if policy.includeSnapshots {
-            try copyTree(from: paths.snapshotsRoot, to: payload.appendingPathComponent("Snapshots"), policy: policy)
+            try copyTree(
+                from: paths.snapshotsRoot,
+                to: payload.appendingPathComponent("Snapshots"),
+                policy: policy,
+                previous: previousPayload?.appendingPathComponent("Snapshots")
+            )
         }
         let entries = try manifestEntries(root: payload)
         let manifest = LabBackupManifest(
-            id: UUID(), schemaVersion: 1, createdAt: .now, appVersion: appVersion,
-            sourceRoot: paths.dataRoot.path, includesSnapshots: policy.includeSnapshots, entries: entries
+            id: UUID(), schemaVersion: 2, createdAt: .now, appVersion: appVersion,
+            sourceRoot: paths.dataRoot.path,
+            includesVirtualDevices: policy.includeVirtualDevices,
+            includesFirmware: policy.includeFirmware,
+            includesSnapshots: policy.includeSnapshots,
+            incrementalBaseID: previous?.manifest.id,
+            encryptedArchive: policy.encryptArchive,
+            entries: entries
         )
         try HardeningJSON.save(manifest, to: backup.appendingPathComponent("manifest.json"))
+        if policy.encryptArchive {
+            guard let passphrase, passphrase.count >= 12 else {
+                throw CocoaError(.userCancelled, userInfo: [
+                    NSLocalizedDescriptionKey: "Encrypted backups require a passphrase of at least 12 characters.",
+                ])
+            }
+            let encrypted = try BackupArchiveCrypto.encrypt(directory: backup, passphrase: passphrase)
+            try FileManager.default.removeItem(at: backup)
+            try enforceRetention(destination: destination, maximumBackups: policy.maximumBackups, preserving: encrypted)
+            return encrypted
+        }
         try enforceRetention(destination: destination, maximumBackups: policy.maximumBackups, preserving: backup)
         return backup
     }
 
-    static func verify(_ backup: URL) -> BackupVerification {
+    static func verify(_ backup: URL, passphrase: String? = nil) -> BackupVerification {
+        if !backup.hasDirectoryPath {
+            guard backup.pathExtension == "vdlbackup", let passphrase else {
+                return BackupVerification(
+                    passed: false,
+                    checkedAt: .now,
+                    manifest: nil,
+                    issues: ["An encrypted backup requires its passphrase."]
+                )
+            }
+            do {
+                return try BackupArchiveCrypto.withDecryptedDirectory(backup, passphrase: passphrase) {
+                    verify($0)
+                }
+            } catch {
+                return BackupVerification(passed: false, checkedAt: .now, manifest: nil, issues: [error.localizedDescription])
+            }
+        }
         do {
             let manifest = try HardeningJSON.load(LabBackupManifest.self, from: backup.appendingPathComponent("manifest.json"))
             let payload = backup.appendingPathComponent("Payload")
@@ -547,36 +722,134 @@ enum LabBackupManager {
         }
     }
 
-    static func stageRestore(_ backup: URL, paths: LabPaths) throws -> URL {
-        let verification = verify(backup)
+    static func restorePlan(_ backup: URL, paths: LabPaths, passphrase: String? = nil) -> LabRestorePlan {
+        if !backup.hasDirectoryPath, backup.pathExtension == "vdlbackup", let passphrase {
+            return (try? BackupArchiveCrypto.withDecryptedDirectory(backup, passphrase: passphrase) {
+                restorePlan($0, paths: paths)
+            }) ?? LabRestorePlan(
+                backupID: nil, verified: false, requiredBytes: 0, availableBytes: 0,
+                targets: [], conflicts: [], issues: ["Could not decrypt the backup."]
+            )
+        }
+        let verification = verify(backup, passphrase: passphrase)
+        let required = verification.manifest?.entries.reduce(Int64(0)) { $0 + $1.sizeBytes } ?? 0
+        let available = (try? paths.dataRoot.resolvingSymlinksInPath().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage ?? 0
+        let payload = backup.appendingPathComponent("Payload")
+        let targetPairs = [
+            ("VirtualDeviceLab", paths.stateRoot), ("VMs", paths.libraryRoot),
+            ("Firmware", paths.firmwareRoot), ("Snapshots", paths.snapshotsRoot),
+        ]
+        let targets = targetPairs.filter { FileManager.default.fileExists(atPath: payload.appendingPathComponent($0.0).path) }
+        let conflicts = targets.filter { destinationHasContent($0.1) }.map { $0.1.path }
+        return LabRestorePlan(
+            backupID: verification.manifest?.id,
+            verified: verification.passed,
+            requiredBytes: required,
+            availableBytes: available,
+            targets: targets.map { $0.1.path },
+            conflicts: conflicts,
+            issues: verification.issues
+        )
+    }
+
+    static func stageRestore(_ backup: URL, paths: LabPaths, passphrase: String? = nil) throws -> URL {
+        if !backup.hasDirectoryPath, backup.pathExtension == "vdlbackup", let passphrase {
+            return try BackupArchiveCrypto.withDecryptedDirectory(backup, passphrase: passphrase) {
+                try stageRestore($0, paths: paths)
+            }
+        }
+        let verification = verify(backup, passphrase: passphrase)
         guard verification.passed else { throw CocoaError(.fileReadCorruptFile) }
-        let destination = paths.stateRoot.appendingPathComponent("Restore Staging", isDirectory: true)
+        let destination = paths.dataRoot.appendingPathComponent("Restore Staging", isDirectory: true)
             .appendingPathComponent(verification.manifest?.id.uuidString ?? UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try SecureFilesystem.prepareDirectory(destination.deletingLastPathComponent())
         try FileManager.default.copyItem(at: backup.appendingPathComponent("Payload"), to: destination)
         return destination
     }
 
-    private static func copyTree(from source: URL, to destination: URL, policy: LabBackupPolicy) throws {
+    static func writeApplyRestoreCommand(stagedPayload: URL, paths: LabPaths) throws -> URL {
+        let stagingRoot = paths.dataRoot.appendingPathComponent("Restore Staging", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        let staged = stagedPayload.resolvingSymlinksInPath().standardizedFileURL
+        guard staged.path.hasPrefix(stagingRoot),
+              FileManager.default.fileExists(atPath: staged.appendingPathComponent("VirtualDeviceLab").path)
+        else { throw CocoaError(.fileReadInvalidFileName) }
+        let command = staged.appendingPathComponent("Apply Full Restore.command")
+        let rollback = paths.dataRoot.appendingPathComponent("Restore Rollbacks/\(timestamp())", isDirectory: true)
+        let pairs = [
+            ("VirtualDeviceLab", paths.stateRoot), ("VMs", paths.libraryRoot),
+            ("Firmware", paths.firmwareRoot), ("Snapshots", paths.snapshotsRoot),
+        ]
+        let operations = pairs.map { name, destination in
+            "restore_one \(shellQuote(staged.appendingPathComponent(name).path)) \(shellQuote(destination.path)) \(shellQuote(rollback.appendingPathComponent(name).path))"
+        }.joined(separator: "\n")
+        let script = """
+        #!/bin/zsh
+        set -euo pipefail
+        if /usr/bin/pgrep -x IOSVirtualDeviceLab >/dev/null; then
+          echo "Quit iOS Virtual Device Lab before applying this restore." >&2
+          exit 75
+        fi
+        restore_one() {
+          local source="$1" target="$2" backup="$3"
+          [[ -e "$source" ]] || return 0
+          /bin/mkdir -p "${backup:h}" "${target:h}"
+          if [[ -e "$target" ]]; then /bin/mv "$target" "$backup"; fi
+          if ! /usr/bin/ditto "$source" "$target"; then
+            /bin/rm -rf "$target"
+            if [[ -e "$backup" ]]; then /bin/mv "$backup" "$target"; fi
+            exit 1
+          fi
+        }
+        /bin/mkdir -p \(shellQuote(rollback.path))
+        \(operations)
+        /usr/bin/find \(shellQuote(paths.libraryRoot.path)) -name '.vdl-host-control-key' -type f -delete 2>/dev/null || true
+        /usr/bin/touch \(shellQuote(paths.stateRoot.appendingPathComponent("rotate-restored-credentials").path))
+        echo "Restore applied. Rollback copy: \(rollback.path)"
+        """
+        try script.write(to: command, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: command.path)
+        return command
+    }
+
+    private static func copyTree(
+        from source: URL,
+        to destination: URL,
+        policy: LabBackupPolicy,
+        previous: URL? = nil
+    ) throws {
         guard FileManager.default.fileExists(atPath: source.path) else { return }
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try SecureFilesystem.prepareDirectory(destination)
         guard let enumerator = FileManager.default.enumerator(
-            at: source, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            at: source,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey],
+            options: []
         ) else { return }
         for case let item as URL in enumerator {
             guard let relative = relativePath(of: item, under: source) else { continue }
             let components = Set(relative.split(separator: "/").map(String.init))
-            if !components.isDisjoint(with: excludedNames) {
+            if !components.isDisjoint(with: excludedNames) || item.pathExtension == "lock" {
                 if (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { enumerator.skipDescendants() }
                 continue
             }
             if !policy.includeDiagnosticBundles && relative.contains("Diagnostic") { continue }
             if !policy.includeTestArtifacts && relative.contains("Test Reports") { continue }
             let target = destination.appendingPathComponent(relative)
-            if (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-                try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-            } else {
-                try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let values = try item.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            if values.isSymbolicLink == true { continue }
+            if values.isDirectory == true {
+                try SecureFilesystem.prepareDirectory(target)
+            } else if values.isRegularFile == true {
+                try SecureFilesystem.prepareDirectory(target.deletingLastPathComponent())
+                let prior = previous?.appendingPathComponent(relative)
+                if let prior,
+                   FileManager.default.fileExists(atPath: prior.path),
+                   (try? prior.resourceValues(forKeys: [.fileSizeKey]).fileSize) == values.fileSize,
+                   (try? fileSHA256(prior)) == (try? fileSHA256(item)),
+                   link(prior.path, target.path) == 0 {
+                    continue
+                }
                 try FileManager.default.copyItem(at: item, to: target)
             }
         }
@@ -584,7 +857,7 @@ enum LabBackupManager {
 
     private static func manifestEntries(root: URL) throws -> [BackupManifestEntry] {
         guard let enumerator = FileManager.default.enumerator(
-            at: root, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: [.skipsHiddenFiles]
+            at: root, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: []
         ) else { return [] }
         var entries: [BackupManifestEntry] = []
         for case let url as URL in enumerator {
@@ -616,7 +889,7 @@ enum LabBackupManager {
         let keep = max(1, maximumBackups)
         let backups = try FileManager.default.contentsOfDirectory(
             at: destination, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]
-        ).filter { $0.hasDirectoryPath && $0.lastPathComponent.hasPrefix("VDL-Backup-") }
+        ).filter { $0.lastPathComponent.hasPrefix("VDL-Backup-") }
             .sorted {
                 let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -625,6 +898,36 @@ enum LabBackupManager {
         for expired in backups.dropFirst(keep) where expired.standardizedFileURL != preserving.standardizedFileURL {
             try FileManager.default.removeItem(at: expired)
         }
+    }
+
+    private static func latestBackup(in destination: URL, excluding: URL) -> (url: URL, manifest: LabBackupManifest)? {
+        let candidates = ((try? FileManager.default.contentsOfDirectory(
+            at: destination,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []).filter {
+            $0.hasDirectoryPath && $0.lastPathComponent.hasPrefix("VDL-Backup-")
+                && $0.standardizedFileURL != excluding.standardizedFileURL
+        }.sorted {
+            let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lhs > rhs
+        }
+        for candidate in candidates {
+            if let manifest = try? HardeningJSON.load(LabBackupManifest.self, from: candidate.appendingPathComponent("manifest.json")) {
+                return (candidate, manifest)
+            }
+        }
+        return nil
+    }
+
+    private static func destinationHasContent(_ url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        return ((try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []).isEmpty == false
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
@@ -669,15 +972,17 @@ enum UpdateLifecycleManager {
         paths: LabPaths,
         policy: UpdateLifecyclePolicy
     ) throws -> StagedUpdateRecord {
+        try validateArchiveListing(archive)
         let root = paths.stateRoot.appendingPathComponent("Updates", isDirectory: true)
             .appendingPathComponent("Staged-\(NameSanitizer.fileComponent(version))", isDirectory: true)
         if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try SecureFilesystem.prepareDirectory(root)
         let unzip = ProcessExecutor.run(
             executable: URL(fileURLWithPath: "/usr/bin/ditto"),
             arguments: ["-x", "-k", archive.path, root.path], timeout: 120
         )
         guard unzip.succeeded else { throw CocoaError(.fileReadCorruptFile) }
+        try validateExtractedTree(root: root, archive: archive)
         guard let app = findApp(root: root) else { throw CocoaError(.fileNoSuchFile) }
         let signature = ProcessExecutor.run(
             executable: URL(fileURLWithPath: "/usr/bin/codesign"),
@@ -705,7 +1010,10 @@ enum UpdateLifecycleManager {
         if let currentApp, let rollbackPath {
             let scripts = try writeApprovalScripts(
                 root: root, stagedApp: app,
-                currentApp: currentApp, rollbackApp: URL(fileURLWithPath: rollbackPath)
+                currentApp: currentApp,
+                rollbackApp: URL(fileURLWithPath: rollbackPath),
+                healthMarker: paths.stateRoot.appendingPathComponent("launch-health.json"),
+                expectedVersion: version
             )
             installerScriptPath = scripts.install.path
             rollbackScriptPath = scripts.rollback.path
@@ -732,19 +1040,25 @@ enum UpdateLifecycleManager {
         root: URL,
         stagedApp: URL,
         currentApp: URL,
-        rollbackApp: URL
+        rollbackApp: URL,
+        healthMarker: URL,
+        expectedVersion: String
     ) throws -> (install: URL, rollback: URL) {
         let installURL = root.appendingPathComponent("Install Verified Update.command")
         let rollbackURL = root.appendingPathComponent("Restore Previous Version.command")
         let staged = shellQuote(stagedApp.path)
         let current = shellQuote(currentApp.path)
         let rollback = shellQuote(rollbackApp.path)
+        let health = shellQuote(healthMarker.path)
+        let expected = shellQuote(expectedVersion)
         let install = """
         #!/bin/zsh
         set -euo pipefail
         staged=\(staged)
         target=\(current)
         rollback=\(rollback)
+        health=\(health)
+        expected=\(expected)
         temporary="${target}.vdl-installing"
         previous="${target}.vdl-previous"
         /usr/bin/codesign --verify --deep --strict "$staged"
@@ -756,8 +1070,25 @@ enum UpdateLifecycleManager {
           exit 1
         fi
         /bin/rm -rf "$previous"
+        /bin/rm -f "$health"
         /usr/bin/open "$target"
-        echo "Installed verified update. Rollback copy: $rollback"
+        healthy=0
+        for _ in {1..45}; do
+          if [[ -f "$health" ]] && /usr/bin/grep -q '"lastPhase" : "ready"' "$health" && /usr/bin/grep -q "\"appVersion\" : \"$expected\"" "$health"; then
+            healthy=1
+            break
+          fi
+          /bin/sleep 1
+        done
+        if [[ "$healthy" -ne 1 ]]; then
+          /usr/bin/pkill -x 'IOSVirtualDeviceLab' || true
+          /bin/rm -rf "$target"
+          /usr/bin/ditto "$rollback" "$target"
+          /usr/bin/open "$target"
+          echo "Update health check failed; restored previous verified version." >&2
+          exit 75
+        fi
+        echo "Installed and health-checked verified update. Rollback copy: $rollback"
         """
         let rollbackScript = """
         #!/bin/zsh
@@ -793,6 +1124,55 @@ enum UpdateLifecycleManager {
         guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return nil }
         for case let url as URL in enumerator where url.pathExtension == "app" { return url }
         return nil
+    }
+
+    private static func validateArchiveListing(_ archive: URL) throws {
+        let listing = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/unzip"),
+            arguments: ["-Z1", archive.path],
+            timeout: 60,
+            maximumOutputBytes: 8 * 1_024 * 1_024
+        )
+        guard listing.succeeded else { throw CocoaError(.fileReadCorruptFile) }
+        let entries = listing.output.split(whereSeparator: \.isNewline).map(String.init)
+        guard !entries.isEmpty, entries.count <= 100_000 else { throw CocoaError(.fileReadCorruptFile) }
+        for entry in entries {
+            let normalized = entry.replacingOccurrences(of: "\\", with: "/")
+            let path = normalized.hasSuffix("/") ? String(normalized.dropLast()) : normalized
+            let components = path.split(separator: "/", omittingEmptySubsequences: false)
+            guard !path.isEmpty,
+                  !path.hasPrefix("/"),
+                  !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." })
+            else { throw CocoaError(.fileReadCorruptFile) }
+        }
+    }
+
+    private static func validateExtractedTree(root: URL, archive: URL) throws {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey],
+            options: []
+        ) else { throw CocoaError(.fileReadCorruptFile) }
+        let canonicalRoot = root.standardizedFileURL.path + "/"
+        let compressedSize = ((try? archive.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        let expandedLimit = max(Int64(compressedSize) * 100, 4 * 1_073_741_824)
+        var expandedBytes: Int64 = 0
+        for case let item as URL in enumerator {
+            let values = try item.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey])
+            if values.isRegularFile == true {
+                expandedBytes += Int64(values.fileSize ?? 0)
+                guard expandedBytes <= expandedLimit else { throw CocoaError(.fileReadTooLarge) }
+            }
+            if values.isSymbolicLink == true {
+                let target = try FileManager.default.destinationOfSymbolicLink(atPath: item.path)
+                let destination = target.hasPrefix("/")
+                    ? URL(fileURLWithPath: target)
+                    : item.deletingLastPathComponent().appendingPathComponent(target)
+                guard destination.standardizedFileURL.path.hasPrefix(canonicalRoot) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+            }
+        }
     }
 
     private static func pruneRollbackCopies(root: URL, keep: Int, preserving: URL) throws {
@@ -974,7 +1354,7 @@ private func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
-private func fileSHA256(_ url: URL) throws -> String {
+func fileSHA256(_ url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     var hasher = SHA256()

@@ -94,16 +94,16 @@ actor UpdateService {
         guard let archive = release.assets.first(where: { $0.name.hasSuffix(".zip") }),
               let checksum = release.assets.first(where: { $0.name == archive.name + ".sha256" })
         else { throw URLError(.fileDoesNotExist) }
-        async let archiveRequest = URLSession.shared.data(from: archive.browserDownloadURL)
+        async let archiveRequest = URLSession.shared.download(from: archive.browserDownloadURL)
         async let checksumRequest = URLSession.shared.data(from: checksum.browserDownloadURL)
-        let ((archiveData, archiveResponse), (checksumData, checksumResponse)) = try await (archiveRequest, checksumRequest)
+        let ((temporaryArchive, archiveResponse), (checksumData, checksumResponse)) = try await (archiveRequest, checksumRequest)
         guard (archiveResponse as? HTTPURLResponse)?.statusCode == 200,
               (checksumResponse as? HTTPURLResponse)?.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
         let expected = String(decoding: checksumData, as: UTF8.self)
             .split(whereSeparator: { $0.isWhitespace }).first.map(String.init)?.lowercased()
-        let actual = SHA256.hash(data: archiveData).map { String(format: "%02x", $0) }.joined()
+        let actual = try fileSHA256(temporaryArchive)
         guard expected == actual else { throw URLError(.cannotDecodeRawData) }
         try await verifySignedManifestIfConfigured(
             release: release,
@@ -114,7 +114,10 @@ actor UpdateService {
         )
         try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
         let destination = destinationRoot.appendingPathComponent(archive.name)
-        try archiveData.write(to: destination, options: .atomic)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: temporaryArchive, to: destination)
         return .downloaded(version: version, path: destination.path)
     }
 

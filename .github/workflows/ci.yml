@@ -10,7 +10,7 @@ jobs:
     runs-on: macos-26
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Toolchain
         run: |
@@ -36,6 +36,7 @@ jobs:
           test -f "$app/Contents/Resources/supply-chain-manifest.json"
           test -f "$app/Contents/Resources/sbom.cdx.json"
           test -f "$app/Contents/Resources/build-provenance.json"
+          test -f "$app/Contents/Resources/en.lproj/Localizable.strings"
           test -x "$app/Contents/MacOS/vdlctl"
           "$app/Contents/MacOS/vdlctl" version
           "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
@@ -54,9 +55,22 @@ jobs:
           "$app/Contents/MacOS/vdlctl" agent-cancel --queue "$queue" --job "$cancel_id"
           test -f "$queue/Cancelled/$cancel_id.json"
           "$app/Contents/MacOS/vdlctl" agent-cleanup --queue "$queue" --older-than-days 30
+          first_output="$("$app/Contents/MacOS/vdlctl" agent-submit --workflow boot-smoke --device concurrent-one --dry-run --queue "$queue" --token-file "$token")"
+          second_output="$("$app/Contents/MacOS/vdlctl" agent-submit --workflow boot-smoke --device concurrent-two --dry-run --queue "$queue" --token-file "$token")"
+          first_id="${first_output##*: }"
+          second_id="${second_output##*: }"
+          "$app/Contents/MacOS/vdlctl" agent-run-once --queue "$queue" --token-file "$token" &
+          worker_one=$!
+          "$app/Contents/MacOS/vdlctl" agent-run-once --queue "$queue" --token-file "$token" &
+          worker_two=$!
+          wait "$worker_one" "$worker_two"
+          "$app/Contents/MacOS/vdlctl" agent-status --queue "$queue" --job "$first_id"
+          "$app/Contents/MacOS/vdlctl" agent-status --queue "$queue" --job "$second_id"
+          test "$(stat -f '%Lp' "$queue")" = 700
+          test "$(stat -f '%Lp' "$queue/Results/$first_id.json")" = 600
 
       - name: Upload app bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ios-virtual-device-lab-${{ github.sha }}
           path: .build/iOS Virtual Device Lab.app

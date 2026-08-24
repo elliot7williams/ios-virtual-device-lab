@@ -278,7 +278,7 @@ struct LabMigrationReport: Codable, Hashable, Sendable {
 }
 
 enum LabMigrationManager {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
     private static let managedFiles = [
         "activity.json", "automation-workflows.json", "compatibility-manifest.json",
         "diagnostic-privacy.json", "environment-assignments.json", "environment-profiles.json",
@@ -310,8 +310,10 @@ enum LabMigrationManager {
                 summary = "Established versioned lab state and rollback metadata."
             case 2:
                 summary = "Added operational-readiness, provenance, environment, journal, and agent schemas."
-            default:
+            case 3:
                 summary = "Added qualification, guest trust, evidence governance, backup, update, supply-chain, and resilience schemas."
+            default:
+                summary = "Added full-lab encrypted recovery, companion contracts, credential lifecycle, locked state, launch forensics, and update health rollback."
             }
             let record = LabMigrationRecord(
                 id: UUID(),
@@ -645,7 +647,7 @@ enum StorageLifecycleManager {
         let firmwareBytes = firmware.reduce(Int64(0)) { $0 + $1.sizeBytes }
         let snapshotBytes = snapshots.reduce(Int64(0)) { $0 + $1.sizeBytes }
         let stateBytes = directoryBytes(paths.stateRoot, excluding: ["App Artifacts", "Diagnostics"])
-        let available = (try? paths.dataRoot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+        let available = (try? paths.dataRoot.resolvingSymlinksInPath().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage ?? 0
         let duplicates = Dictionary(grouping: firmware.filter { $0.sha256 != nil }, by: { $0.sha256! })
             .filter { $0.value.count > 1 }
@@ -975,16 +977,32 @@ struct ProductionHardeningState: Sendable {
 
 enum HardeningJSON {
     static func load<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(type, from: Data(contentsOf: url))
+        let decode: () throws -> T = {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(type, from: Data(contentsOf: url))
+        }
+        let immutableRoots = [
+            Bundle.main.resourceURL,
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Resources", isDirectory: true),
+        ].compactMap { $0?.standardizedFileURL }
+        if immutableRoots.contains(where: { url.standardizedFileURL.path.hasPrefix($0.path + "/") }) {
+            return try decode()
+        }
+        return try AdvisoryFileLock.withLock(at: url.appendingPathExtension("lock")) {
+            try decode()
+        }
     }
 
     static func save<T: Encodable>(_ value: T, to url: URL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(value).write(to: url, options: .atomic)
+        try AdvisoryFileLock.withLock(at: url.appendingPathExtension("lock")) {
+            try SecureFilesystem.prepareDirectory(url.deletingLastPathComponent())
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(value).write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+            try SecureFilesystem.protectFile(url)
+        }
     }
 }

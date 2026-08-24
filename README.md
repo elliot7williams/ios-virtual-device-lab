@@ -36,6 +36,7 @@ A native macOS SwiftUI laboratory for virtual iOS research and cross-version app
 - Reproducible environment profiles, versioned guest-protocol negotiation, storage lifecycle governance, and firmware provenance.
 - Sandboxed/audited plugins plus an authenticated HMAC-signed `vdlctl` queue for remote and CI execution.
 - A multi-backend registry, evidence-based firmware recommendation engine, and in-app capability matrix that keeps unimplemented research adapters non-selectable.
+- A versioned companion contract, Keychain-backed guest-control lifecycle, full encrypted lab recovery, launch safe mode, health-checked updater rollback, and evidence-linked real-VM qualification.
 - A machine-readable third-party provenance catalog with exact pins, license/terms, source-use boundaries, modifications, obligations, and distribution status.
 - A production-readiness workspace for pinned real-VM qualification, safe first-run repair, authenticated guest protocol v3, gated accessibility automation, signed/reviewed evidence, verified backup staging, remote-agent v2, transactional update/rollback commands, supply-chain attestations, and non-destructive resilience fixtures.
 
@@ -81,7 +82,7 @@ To regenerate the macOS `.icns` bundle from the checked-in 1024 px master:
 To create a versioned ZIP and checksum:
 
 ```sh
-./scripts/release_app.sh 0.7.0
+./scripts/release_app.sh 0.8.0
 ```
 
 Developer ID signing and notarization are supported through `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE`; see [Release engineering](docs/RELEASES.md).
@@ -108,6 +109,6 @@ To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/
 - VM creation uses the backend’s native authentication dialog rather than storing a sudo password.
 - The manager never weakens SIP/AMFI itself.
 
-See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), [Operational readiness](docs/OPERATIONAL_READINESS.md), [Production readiness v2](docs/PRODUCTION_READINESS_V2.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
+See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), [Operational readiness](docs/OPERATIONAL_READINESS.md), [Production readiness v2](docs/PRODUCTION_READINESS_V2.md), [Production readiness v3](docs/PRODUCTION_READINESS_V3.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
 
 Also read [Compatibility](docs/COMPATIBILITY.md), [Multi-backend and attribution](docs/MULTI_BACKEND_AND_ATTRIBUTION.md), [Limitations](docs/LIMITATIONS.md), [Remote agent](docs/REMOTE_AGENT.md), and [Plugin development](docs/PLUGINS.md). An entry marked `researching` or `unverified` is never a support claim.

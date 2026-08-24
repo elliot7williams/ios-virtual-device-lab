@@ -1,7 +1,28 @@
 import CryptoKit
+import Darwin
 import Foundation
 
-private let cliVersion = "0.7.0"
+private let cliVersion = "0.8.0"
+
+enum CLIFileLock {
+    static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let descriptor = open(url.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw POSIXError(.EACCES) }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX) == 0 else { throw POSIXError(.EBUSY) }
+        defer { flock(descriptor, LOCK_UN) }
+        return try body()
+    }
+}
+
+func protectCLIFile(_ url: URL) throws {
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+}
 
 struct CLIWorkflow: Codable, Sendable {
     let id: UUID
@@ -165,6 +186,32 @@ enum Shell {
 }
 
 enum HostDoctor {
+    private static func versionAtLeast08(_ value: String?) -> Bool {
+        guard let value else { return false }
+        let parts = value.split(separator: ".").map { Int($0.prefix(while: \.isNumber)) ?? 0 }
+        let major = parts.first ?? 0
+        let minor = parts.count > 1 ? parts[1] : 0
+        return major > 0 || minor >= 8
+    }
+
+    private static func hasRequiredBackendContract(backend: String, result: CommandOutcome?) -> Bool {
+        let liveData = result?.passed == true ? result?.output.data(using: .utf8) : nil
+        let binary = URL(fileURLWithPath: backend)
+        let bundledURL = binary
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/vdl-backend-contract.json")
+        let bundledData = try? Data(contentsOf: bundledURL)
+        guard let data = liveData ?? bundledData,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return object["schemaVersion"] as? Int == 1
+            && object["backendID"] as? String == "vphone-cli"
+            && object["hostControlProtocol"] as? Int == 3
+            && object["exportExcludesCredentials"] as? Bool == true
+            && versionAtLeast08(object["backendVersion"] as? String)
+    }
+
     static func inspect() -> DoctorReport {
         let architecture = Shell.run("/usr/bin/uname", ["-m"], timeout: 10).output.trimmed
         let sip = Shell.run("/usr/bin/csrutil", ["status"], timeout: 10).output.trimmed
@@ -175,13 +222,15 @@ enum HostDoctor {
             timeout: 10
         ).output.trimmed
         let backend = resolveVPhone()
-        let backendCheck = backend.map { Shell.run($0, ["--help"], timeout: 20) }
+        let backendCheck = backend.map { Shell.run($0, ["--vdl-contract"], timeout: 5) }
         let identities = Shell.run(
             "/usr/bin/security",
             ["find-identity", "-v", "-p", "codesigning"],
             timeout: 20
         ).output
-        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".vphone")
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".vphone")
+            .resolvingSymlinksInPath()
         let available = (try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage ?? 0
         var blockers: [String] = []
@@ -190,7 +239,13 @@ enum HostDoctor {
             blockers.append("Allow Research Guests is not enabled from Recovery")
         }
         if backend == nil { blockers.append("vphone-cli is not installed") }
-        else if backendCheck?.passed != true { blockers.append("vphone-cli preflight did not complete successfully") }
+        else if !hasRequiredBackendContract(backend: backend!, result: backendCheck) {
+            blockers.append("vphone-cli does not satisfy the required 0.8 backend contract")
+        }
+        let criticalStorageReserve = Int64(25) * 1_073_741_824
+        if available < criticalStorageReserve {
+            blockers.append("Free storage is below the 25 GiB critical reserve for the VM library")
+        }
         let hasDeveloperID = identities.contains("Developer ID Application")
         if !hasDeveloperID { blockers.append("Developer ID Application identity is unavailable for production releases") }
         return DoctorReport(
@@ -684,7 +739,12 @@ enum AgentQueue {
         guard !FileManager.default.fileExists(atPath: tokenFile.path) else {
             throw CLIError.message("Token file already exists; refusing to overwrite it")
         }
-        try FileManager.default.createDirectory(at: tokenFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: tokenFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tokenFile.deletingLastPathComponent().path)
         let keyID = UUID().uuidString
         let token = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
         let keyring = AgentKeyring(
@@ -728,24 +788,31 @@ enum AgentQueue {
             resourcePolicy: policy
         )
         let envelope = SignedAgentJob(payload: payload, signature: try signature(for: payload, tokenFile: tokenFile))
+        let jobURL = directory(queue, "Inbox").appendingPathComponent("\(jobID.uuidString).json")
         try JSONEncoder.lab.encode(envelope).write(
-            to: directory(queue, "Inbox").appendingPathComponent("\(jobID.uuidString).json"),
+            to: jobURL,
             options: [.atomic, .completeFileProtectionUnlessOpen]
         )
+        try protectCLIFile(jobURL)
         return payload
     }
 
     static func runOnce(queue: URL, tokenFile: URL) async throws -> AgentJobReceipt? {
         try prepare(queue)
-        let inbox = directory(queue, "Inbox")
-        let candidates = try FileManager.default.contentsOfDirectory(
-            at: inbox,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ).filter { $0.pathExtension.lowercased() == "json" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-        guard let source = candidates.first else { return nil }
-        let running = directory(queue, "Running").appendingPathComponent(source.lastPathComponent)
-        try FileManager.default.moveItem(at: source, to: running)
+        let running: URL? = try CLIFileLock.withLock(queue.appendingPathComponent(".queue.lock")) {
+            let inbox = directory(queue, "Inbox")
+            let candidates = try FileManager.default.contentsOfDirectory(
+                at: inbox,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ).filter { $0.pathExtension.lowercased() == "json" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            guard let source = candidates.first else { return nil }
+            let claimed = directory(queue, "Running").appendingPathComponent(source.lastPathComponent)
+            try FileManager.default.moveItem(at: source, to: claimed)
+            try protectCLIFile(claimed)
+            return claimed
+        }
+        guard let running else { return nil }
 
         let envelope: SignedAgentJob
         do {
@@ -871,6 +938,7 @@ enum AgentQueue {
             reportPath: nil, message: "Cancellation requested"
         )
         try JSONEncoder.lab.encode(receipt).write(to: marker, options: .atomic)
+        try protectCLIFile(marker)
         let inbox = directory(queue, "Inbox").appendingPathComponent("\(jobID.uuidString).json")
         if FileManager.default.fileExists(atPath: inbox.path) {
             try? FileManager.default.removeItem(at: inbox)
@@ -924,8 +992,20 @@ enum AgentQueue {
     }
 
     private static func prepare(_ queue: URL) throws {
+        try FileManager.default.createDirectory(
+            at: queue,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: queue.path)
         for name in ["Inbox", "Running", "Results", "Rejected", "Cancelled"] {
-            try FileManager.default.createDirectory(at: directory(queue, name), withIntermediateDirectories: true)
+            let url = directory(queue, name)
+            try FileManager.default.createDirectory(
+                at: url,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
         }
     }
 
@@ -992,15 +1072,19 @@ enum AgentQueue {
     }
 
     private static func recordNonce(_ nonce: UUID, jobID: UUID, queue: URL) throws -> Bool {
-        var ledger = try loadReplayLedger(queue: queue)
-        let key = nonce.uuidString
-        guard ledger[key] == nil else { return false }
-        ledger[key] = jobID.uuidString
-        if ledger.count > 10_000 {
-            ledger = Dictionary(uniqueKeysWithValues: ledger.sorted { $0.key > $1.key }.prefix(10_000).map { ($0.key, $0.value) })
+        try CLIFileLock.withLock(queue.appendingPathComponent(".nonce.lock")) {
+            var ledger = try loadReplayLedger(queue: queue)
+            let key = nonce.uuidString
+            guard ledger[key] == nil else { return false }
+            ledger[key] = jobID.uuidString
+            if ledger.count > 10_000 {
+                ledger = Dictionary(uniqueKeysWithValues: ledger.sorted { $0.key > $1.key }.prefix(10_000).map { ($0.key, $0.value) })
+            }
+            let url = replayLedgerURL(queue: queue)
+            try JSONEncoder.lab.encode(ledger).write(to: url, options: .atomic)
+            try protectCLIFile(url)
+            return true
         }
-        try JSONEncoder.lab.encode(ledger).write(to: replayLedgerURL(queue: queue), options: .atomic)
-        return true
     }
 
     private static func reject(
@@ -1014,20 +1098,24 @@ enum AgentQueue {
             schemaVersion: 2, jobID: jobID, state: state,
             updatedAt: .now, reportPath: nil, message: message
         )
+        let url = directory(queue, state == .cancelled ? "Cancelled" : "Rejected")
+            .appendingPathComponent("\(jobID.uuidString).json")
         try JSONEncoder.lab.encode(receipt).write(
-            to: directory(queue, state == .cancelled ? "Cancelled" : "Rejected")
-                .appendingPathComponent("\(jobID.uuidString).json"),
+            to: url,
             options: .atomic
         )
+        try protectCLIFile(url)
         try? FileManager.default.removeItem(at: running)
         return receipt
     }
 
     private static func write(_ receipt: AgentJobReceipt, queue: URL) throws {
+        let url = directory(queue, "Results").appendingPathComponent("\(receipt.jobID.uuidString).json")
         try JSONEncoder.lab.encode(receipt).write(
-            to: directory(queue, "Results").appendingPathComponent("\(receipt.jobID.uuidString).json"),
+            to: url,
             options: .atomic
         )
+        try protectCLIFile(url)
     }
 }
 

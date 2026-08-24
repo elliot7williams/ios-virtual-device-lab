@@ -28,6 +28,10 @@ cp "$ROOT/Resources/hardware-profiles.json" "$CONTENTS/Resources/hardware-profil
 cp "$ROOT/Resources/host-compatibility.json" "$CONTENTS/Resources/host-compatibility.json"
 cp "$ROOT/Resources/backend-catalog.json" "$CONTENTS/Resources/backend-catalog.json"
 cp "$ROOT/Resources/third-party-catalog.json" "$CONTENTS/Resources/third-party-catalog.json"
+for localization in "$ROOT"/Resources/*.lproj; do
+    [[ -d "$localization" ]] || continue
+    cp -R "$localization" "$CONTENTS/Resources/"
+done
 if [[ -n "${UPDATE_PUBLIC_KEY_PATH:-}" ]]; then
     cp "$UPDATE_PUBLIC_KEY_PATH" "$CONTENTS/Resources/update-public-key.pem"
 fi

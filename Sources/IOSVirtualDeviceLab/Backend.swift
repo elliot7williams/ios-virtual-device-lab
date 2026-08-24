@@ -308,13 +308,14 @@ actor VPhoneBackend: LabBackend {
         let research = researchGuestStatus()
         let binary = resolveBinary()
         let binaryCheck = binary.map {
-            ProcessExecutor.run(executable: $0, arguments: ["--help"], timeout: 20)
+            ProcessExecutor.run(executable: $0, arguments: ["--vdl-contract"], timeout: 5, maximumOutputBytes: 64 * 1_024)
         }
+        let companion = CompanionBackendInspector.inspect(binary: binary)
 
         let arch = architecture.output.trimmed
         let nested = hypervisor.output.trimmed == "1"
         let researchEnabled = research.localizedCaseInsensitiveContains("enabled")
-        let binaryReady = binaryCheck?.succeeded == true
+        let binaryReady = binaryCheck?.succeeded == true && companion.compatible
 
         let state: ReadinessState
         if arch != "arm64" || nested || binary == nil {
@@ -526,7 +527,7 @@ actor VPhoneBackend: LabBackend {
             .volumeAvailableCapacityForImportantUsageKey,
             .volumeAvailableCapacityKey,
         ]
-        let values = try? paths.dataRoot.resourceValues(forKeys: keys)
+        let values = try? paths.dataRoot.resolvingSymlinksInPath().resourceValues(forKeys: keys)
         let important = values?.volumeAvailableCapacityForImportantUsage ?? 0
         let fallback = Int64(values?.volumeAvailableCapacity ?? 0)
         return StorageCheck(
@@ -735,6 +736,9 @@ actor VPhoneBackend: LabBackend {
                 updatedAt: .now
             )
             try? saveDeviceMetadata(metadata, to: paths.libraryRoot.appendingPathComponent(name))
+            if let created = listDevices().first(where: { $0.name == name }) {
+                _ = try? GuestCredentialVault.rotate(for: created)
+            }
         }
         onProgress(LabProgressEvent(
             operationID: request.operationID,
@@ -751,10 +755,14 @@ actor VPhoneBackend: LabBackend {
         as newName: String,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult {
-        await runCLI(
+        let result = await runCLI(
             ["vm", "clone", device.name, newName, "--library-root", paths.libraryRoot.path],
             onLine: onLine
         )
+        if result.succeeded, let clone = listDevices().first(where: { $0.name == newName }) {
+            _ = try? GuestCredentialVault.rotate(for: clone)
+        }
+        return result
     }
 
     func deleteVM(_ device: VirtualDevice, onLine: @escaping @Sendable (String) -> Void) async -> CommandResult {
@@ -897,7 +905,7 @@ actor VPhoneBackend: LabBackend {
                 exitCode: 74
             )
         }
-        return await runCLI(
+        let result = await runCLI(
             [
                 "vm", "import",
                 "--in", snapshot.archivePath,
@@ -906,6 +914,10 @@ actor VPhoneBackend: LabBackend {
             ],
             onLine: onLine
         )
+        if result.succeeded, let restored = listDevices().first(where: { $0.name == newName }) {
+            _ = try? GuestCredentialVault.rotate(for: restored)
+        }
+        return result
     }
 
     func verifySnapshot(_ snapshot: SnapshotRecord) -> SnapshotVerification {
@@ -1072,16 +1084,7 @@ actor VPhoneBackend: LabBackend {
     }
 
     private func guestControlKey(for device: VirtualDevice) throws -> Data {
-        let url = device.bundleURL.appendingPathComponent(".vdl-host-control-key")
-        if let text = try? String(contentsOf: url, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           let data = Data(base64Encoded: text), data.count >= 32 {
-            return data
-        }
-        let data = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) })
-        try data.base64EncodedString().write(to: url, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        return data
+        try GuestCredentialVault.key(for: device)
     }
 
     private func isTrustedMutationHandshake(_ handshake: GuestProtocolHandshake) -> Bool {

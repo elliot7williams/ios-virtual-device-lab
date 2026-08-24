@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-11",
+  "updatedAt": "2026-08-23",
   "entries": [
     {
       "id": "com.virtualdevicelab.vphone",
@@ -8,7 +8,7 @@
       "role": "Primary VM and boot backend",
       "sourceURL": "https://github.com/Lakr233/vphone-cli",
       "license": "MIT",
-      "version": "upstream 545fd35 + companion eb6aba7",
+      "version": "upstream 545fd35 + companion 4889606",
       "integrationState": "activeAdapter",
       "selectable": true,
       "capabilities": [

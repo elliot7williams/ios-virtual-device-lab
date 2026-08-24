@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -13,7 +15,7 @@ jobs:
     environment: production
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Import Developer ID certificate
         env:
@@ -62,6 +64,11 @@ jobs:
           UPDATE_SIGNING_KEY: ${{ runner.temp }}/update-signing.pem
           UPDATE_PUBLIC_KEY_PATH: ${{ runner.temp }}/update-public-key.pem
         run: ./scripts/release_app.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Attest release archive provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: .dist/iOS-Virtual-Device-Lab-*.zip
 
       - name: Publish GitHub release
         env:

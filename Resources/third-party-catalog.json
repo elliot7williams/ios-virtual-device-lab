@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-11",
+  "updatedAt": "2026-08-23",
   "records": [
     {
       "id": "vphone-cli",
@@ -8,14 +8,15 @@
       "role": "External primary iOS VM backend",
       "sourceURL": "https://github.com/Lakr233/vphone-cli",
       "license": "MIT",
-      "version": "upstream 545fd35e0f36f1885d2c4990c2e44048daa24924; companion eb6aba798562dd475dd2b60448b3b1aeacd0b73b",
+      "version": "upstream 545fd35e0f36f1885d2c4990c2e44048daa24924; companion 48896066820a41ab2c9629be3137eb211fbe05b6",
       "integrationState": "activeExternal",
       "reviewState": "verified",
       "sourceCodeUse": "No source copied into the manager; invoked as a separately installed or built executable",
       "distributedWithApp": false,
       "modifications": [
         "Companion branch forwards bounded guest file listing/download through the existing vphoned API.",
-        "Companion branch adds versioned host-control capabilities and truthful unsupported-feature fields."
+        "Companion branch adds versioned host-control capabilities and truthful unsupported-feature fields.",
+        "Companion branch publishes backend contract schema 1 and strips host-control credentials from clone, export, and import paths."
       ],
       "obligations": [
         "Preserve the MIT license and copyright notice if vphone source or substantial portions are redistributed.",

@@ -3,12 +3,14 @@ import SwiftUI
 
 struct ProductionReadinessView: View {
     @EnvironmentObject private var model: LabAppModel
+    @EnvironmentObject private var launchHealth: LaunchHealthMonitor
     @State private var trustPolicy = GuestTrustPolicy.strict
     @State private var backupPolicy = LabBackupPolicy.standard
     @State private var updatePolicy = UpdateLifecyclePolicy.standard
     @State private var reviewer = NSFullUserName()
     @State private var remoteJobID = ""
     @State private var revokePreviousAgentKey = false
+    @State private var backupPassphrase = ""
 
     var body: some View {
         ScrollView {
@@ -58,7 +60,12 @@ struct ProductionReadinessView: View {
                     LabeledContent("Acceptance", value: model.acceptanceReport.isPassed ? "Passed" : "Incomplete")
                     Spacer()
                     Button("Record Qualification Campaign") { model.createQualificationCampaign() }
+                        .accessibilityIdentifier("readiness.record-qualification")
                 }
+                LabeledContent("Companion", value: model.companionAssessment.compatible ? "Compatible" : "Blocked")
+                Text(model.companionAssessment.message)
+                    .font(.caption)
+                    .foregroundStyle(model.companionAssessment.compatible ? .green : .orange)
                 ForEach(model.qualificationCampaigns.prefix(3)) { campaign in
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
@@ -120,6 +127,12 @@ struct ProductionReadinessView: View {
                     LabeledContent("Guest mutation", value: trust?.trustedForMutation == true ? "Trusted" : "Blocked")
                     LabeledContent("Accessibility automation", value: automation.available ? "Available" : "Gated")
                     Text(automation.reason).font(.caption).foregroundStyle(automation.available ? .green : .orange)
+                    HStack {
+                        Button("Rotate Credential") { model.rotateGuestCredential(for: device) }
+                            .accessibilityIdentifier("readiness.rotate-guest-credential")
+                        Button("Revoke Credential", role: .destructive) { model.revokeGuestCredential(for: device) }
+                            .accessibilityIdentifier("readiness.revoke-guest-credential")
+                    }
                 } else {
                     Text("Select and boot a VM to assess its authenticated accessibility contract.")
                         .foregroundStyle(.secondary)
@@ -134,7 +147,13 @@ struct ProductionReadinessView: View {
                 HStack {
                     TextField("Reviewer", text: $reviewer).frame(maxWidth: 320)
                     Spacer()
-                    Button("Seal Current Acceptance") { model.sealCurrentAcceptanceEvidence() }
+                    Button("Seal Current Acceptance") { model.sealCurrentAcceptanceEvidence(reviewer: reviewer) }
+                        .disabled(
+                            reviewer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || !model.acceptanceReport.isPassed
+                        )
+                        .accessibilityIdentifier("readiness.seal-evidence")
+                        .keyboardShortcut("e", modifiers: [.command, .shift])
                 }
                 if model.evidenceVerificationIssues.isEmpty {
                     Label("Evidence signature chain verifies", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
@@ -165,22 +184,47 @@ struct ProductionReadinessView: View {
     private var backup: some View {
         GroupBox("6. Backup and disaster recovery") {
             VStack(alignment: .leading, spacing: 10) {
+                Toggle("Include virtual-device library", isOn: $backupPolicy.includeVirtualDevices)
+                Toggle("Include owned firmware/IPSW files", isOn: $backupPolicy.includeFirmware)
                 Toggle("Include snapshots", isOn: $backupPolicy.includeSnapshots)
                 Toggle("Include test artifacts", isOn: $backupPolicy.includeTestArtifacts)
                 Toggle("Include sanitized diagnostic bundles", isOn: $backupPolicy.includeDiagnosticBundles)
+                Toggle("Use incremental hard links when possible", isOn: $backupPolicy.incremental)
+                Toggle("Encrypt portable archive", isOn: $backupPolicy.encryptArchive)
+                if backupPolicy.encryptArchive {
+                    SecureField("Backup passphrase (12+ characters)", text: $backupPassphrase)
+                        .textContentType(.newPassword)
+                }
                 Stepper("Retain \(backupPolicy.maximumBackups) backup(s)", value: $backupPolicy.maximumBackups, in: 1...20)
                 HStack {
                     Button("Save Policy") { model.updateBackupPolicy(backupPolicy) }
                     Spacer()
                     Button("Create Verified Backup…") { chooseBackupDestination() }
+                        .accessibilityIdentifier("readiness.create-backup")
+                        .keyboardShortcut("b", modifiers: [.command, .shift])
                     Button("Verify Backup…") { chooseBackup(operation: .verify) }
+                        .accessibilityIdentifier("readiness.verify-backup")
                     Button("Stage Restore…") { chooseBackup(operation: .restore) }
+                        .accessibilityIdentifier("readiness.stage-restore")
                 }
                 if let verification = model.latestBackupVerification {
                     Label(
                         verification.passed ? "Backup verification passed" : "Backup verification failed: \(verification.issues.joined(separator: ", "))",
                         systemImage: verification.passed ? "checkmark.circle.fill" : "xmark.circle.fill"
                     ).foregroundStyle(verification.passed ? .green : .red)
+                }
+                if let plan = model.latestRestorePlan {
+                    LabeledContent("Restore plan", value: plan.canStage ? "Ready" : "Blocked")
+                    LabeledContent("Capacity", value: "\(ByteCountFormatter.string(fromByteCount: plan.requiredBytes, countStyle: .file)) required • \(ByteCountFormatter.string(fromByteCount: plan.availableBytes, countStyle: .file)) available")
+                    if !plan.conflicts.isEmpty {
+                        Text("Live destinations with content: \(plan.conflicts.joined(separator: ", "))")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+                if let command = model.latestRestoreCommand {
+                    LabeledContent("Apply command", value: command.path)
+                    Text("Quit the app, then explicitly open this command. It moves live destinations to a timestamped rollback directory before restoring.")
+                        .font(.caption2).foregroundStyle(.orange)
                 }
                 Text("Restore always verifies into an isolated staging directory. It never overwrites live state automatically.")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -271,6 +315,8 @@ struct ProductionReadinessView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("Run Resilience Suite") { model.runResilienceSuite() }
+                        .accessibilityIdentifier("readiness.run-resilience")
+                        .keyboardShortcut("f", modifiers: [.command, .shift])
                 }
                 if let report = model.resilienceReport {
                     ForEach(report.results) { result in
@@ -282,6 +328,12 @@ struct ProductionReadinessView: View {
                             Text(result.evidence).font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                }
+                Divider()
+                LabeledContent("Launch health", value: launchHealth.record.safeMode ? "Safe mode" : "Normal")
+                LabeledContent("Unclean launches", value: String(launchHealth.record.consecutiveUncleanLaunches))
+                if launchHealth.record.safeMode {
+                    Button("Exit Safe Mode") { launchHealth.disableSafeMode() }
                 }
             }.padding(.top, 6)
         }
@@ -295,19 +347,28 @@ struct ProductionReadinessView: View {
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "Back Up"
-        if panel.runModal() == .OK, let url = panel.url { model.createLabBackup(destination: url) }
+        if panel.runModal() == .OK, let url = panel.url {
+            model.createLabBackup(
+                destination: url,
+                passphrase: backupPolicy.encryptArchive ? backupPassphrase : nil
+            )
+        }
     }
 
     private func chooseBackup(operation: BackupOperation) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
-        panel.canChooseFiles = false
+        panel.canChooseFiles = true
         panel.prompt = operation == .verify ? "Verify" : "Stage Restore"
         if panel.runModal() == .OK, let url = panel.url {
             switch operation {
-            case .verify: model.verifyLabBackup(url)
-            case .restore: model.stageLabRestore(url)
+            case .verify: model.verifyLabBackup(url, passphrase: backupPassphrase.nilIfEmpty)
+            case .restore: model.stageLabRestore(url, passphrase: backupPassphrase.nilIfEmpty)
             }
         }
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

@@ -17,7 +17,7 @@ The machine-readable companion is `Resources/third-party-catalog.json`, which is
 
 | Component | Role | Status | License / terms | Version or pin | Distributed with app | Source-code use |
 |---|---|---|---|---|---:|---|
-| [vphone-cli](https://github.com/Lakr233/vphone-cli) | Primary external VM backend | Active adapter | MIT | Upstream `545fd35e0f36f1885d2c4990c2e44048daa24924`; companion `eb6aba798562dd475dd2b60448b3b1aeacd0b73b` | No | External executable; no source copied into manager |
+| [vphone-cli](https://github.com/Lakr233/vphone-cli) | Primary external VM backend | Active adapter | MIT | Upstream `545fd35e0f36f1885d2c4990c2e44048daa24924`; companion `48896066820a41ab2c9629be3137eb211fbe05b6` | No | External executable; no source copied into manager |
 | [Apple Virtualization.framework](https://developer.apple.com/documentation/virtualization) | Platform virtualization API used by vphone | Indirect platform framework | Apple SDK/platform terms | Host macOS SDK | No | Platform API |
 | [Swift](https://www.swift.org/) / SwiftUI | Language and native UI | Core platform/toolchain | Swift project licenses; Apple SDK terms for SwiftUI | Host Xcode/Swift toolchain | System/toolchain dependent | Standard language/framework use |
 | vphone transitive dependencies | External backend dependencies | Behind backend boundary | Per component | vphone companion `Package.resolved` | No | None in manager |
@@ -27,6 +27,9 @@ The machine-readable companion is `Resources/third-party-catalog.json`, which is
 ## vphone-cli modifications
 
 The companion branch and [draft PR](https://github.com/elliot7williams/vphone-cli/pull/1):
+
+- publish a versioned backend contract for frontend compatibility checks;
+- remove host-control credentials from clone, export, and import paths;
 
 - forward bounded guest directory listing and file download through the existing vphoned API;
 - require absolute paths and enforce the advertised maximum file size;

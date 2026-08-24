@@ -18,8 +18,8 @@ private struct LocalBootstrapState: Sendable {
     let logs: [LogEntry]
     let hardening: ProductionHardeningState
 
-    static func load(paths: LabPaths) throws -> LocalBootstrapState {
-        try PluginRegistry.prepare(paths: paths)
+    static func load(paths: LabPaths, safeMode: Bool = false) throws -> LocalBootstrapState {
+        if !safeMode { try PluginRegistry.prepare(paths: paths) }
 
         let activityURL = paths.stateRoot.appendingPathComponent("activity.json")
         let decoder = JSONDecoder()
@@ -35,7 +35,7 @@ private struct LocalBootstrapState: Sendable {
             attributionCatalog: ProjectCatalogLoader.loadAttribution(paths: paths),
             testRuns: TestRunStore.load(paths: paths),
             workflows: WorkflowStore.load(paths: paths),
-            plugins: PluginRegistry.loadPlugins(paths: paths),
+            plugins: safeMode ? [] : PluginRegistry.loadPlugins(paths: paths),
             appArtifacts: AppArtifactStore.load(paths: paths),
             snapshotRetention: SnapshotRetentionStore.load(paths: paths),
             resourcePolicy: ResourcePolicyStore.load(paths: paths),
@@ -102,10 +102,13 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var evidenceVerificationIssues: [String] = []
     @Published private(set) var backupPolicy: LabBackupPolicy = .standard
     @Published private(set) var latestBackupVerification: BackupVerification?
+    @Published private(set) var latestRestorePlan: LabRestorePlan?
+    @Published private(set) var latestRestoreCommand: URL?
     @Published private(set) var updateLifecyclePolicy: UpdateLifecyclePolicy = .standard
     @Published private(set) var stagedUpdate: StagedUpdateRecord?
     @Published private(set) var supplyChainAssessment: SupplyChainAssessment = .unavailable
     @Published private(set) var resilienceReport: ResilienceReport?
+    @Published private(set) var companionAssessment: CompanionBackendAssessment = .unavailable
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
 
@@ -128,14 +131,14 @@ final class LabAppModel: ObservableObject {
 
     func isBusy(_ key: String) -> Bool { busyKeys.contains(key) }
 
-    func bootstrap() async {
+    func bootstrap(safeMode: Bool = false) async {
         guard !didBootstrap else { return }
         didBootstrap = true
         do {
             try await backend.prepareStorage()
             let labPaths = paths
             let localState = try await Task.detached(priority: .userInitiated) {
-                try LocalBootstrapState.load(paths: labPaths)
+                try LocalBootstrapState.load(paths: labPaths, safeMode: safeMode)
             }.value
             compatibility = localState.compatibility
             hardwareProfiles = localState.hardwareProfiles
@@ -171,9 +174,18 @@ final class LabAppModel: ObservableObject {
             backendDescriptor = await backend.descriptor
             backendCapabilities = await backend.capabilities
             appendLog(.info, scope: "lab", "Storage: \(paths.dataRoot.path)")
-            await refreshAll()
-            if remoteAgentConfiguration != nil { await refreshRemoteAgentHealth() }
-            Task { await checkForUpdates(automatic: true) }
+            if safeMode {
+                readiness = await backend.checkHost()
+                companionAssessment = CompanionBackendInspector.inspect(
+                    binary: readiness.binaryPath.map { URL(fileURLWithPath: $0) }
+                )
+                setupAssistantReport = SetupAssistant.inspect(paths: paths, host: readiness)
+                appendLog(.warning, scope: "lifecycle", "Safe mode skipped VM, firmware, plugin, agent, and updater discovery")
+            } else {
+                await refreshAll()
+                if remoteAgentConfiguration != nil { await refreshRemoteAgentHealth() }
+                Task { await checkForUpdates(automatic: true) }
+            }
         } catch {
             present(error, context: "Preparing lab storage")
         }
@@ -182,7 +194,16 @@ final class LabAppModel: ObservableObject {
     func refreshAll() async {
         busyKeys.insert("refresh")
         readiness = await backend.checkHost()
+        companionAssessment = CompanionBackendInspector.inspect(
+            binary: readiness.binaryPath.map { URL(fileURLWithPath: $0) }
+        )
         devices = await backend.listDevices()
+        let restoredCredentialMarker = paths.stateRoot.appendingPathComponent("rotate-restored-credentials")
+        if FileManager.default.fileExists(atPath: restoredCredentialMarker.path) {
+            for device in devices { _ = try? GuestCredentialVault.rotate(for: device) }
+            try? FileManager.default.removeItem(at: restoredCredentialMarker)
+            appendLog(.success, scope: "guest-trust", "Regenerated credentials for restored virtual devices")
+        }
         snapshots = await backend.loadSnapshots()
         firmware = await backend.loadFirmware()
         normalizeSelection()
@@ -293,17 +314,45 @@ final class LabAppModel: ObservableObject {
         } catch { present(error, context: "Saving guest trust policy") }
     }
 
-    func sealCurrentAcceptanceEvidence() {
+    func sealCurrentAcceptanceEvidence(reviewer: String) {
+        let reviewer = reviewer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reviewer.isEmpty else {
+            alertMessage = "Enter the identity of the person requesting this evidence seal."
+            return
+        }
+        guard acceptanceReport.isPassed else {
+            alertMessage = "Evidence cannot be sealed until every real-VM acceptance gate has passed."
+            return
+        }
+        let fingerprint = "\(readiness.model)|\(readiness.macOSVersion)|\(readiness.architecture)"
+        guard let campaignIndex = qualificationCampaigns.lastIndex(where: {
+            $0.state == .passed
+                && $0.deviceName == acceptanceReport.deviceName
+                && $0.hostFingerprint == fingerprint
+                && $0.backendID == backendDescriptor.id
+                && $0.acceptance == acceptanceReport
+                && $0.evidenceSealID == nil
+        }) else {
+            alertMessage = "Record a passing qualification campaign for this exact host, backend, device, and acceptance report before sealing evidence."
+            return
+        }
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         do {
+            struct CampaignEvidencePayload: Encodable {
+                let campaign: QualificationCampaign
+                let sealingReviewer: String
+            }
+            let campaign = qualificationCampaigns[campaignIndex]
             let seal = try EvidenceLedger.seal(
-                acceptanceReport,
-                subject: "Baseline acceptance for \(acceptanceReport.deviceName ?? "unselected device")",
+                CampaignEvidencePayload(campaign: campaign, sealingReviewer: reviewer),
+                subject: "Qualification campaign \(campaign.id.uuidString) for \(acceptanceReport.deviceName ?? "unselected device")",
                 host: readiness,
                 appVersion: version,
                 backend: backendDescriptor,
                 paths: paths
             )
+            qualificationCampaigns[campaignIndex].evidenceSealID = seal.id
+            try QualificationCampaignStore.save(qualificationCampaigns, paths: paths)
             evidenceSeals.append(seal)
             evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
             appendLog(.success, scope: "evidence", "Sealed acceptance evidence \(seal.id.uuidString)")
@@ -312,6 +361,11 @@ final class LabAppModel: ObservableObject {
     }
 
     func reviewEvidence(_ seal: EvidenceSeal, approved: Bool, reviewer: String) {
+        let reviewer = reviewer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reviewer.isEmpty else {
+            alertMessage = "Enter a reviewer identity before approving or rejecting evidence."
+            return
+        }
         do {
             evidenceSeals = try EvidenceLedger.review(
                 id: seal.id,
@@ -330,21 +384,25 @@ final class LabAppModel: ObservableObject {
         catch { present(error, context: "Saving backup policy") }
     }
 
-    func createLabBackup(destination: URL) {
+    func createLabBackup(destination: URL, passphrase: String? = nil) {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         do {
             let backup = try LabBackupManager.create(
-                paths: paths, destination: destination, policy: backupPolicy, appVersion: version
+                paths: paths,
+                destination: destination,
+                policy: backupPolicy,
+                appVersion: version,
+                passphrase: passphrase
             )
-            latestBackupVerification = LabBackupManager.verify(backup)
+            latestBackupVerification = LabBackupManager.verify(backup, passphrase: passphrase)
             appendLog(.success, scope: "backup", "Created and verified lab backup at \(backup.path)")
             persistLogs()
             reveal(backup)
         } catch { present(error, context: "Creating lab backup") }
     }
 
-    func verifyLabBackup(_ backup: URL) {
-        latestBackupVerification = LabBackupManager.verify(backup)
+    func verifyLabBackup(_ backup: URL, passphrase: String? = nil) {
+        latestBackupVerification = LabBackupManager.verify(backup, passphrase: passphrase)
         if latestBackupVerification?.passed == true {
             appendLog(.success, scope: "backup", "Backup verification passed")
         } else {
@@ -353,9 +411,15 @@ final class LabAppModel: ObservableObject {
         persistLogs()
     }
 
-    func stageLabRestore(_ backup: URL) {
+    func stageLabRestore(_ backup: URL, passphrase: String? = nil) {
         do {
-            let staged = try LabBackupManager.stageRestore(backup, paths: paths)
+            latestRestorePlan = LabBackupManager.restorePlan(backup, paths: paths, passphrase: passphrase)
+            guard latestRestorePlan?.canStage == true else {
+                alertMessage = "Restore planning found verification, space, or archive issues. Review the plan before retrying."
+                return
+            }
+            let staged = try LabBackupManager.stageRestore(backup, paths: paths, passphrase: passphrase)
+            latestRestoreCommand = try LabBackupManager.writeApplyRestoreCommand(stagedPayload: staged, paths: paths)
             appendLog(.success, scope: "backup", "Verified restore staged at \(staged.path); live state was not overwritten")
             persistLogs()
             reveal(staged)
@@ -559,6 +623,9 @@ final class LabAppModel: ObservableObject {
     func recheckHost() async {
         busyKeys.insert("preflight")
         readiness = await backend.checkHost()
+        companionAssessment = CompanionBackendInspector.inspect(
+            binary: readiness.binaryPath.map { URL(fileURLWithPath: $0) }
+        )
         busyKeys.remove("preflight")
         appendLog(
             readiness.isReady ? .success : .warning,
@@ -569,6 +636,22 @@ final class LabAppModel: ObservableObject {
     }
 
     // MARK: - VM lifecycle
+
+    func rotateGuestCredential(for device: VirtualDevice) {
+        do {
+            try GuestCredentialVault.rotate(for: device)
+            appendLog(.success, scope: "guest-trust", "Rotated the host-control credential for \(device.name)")
+            persistLogs()
+        } catch { present(error, context: "Rotating guest-control credential") }
+    }
+
+    func revokeGuestCredential(for device: VirtualDevice) {
+        do {
+            try GuestCredentialVault.revoke(for: device)
+            appendLog(.warning, scope: "guest-trust", "Revoked the host-control credential for \(device.name); guest mutation is blocked until rotation")
+            persistLogs()
+        } catch { present(error, context: "Revoking guest-control credential") }
+    }
 
     func createVM(
         name: String,
