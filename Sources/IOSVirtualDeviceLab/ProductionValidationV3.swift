@@ -470,7 +470,11 @@ final class LaunchHealthMonitor: ObservableObject {
         )
         let url = markerURL()
         let previous = try? HardeningJSON.load(LaunchHealthRecord.self, from: url)
-        let failures = previous?.cleanExitAt == nil ? (previous?.consecutiveUncleanLaunches ?? 0) + 1 : 0
+        let failures = if let previous, previous.cleanExitAt == nil {
+            previous.consecutiveUncleanLaunches + 1
+        } else {
+            0
+        }
         record = LaunchHealthRecord(
             schemaVersion: 1,
             launchID: UUID(),

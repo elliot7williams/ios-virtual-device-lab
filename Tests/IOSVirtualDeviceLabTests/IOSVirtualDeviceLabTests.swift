@@ -944,6 +944,7 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         LaunchHealthMonitor.shared.begin(paths: paths)
         try await Task.sleep(for: .seconds(3))
         XCTAssertEqual(LaunchHealthMonitor.shared.record.lastPhase, "launching")
+        XCTAssertEqual(LaunchHealthMonitor.shared.record.consecutiveUncleanLaunches, 0)
         LaunchHealthMonitor.shared.markCleanExit()
         XCTAssertEqual(LaunchHealthMonitor.shared.record.lastPhase, "clean-exit")
     }
