@@ -278,7 +278,7 @@ struct LabMigrationReport: Codable, Hashable, Sendable {
 }
 
 enum LabMigrationManager {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
     private static let managedFiles = [
         "activity.json", "automation-workflows.json", "compatibility-manifest.json",
         "diagnostic-privacy.json", "environment-assignments.json", "environment-profiles.json",
@@ -286,7 +286,10 @@ enum LabMigrationManager {
         "remote-agent.json", "resource-policy.json", "snapshot-retention.json",
         "storage-policy.json", "test-runs.json", "qualification-campaigns.json",
         "guest-trust-policy.json", "backup-policy.json", "update-lifecycle-policy.json",
-        "evidence-ledger.json", "resilience-reports.json",
+        "evidence-ledger.json", "resilience-reports.json", "recovery-decisions.json",
+        "canonical-fixtures.json", "evidence-lifecycle-policy.json", "host-capacity.json",
+        "hostile-input-report.json", "unified-retention-policy.json",
+        "operational-objective-policy.json", "beta-verification.json",
     ]
 
     static func migrate(paths: LabPaths) throws -> LabMigrationReport {
@@ -312,8 +315,10 @@ enum LabMigrationManager {
                 summary = "Added operational-readiness, provenance, environment, journal, and agent schemas."
             case 3:
                 summary = "Added qualification, guest trust, evidence governance, backup, update, supply-chain, and resilience schemas."
-            default:
+            case 4:
                 summary = "Added full-lab encrypted recovery, companion contracts, credential lifecycle, locked state, launch forensics, and update health rollback."
+            default:
+                summary = "Added storage relinking, Recovery Center decisions, canonical fixtures, Labfiles, evidence expiry, host calibration, hostile-input boundaries, unified retention, SLOs, and beta verification."
             }
             let record = LabMigrationRecord(
                 id: UUID(),

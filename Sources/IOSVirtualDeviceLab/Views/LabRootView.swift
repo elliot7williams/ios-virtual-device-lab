@@ -114,6 +114,8 @@ struct LabRootView: View {
             DiagnosticsPerformanceView()
         case .operations:
             LabOperationsView()
+        case .continuity:
+            LabContinuityView()
         case .productionReadiness:
             ProductionReadinessView()
         case .developerTools:

@@ -42,6 +42,16 @@
 | Update lifecycle | Signed download enforcement, code/notary/migration staging, rollback copy and commands |
 | Software supply chain | CycloneDX SBOM, SLSA-style provenance, resource hashes, CodeQL/dependency/secret checks |
 | Fault tolerance | Non-destructive corruption, volume, disk, journal, output, expiry, and digest fixtures |
+| External-storage continuity | Persisted volume identity, broken-link detection, safe startup gating, and atomic relinking for stopped labs |
+| Recovery Center | Explicit Resume/Retry, Roll Back, Keep, and Abandon decisions with immutable journal history and audit records |
+| Canonical fixtures | Hash-pinned firmware, hardware, backend, snapshot, guest-protocol, smoke-app, and acceptance identities without redistributing Apple assets |
+| Declarative labs | Versioned JSON Labfiles with desktop and `vdlctl` plan/diff/apply workflows and no implicit deletion |
+| Evidence lifecycle | Age, host, backend, firmware, and approval-based recertification rules that fail closed |
+| Capacity calibration | Host CPU/RAM/storage probe, low-memory classification, and applyable resource-admission recommendations |
+| Hostile-input boundaries | Bounded JSON, archive-path, traversal, absolute-path, and symlink-escape regression fixtures |
+| Unified retention | Preview-first artifact retention, telemetry-off default, signed-evidence preservation, and recoverable quarantine |
+| Operational objectives | Success-rate, P95-duration, soak, acceptance, resilience, second-volume restore, RTO, and RPO policy |
+| Public-beta quality | VoiceOver, keyboard, reduced-motion, onboarding, support, asset-policy, legal-reference, localization, and privacy-safe support-report gates |
 
 ## Next engineering milestones
 

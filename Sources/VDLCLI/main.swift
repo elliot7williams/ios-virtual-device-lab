@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-private let cliVersion = "0.8.0"
+private let cliVersion = "0.9.0"
 
 enum CLIFileLock {
     static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
@@ -1119,6 +1119,211 @@ enum AgentQueue {
     }
 }
 
+// MARK: - Declarative Labfile plan, diff, and non-destructive apply
+
+struct CLILabfileDevice: Codable, Sendable {
+    let name: String
+    let hardwareProfileID: String
+    let firmwareSHA256: String
+    let cloudOSFirmwareSHA256: String?
+    let cpuCount: Int
+    let memoryMB: Int
+    let diskSizeGB: Int
+    let networkMode: String
+    let environmentProfileID: UUID?
+    let workflowNames: [String]
+}
+
+struct CLILabfile: Codable, Sendable {
+    let schemaVersion: Int
+    let name: String
+    let backendID: String
+    let devices: [CLILabfileDevice]
+}
+
+struct CLILabfileChange: Codable, Sendable {
+    let deviceName: String
+    let kind: String
+    let summary: String
+}
+
+struct CLILabfilePlan: Codable, Sendable {
+    let schemaVersion: Int
+    let generatedAt: Date
+    let labName: String
+    let changes: [CLILabfileChange]
+    let blockers: [String]
+    var canApply: Bool { blockers.isEmpty && !changes.contains { $0.kind == "blocked" } }
+}
+
+private struct CLIFirmwareRecord: Decodable {
+    let kind: String
+    let path: String
+    let sha256: String?
+}
+
+enum CLILabfileEngine {
+    static func load(_ url: URL) throws -> CLILabfile {
+        let data = try Data(contentsOf: url)
+        guard !data.isEmpty, data.count <= 2 * 1_024 * 1_024 else {
+            throw CLIError.message("Labfile must be between 1 byte and 2 MiB")
+        }
+        let document = try JSONDecoder.lab.decode(CLILabfile.self, from: data)
+        guard document.schemaVersion == 1 else { throw CLIError.message("Only Labfile schema version 1 is supported") }
+        guard document.backendID == "com.virtualdevicelab.vphone" else {
+            throw CLIError.message("The Labfile backend does not match vphone-cli")
+        }
+        return document
+    }
+
+    static func plan(_ document: CLILabfile) -> CLILabfilePlan {
+        let firmware = firmwareCatalog()
+        var blockers: [String] = []
+        var changes: [CLILabfileChange] = []
+        var seen = Set<String>()
+        for desired in document.devices {
+            let key = desired.name.lowercased()
+            guard !desired.name.isEmpty, safe(desired.name) == desired.name else {
+                changes.append(.init(deviceName: desired.name, kind: "blocked", summary: "Device name contains unsafe path characters."))
+                continue
+            }
+            guard seen.insert(key).inserted else {
+                changes.append(.init(deviceName: desired.name, kind: "blocked", summary: "Duplicate device name."))
+                continue
+            }
+            guard desired.cpuCount >= 1, desired.memoryMB >= 1_024, desired.diskSizeGB >= 8 else {
+                changes.append(.init(deviceName: desired.name, kind: "blocked", summary: "CPU, memory, or disk value is below the safe minimum."))
+                continue
+            }
+            guard ["nat", "bridged", "isolated", "offline"].contains(desired.networkMode) else {
+                changes.append(.init(deviceName: desired.name, kind: "blocked", summary: "Unsupported network mode."))
+                continue
+            }
+            guard firmware.contains(where: {
+                $0.kind == "iPhone" && $0.sha256?.caseInsensitiveCompare(desired.firmwareSHA256) == .orderedSame
+            }) else {
+                changes.append(.init(deviceName: desired.name, kind: "blocked", summary: "Pinned iPhone firmware is absent from the authorized local catalog."))
+                continue
+            }
+            let bundle = vmRoot(desired.name)
+            guard FileManager.default.fileExists(atPath: bundle.path) else {
+                changes.append(.init(deviceName: desired.name, kind: "create", summary: "Create from pinned local firmware, then apply hardware configuration."))
+                continue
+            }
+            guard let current = readConfiguration(bundle) else {
+                changes.append(.init(deviceName: desired.name, kind: "blocked", summary: "Existing VM configuration cannot be parsed."))
+                continue
+            }
+            let desiredNetwork = backendNetwork(desired.networkMode)
+            var fields: [String] = []
+            if current.cpu != desired.cpuCount { fields.append("CPU") }
+            if current.memoryMB != desired.memoryMB { fields.append("memory") }
+            if current.network != desiredNetwork { fields.append("network") }
+            changes.append(.init(
+                deviceName: desired.name,
+                kind: fields.isEmpty ? "unchanged" : "update",
+                summary: fields.isEmpty ? "Configuration already matches." : "Update \(fields.joined(separator: ", "))."
+            ))
+        }
+        if document.devices.isEmpty { blockers.append("The Labfile contains no devices.") }
+        return CLILabfilePlan(
+            schemaVersion: 1, generatedAt: .now, labName: document.name,
+            changes: changes, blockers: blockers
+        )
+    }
+
+    static func apply(_ document: CLILabfile) throws -> CLILabfilePlan {
+        let initial = plan(document)
+        guard initial.canApply else {
+            throw CLIError.message("Labfile apply is blocked; run `vdlctl labfile plan --file …` for details")
+        }
+        guard let backend = resolveVPhone() else { throw CLIError.message("vphone-cli is not installed") }
+        let firmware = firmwareCatalog()
+        for desired in document.devices {
+            let change = initial.changes.first { $0.deviceName == desired.name }
+            if change?.kind == "create" {
+                guard let iphone = firmware.first(where: {
+                    $0.kind == "iPhone" && $0.sha256?.caseInsensitiveCompare(desired.firmwareSHA256) == .orderedSame
+                }) else { throw CLIError.message("Pinned firmware disappeared before apply") }
+                var arguments = [
+                    "vm", "create", desired.name, "--variant", "regular",
+                    "--disk-size", String(desired.diskSizeGB), "--root-popup",
+                    "--library-root", libraryRoot.path, "--iphone-source", iphone.path,
+                ]
+                if let cloudHash = desired.cloudOSFirmwareSHA256,
+                   let cloud = firmware.first(where: {
+                       $0.kind == "cloudOS" && $0.sha256?.caseInsensitiveCompare(cloudHash) == .orderedSame
+                   }) {
+                    arguments += ["--cloudos-source", cloud.path]
+                }
+                let create = Shell.run(backend, arguments, timeout: 24 * 60 * 60)
+                guard create.passed else { throw CLIError.message("Create \(desired.name) failed: \(create.output.trimmed)") }
+            }
+            if change?.kind == "create" || change?.kind == "update" {
+                let configure = Shell.run(backend, [
+                    "vm", "config", desired.name,
+                    "--cpu", String(desired.cpuCount), "--memory", String(desired.memoryMB),
+                    "--network", backendNetwork(desired.networkMode),
+                    "--library-root", libraryRoot.path,
+                ], timeout: 300)
+                guard configure.passed else {
+                    throw CLIError.message("Configure \(desired.name) failed: \(configure.output.trimmed)")
+                }
+                try writeMetadata(desired)
+            }
+        }
+        return plan(document)
+    }
+
+    private static func firmwareCatalog() -> [CLIFirmwareRecord] {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".vphone/VirtualDeviceLab/firmware-catalog.json")
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder.lab.decode([CLIFirmwareRecord].self, from: data)) ?? []
+    }
+
+    private static func readConfiguration(_ bundle: URL) -> (cpu: Int, memoryMB: Int, network: String)? {
+        let url = bundle.appendingPathComponent("config.plist")
+        guard let data = try? Data(contentsOf: url),
+              let object = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+        let cpu = (object["cpuCount"] as? NSNumber)?.intValue ?? 0
+        let memoryBytes = (object["memorySize"] as? NSNumber)?.int64Value ?? 0
+        let network = (object["networkConfig"] as? [String: Any])?["mode"] as? String ?? "nat"
+        return (cpu, Int(memoryBytes / 1_048_576), network)
+    }
+
+    private static func backendNetwork(_ mode: String) -> String {
+        ["offline", "isolated"].contains(mode) ? "none" : mode
+    }
+
+    private static func writeMetadata(_ device: CLILabfileDevice) throws {
+        let network: [String: Any] = [
+            "mode": device.networkMode,
+            "captureTraffic": false,
+            "allowHostAccess": false,
+        ]
+        let audio: [String: Any] = [
+            "outputEnabled": true, "inputEnabled": false, "route": "systemOutput",
+            "sampleRateHz": 48_000, "simulateInterruptions": false,
+            "backgroundAudioValidation": true,
+        ]
+        let isolation: [String: Any] = [
+            "allowNetwork": device.networkMode != "offline", "allowHostNetwork": false,
+            "allowClipboard": false, "allowHostIntegration": false,
+        ]
+        let metadata: [String: Any] = [
+            "schemaVersion": 1, "hardwareProfileID": device.hardwareProfileID,
+            "network": network, "audio": audio, "isolation": isolation,
+            "updatedAt": ISO8601DateFormatter().string(from: .now),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
+        let url = vmRoot(device.name).appendingPathComponent("lab-metadata.json")
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+        try protectCLIFile(url)
+    }
+}
+
 enum CLIError: LocalizedError {
     case message(String)
     var errorDescription: String? {
@@ -1189,6 +1394,9 @@ func usage() {
                  [--memory-budget-mb <n>] [--reserve-memory-mb <n>] [--max-cpu <percent>] [--dry-run]
       vdlctl deploy --device <name> --app <ipa> [--output <directory>]
       vdlctl schedule-install --workflow <file|id|name> --device <name> --interval-seconds <n> [--app <ipa>]
+      vdlctl labfile plan --file <Labfile.json> [--json]
+      vdlctl labfile diff --file <Labfile.json> [--json]
+      vdlctl labfile apply --file <Labfile.json> [--json]
       vdlctl agent-init [--queue <directory>] [--token-file <path>]
       vdlctl agent-submit --workflow <file|id|name> --device <name> [--device <name> ...]
                           [--app <ipa>] [--queue <directory>] [--token-file <path>] [--dry-run]
@@ -1260,6 +1468,24 @@ enum VDLCLI {
                     appPath: value(after: "--app", in: arguments)
                 )
                 print("Installed schedule: \(url.path)")
+            case "labfile":
+                guard arguments.indices.contains(1),
+                      ["plan", "diff", "apply"].contains(arguments[1]),
+                      let file = value(after: "--file", in: arguments)
+                else { throw CLIError.message("Use `vdlctl labfile <plan|diff|apply> --file <Labfile.json>`") }
+                let action = arguments[1]
+                let document = try CLILabfileEngine.load(URL(fileURLWithPath: file))
+                let plan = action == "apply" ? try CLILabfileEngine.apply(document) : CLILabfileEngine.plan(document)
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(plan), as: UTF8.self))
+                } else {
+                    print("Labfile \(action): \(plan.labName)")
+                    for change in plan.changes {
+                        print("- \(change.kind.uppercased()) \(change.deviceName): \(change.summary)")
+                    }
+                    for blocker in plan.blockers { print("- BLOCKED: \(blocker)") }
+                }
+                exit(plan.canApply ? 0 : 2)
             case "agent-init":
                 let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
                 let token = value(after: "--token-file", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentToken

@@ -81,6 +81,14 @@ Automation is an ordered typed sequence with values, delays, retries, conditions
 
 The guest protocol is negotiated through `LabBackend.guestProtocolHandshake`. Environment assignments remain stored test intent unless the backend or a trusted extension declares the corresponding capability. The remote/CI agent reuses `HeadlessRunner` through an HMAC-authenticated local queue rather than introducing a second orchestration engine.
 
+### Continuity and beta boundary
+
+`LabContinuityView` is an operator surface over small, testable services rather than a second backend. `ExternalStorageManager` records the resolved volume identity outside the lab root, detects a broken `~/.vphone` symlink before backend directory creation, and atomically swaps only an existing symlink. It refuses to overwrite a real directory or accept a filesystem/home root.
+
+`RecoveryCenterStore` preserves the original operation journal and records operator decisions separately. Resume and rollback selections provide audited guidance; they never infer destructive cleanup. `CanonicalFixtureStore` persists identities and hashes only. `LabfilePlanner` computes create/update/unchanged/blocked changes before apply; apply never deletes devices and resolves firmware exclusively from the authorized local catalog. The desktop and `vdlctl labfile` paths share the schema and safety model.
+
+Evidence recertification, capacity recommendations, hostile-input fixtures, retention preview/quarantine, operational objectives, and beta verification are independent policy/evaluation services. Empty or stale evidence fails closed. Human accessibility and legal checkboxes remain attestations with timestamps, not automatically manufactured claims.
+
 ## Replaceable backend
 
 Future backend implementations should conform to the same conceptual surface:

@@ -1017,6 +1017,201 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertFalse(record.installationApproved)
     }
 
+    func testExternalStorageDetectsBrokenLinkAndRelinksAtomically() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("storage-relink-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let link = root.appendingPathComponent(".vphone")
+        try FileManager.default.createSymbolicLink(
+            at: link, withDestinationURL: root.appendingPathComponent("missing")
+        )
+        let registry = root.appendingPathComponent("registry.json")
+        XCTAssertEqual(ExternalStorageManager.inspect(root: link, registryURL: registry).state, .relinkRequired)
+
+        let destination = root.appendingPathComponent("dedicated-lab")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let status = try ExternalStorageManager.relink(root: link, to: destination, registryURL: registry)
+        XCTAssertEqual(status.state, .online)
+        XCTAssertEqual(URL(fileURLWithPath: status.resolvedPath ?? "").standardizedFileURL, destination.standardizedFileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("VirtualDeviceLab").path))
+    }
+
+    func testRecoveryCenterPersistsAuditedAbandonDecision() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("recovery-center-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let entry = OperationJournalEntry(
+            id: UUID(), kind: .snapshot, target: "phone/golden", startedAt: .now,
+            updatedAt: .now, state: .interrupted, phase: .failed,
+            recoveryInstruction: "Inspect the archive.", message: "Interrupted"
+        )
+        var entries = [entry]
+        try OperationJournalStore.save(entries, paths: paths)
+        let decision = try RecoveryCenterStore.decide(
+            entry: entry, action: .abandon, entries: &entries, paths: paths
+        )
+        XCTAssertEqual(decision.action, .abandon)
+        XCTAssertEqual(entries.first?.state, .resolved)
+        XCTAssertEqual(RecoveryCenterStore.load(paths: paths, entries: entries).decisions.first?.journalEntryID, entry.id)
+    }
+
+    func testCanonicalFixtureRequiresVerifiedRealEvidence() throws {
+        var firmware = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/iPhone10,6_15.8_19H370_Restore.ipsw"))
+        firmware.sha256 = String(repeating: "a", count: 64)
+        firmware.validation = FirmwareValidation(
+            state: .valid, checkedAt: .now, hasBuildManifest: true,
+            archiveEntryCount: 10, issues: []
+        )
+        let device = VirtualDevice(
+            name: "golden", cpuCount: 4, memoryMB: 4_096, diskSizeBytes: 32 * 1_073_741_824,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil),
+            restoreInfo: RestoreInfoReport(
+                ios: OSVersionReport(version: "15.8", build: "19H370"),
+                cloudOS: OSVersionReport(version: "15.8", build: "19H370"),
+                variant: "regular", device: "iPhone10,6"
+            ), udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/golden"),
+            diskURL: URL(fileURLWithPath: "/tmp/golden/Disk.img"), isRunning: false,
+            hardwareProfileID: "iphone-x"
+        )
+        let snapshot = SnapshotRecord(
+            id: UUID(), name: "golden", sourceVM: device.name, createdAt: .now,
+            archivePath: "/tmp/golden.tgz", sizeBytes: 1,
+            sha256: String(repeating: "b", count: 64), lastVerifiedAt: .now,
+            integrityStatus: .verified
+        )
+        let gates = AcceptanceGateKind.allCases.map {
+            AcceptanceGateResult(kind: $0, status: .passed, evidence: "fixture", requiredEvidence: "fixture")
+        }
+        let acceptance = AcceptanceReport(
+            schemaVersion: 1, generatedAt: .now, deviceName: device.name, gates: gates
+        )
+        XCTAssertTrue(CanonicalFixtureStore.assess(
+            device: device, firmware: firmware, snapshot: snapshot, acceptance: acceptance
+        ).ready)
+        XCTAssertFalse(CanonicalFixtureStore.assess(
+            device: device, firmware: firmware, snapshot: nil, acceptance: acceptance
+        ).ready)
+    }
+
+    func testLabfilePlannerProducesCreateUpdateAndBlockedChanges() throws {
+        let paths = makePaths(root: FileManager.default.temporaryDirectory.appendingPathComponent("labfile-\(UUID().uuidString)"))
+        let profiles = HardwareProfilesCatalog.load(paths: paths)
+        let profile = try XCTUnwrap(profiles.profiles.first)
+        var image = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/fixture_26.1_23B85_Restore.ipsw"))
+        image.sha256 = String(repeating: "c", count: 64)
+        let document = LabfileDocument(
+            schemaVersion: 1, name: "Fixture", backendID: BackendDescriptor.vphone.id,
+            devices: [LabfileDevice(
+                name: "new-phone", hardwareProfileID: profile.id,
+                firmwareSHA256: image.sha256!, cloudOSFirmwareSHA256: nil,
+                cpuCount: 4, memoryMB: 4_096, diskSizeGB: 32,
+                networkMode: "nat", environmentProfileID: nil, workflowNames: []
+            )]
+        )
+        let plan = LabfilePlanner.plan(
+            document, devices: [], firmware: [image], profiles: profiles, backend: .vphone
+        )
+        XCTAssertTrue(plan.canApply)
+        XCTAssertEqual(plan.changes.first?.kind, .create)
+
+        var missing = document
+        missing.devices[0].firmwareSHA256 = String(repeating: "d", count: 64)
+        XCTAssertEqual(LabfilePlanner.plan(
+            missing, devices: [], firmware: [image], profiles: profiles, backend: .vphone
+        ).changes.first?.kind, .blocked)
+    }
+
+    func testEvidenceLifecycleInvalidatesOldOrChangedCampaign() {
+        let campaign = QualificationCampaign(
+            id: UUID(), deviceName: "phone", firmwareSHA256: String(repeating: "e", count: 64),
+            hardwareProfileID: "iphone-x", hostFingerprint: "old-host", backendID: BackendDescriptor.vphone.id,
+            backendVersion: "0.7", createdAt: Date(timeIntervalSinceNow: -60 * 86_400),
+            completedAt: Date(timeIntervalSinceNow: -60 * 86_400), state: .passed,
+            blockers: [], acceptance: .empty, evidenceSealID: nil
+        )
+        var policy = EvidenceLifecyclePolicy.standard
+        policy.requireApprovedSeal = false
+        let report = EvidenceLifecycleManager.evaluate(
+            campaigns: [campaign], policy: policy, host: testHost(), backend: .vphone,
+            currentFirmwareHashes: [String(repeating: "e", count: 64)], seals: []
+        )
+        XCTAssertFalse(report.items[0].fresh)
+        XCTAssertTrue(report.items[0].reasons.contains { $0.contains("older") })
+        XCTAssertTrue(report.items[0].reasons.contains { $0.contains("Host fingerprint") })
+    }
+
+    func testHostCapacityUsesLowMemoryMode() {
+        let calibration = HostCapacityCalibrator.recommendation(
+            physicalMemoryMB: 8_192, processors: 8, availableStorageBytes: 200 * 1_073_741_824
+        )
+        XCTAssertEqual(calibration.capacityClass, .constrained)
+        XCTAssertEqual(calibration.recommendedConcurrentVMs, 1)
+        XCTAssertLessThanOrEqual(calibration.recommendedAggregateMemoryMB, 4_096)
+    }
+
+    func testHostileInputSuiteRejectsTraversalAndOversize() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hostile-input-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        XCTAssertFalse(HostileInputValidator.isSafeArchivePath("../escape"))
+        XCTAssertFalse(HostileInputValidator.acceptsJSON(Data(repeating: 0x20, count: 1_048_577)))
+        XCTAssertTrue(HostileInputValidator.run(paths: paths).passed)
+    }
+
+    func testRetentionPreviewIsNonDestructiveAndQuarantineIsRecoverable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("retention-v3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let diagnostics = paths.stateRoot.appendingPathComponent("Diagnostics")
+        try FileManager.default.createDirectory(at: diagnostics, withIntermediateDirectories: true)
+        let old = diagnostics.appendingPathComponent("old.log")
+        try Data("sanitized".utf8).write(to: old)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -20 * 86_400)], ofItemAtPath: old.path
+        )
+        let preview = UnifiedDataLifecycleManager.preview(paths: paths, policy: .standard)
+        XCTAssertEqual(preview.candidates.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: old.path))
+        let quarantine = try XCTUnwrap(UnifiedDataLifecycleManager.quarantine(preview, paths: paths))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: quarantine.path))
+    }
+
+    func testOperationalObjectivesFailClosedWithoutRealEvidence() {
+        let report = OperationalObjectiveEvaluator.evaluate(
+            policy: .standard, testRuns: [], acceptance: .empty,
+            resilience: nil, secondVolumeRestoreRecorded: false
+        )
+        XCTAssertFalse(report.passed)
+        XCTAssertTrue(report.gates.allSatisfy { !$0.passed })
+    }
+
+    func testPublicBetaReadinessKeepsHumanGatesExplicit() {
+        var record = BetaVerificationRecord.empty
+        record.voiceOverVerified = true
+        let report = PublicBetaReadinessManager.evaluate(record: record, localizationCount: 1)
+        XCTAssertFalse(report.passed)
+        XCTAssertEqual(report.items.first { $0.name == "VoiceOver" }?.passed, true)
+        XCTAssertEqual(report.items.first { $0.name == "Legal review" }?.passed, false)
+    }
+
+    func testContinuityCriticalActionsHaveAccessibilityIdentifiers() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/LabContinuityView.swift"),
+            encoding: .utf8
+        )
+        for identifier in [
+            "continuity.refresh", "continuity.storage-relink", "continuity.fixture-record",
+            "continuity.labfile-apply", "continuity.capacity-calibrate", "continuity.hostile-inputs",
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)\")"), identifier)
+        }
+    }
+
     private func testHost() -> HostReadiness {
         HostReadiness(
             state: .ready, macOSVersion: "26.3", model: "Mac16,12", architecture: "arm64",

@@ -39,6 +39,7 @@ A native macOS SwiftUI laboratory for virtual iOS research and cross-version app
 - A versioned companion contract, Keychain-backed guest-control lifecycle, full encrypted lab recovery, launch safe mode, health-checked updater rollback, and evidence-linked real-VM qualification.
 - A machine-readable third-party provenance catalog with exact pins, license/terms, source-use boundaries, modifications, obligations, and distribution status.
 - A production-readiness workspace for pinned real-VM qualification, safe first-run repair, authenticated guest protocol v3, gated accessibility automation, signed/reviewed evidence, verified backup staging, remote-agent v2, transactional update/rollback commands, supply-chain attestations, and non-destructive resilience fixtures.
+- A Continuity & Public Beta workspace with atomic external-storage relinking, audited crash-recovery decisions, canonical real-VM fixtures, declarative Labfiles, evidence expiry, host calibration, hostile-input tests, unified retention, measurable operational objectives, and human beta-quality gates.
 
 ## Requirements
 
@@ -69,6 +70,7 @@ swift build
 swift test
 swift run IOSVirtualDeviceLab
 swift run vdlctl --help
+swift run vdlctl labfile plan --file Labfile.json
 ```
 
 Homebrew and `/Applications/vphone-cli.app` installations are discovered automatically. For a local backend build, set `VPHONE_CLI_BIN` to its executable and, if needed, `VPHONE_VPHONED_PATH` to `vphoned.signed` before launching the manager.
@@ -82,7 +84,7 @@ To regenerate the macOS `.icns` bundle from the checked-in 1024 px master:
 To create a versioned ZIP and checksum:
 
 ```sh
-./scripts/release_app.sh 0.8.0
+./scripts/release_app.sh 0.9.0
 ```
 
 Developer ID signing and notarization are supported through `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE`; see [Release engineering](docs/RELEASES.md).
@@ -99,7 +101,7 @@ The default layout follows the backend:
 └── VirtualDeviceLab/     profiles, app builds, test reports, diagnostics, plugins, and activity
 ```
 
-To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/.vphone` may be symlinked to a directory on an external APFS volume before creating devices.
+To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/.vphone` may be symlinked to a dedicated directory on an external APFS volume. Continuity & Beta records the volume identity, detects stale links without recreating missing storage, and can atomically relink a stopped lab to an existing dedicated directory.
 
 ## Safety behavior
 
@@ -109,6 +111,6 @@ To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/
 - VM creation uses the backend’s native authentication dialog rather than storing a sudo password.
 - The manager never weakens SIP/AMFI itself.
 
-See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), [Operational readiness](docs/OPERATIONAL_READINESS.md), [Production readiness v2](docs/PRODUCTION_READINESS_V2.md), [Production readiness v3](docs/PRODUCTION_READINESS_V3.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
+See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), [Operational readiness](docs/OPERATIONAL_READINESS.md), [Continuity and beta](docs/CONTINUITY_AND_BETA.md), [Production readiness v2](docs/PRODUCTION_READINESS_V2.md), [Production readiness v3](docs/PRODUCTION_READINESS_V3.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
 
 Also read [Compatibility](docs/COMPATIBILITY.md), [Multi-backend and attribution](docs/MULTI_BACKEND_AND_ATTRIBUTION.md), [Limitations](docs/LIMITATIONS.md), [Remote agent](docs/REMOTE_AGENT.md), and [Plugin development](docs/PLUGINS.md). An entry marked `researching` or `unverified` is never a support claim.

@@ -109,6 +109,22 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var supplyChainAssessment: SupplyChainAssessment = .unavailable
     @Published private(set) var resilienceReport: ResilienceReport?
     @Published private(set) var companionAssessment: CompanionBackendAssessment = .unavailable
+    @Published private(set) var storageLocationStatus: StorageLocationStatus = .unknown
+    @Published private(set) var recoveryCenter: RecoveryCenterSnapshot = .empty
+    @Published private(set) var canonicalFixtures: [CanonicalVMFixture] = []
+    @Published private(set) var canonicalFixtureAssessment: CanonicalFixtureAssessment = .unavailable
+    @Published private(set) var activeLabfile: LabfileDocument?
+    @Published private(set) var labfilePlan: LabfilePlan = .empty
+    @Published private(set) var evidenceLifecyclePolicy: EvidenceLifecyclePolicy = .standard
+    @Published private(set) var evidenceFreshnessReport: EvidenceFreshnessReport = .empty
+    @Published private(set) var hostCapacityCalibration: HostCapacityCalibration = .unavailable
+    @Published private(set) var hostileInputReport: HostileInputReport = .empty
+    @Published private(set) var unifiedRetentionPolicy: UnifiedRetentionPolicy = .standard
+    @Published private(set) var retentionPreview: RetentionPreview = .empty
+    @Published private(set) var operationalObjectivePolicy: OperationalObjectivePolicy = .standard
+    @Published private(set) var operationalObjectiveReport: OperationalObjectiveReport = .empty
+    @Published private(set) var betaVerification: BetaVerificationRecord = .empty
+    @Published private(set) var publicBetaReadiness: PublicBetaReadinessReport = .empty
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
 
@@ -134,8 +150,15 @@ final class LabAppModel: ObservableObject {
     func bootstrap(safeMode: Bool = false) async {
         guard !didBootstrap else { return }
         didBootstrap = true
+        storageLocationStatus = ExternalStorageManager.inspect(paths: paths)
+        guard !storageLocationStatus.requiresRelink, storageLocationStatus.state != .readOnly else {
+            alertMessage = storageLocationStatus.message
+            appendLog(.error, scope: "storage", storageLocationStatus.message)
+            return
+        }
         do {
             try await backend.prepareStorage()
+            storageLocationStatus = ExternalStorageManager.inspect(paths: paths)
             let labPaths = paths
             let localState = try await Task.detached(priority: .userInitiated) {
                 try LocalBootstrapState.load(paths: labPaths, safeMode: safeMode)
@@ -170,6 +193,14 @@ final class LabAppModel: ObservableObject {
             stagedUpdate = localState.hardening.stagedUpdate
             supplyChainAssessment = localState.hardening.supplyChain
             resilienceReport = localState.hardening.resilienceReport
+            recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
+            canonicalFixtures = CanonicalFixtureStore.load(paths: paths)
+            evidenceLifecyclePolicy = EvidenceLifecycleManager.loadPolicy(paths: paths)
+            hostCapacityCalibration = HostCapacityCalibrator.load(paths: paths)
+            hostileInputReport = HostileInputValidator.load(paths: paths)
+            unifiedRetentionPolicy = UnifiedDataLifecycleManager.load(paths: paths)
+            operationalObjectivePolicy = OperationalObjectiveEvaluator.loadPolicy(paths: paths)
+            betaVerification = PublicBetaReadinessManager.load(paths: paths)
             evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
             backendDescriptor = await backend.descriptor
             backendCapabilities = await backend.capabilities
@@ -265,6 +296,312 @@ final class LabAppModel: ObservableObject {
         guestTrustAssessments = guestProtocolHandshakes.mapValues {
             GuestTrustEvaluator.evaluate($0, policy: guestTrustPolicy)
         }
+        refreshContinuityAssessments()
+    }
+
+    // MARK: - Continuity, reproducibility, and public beta
+
+    func refreshContinuityAssessments() {
+        storageLocationStatus = ExternalStorageManager.inspect(paths: paths)
+        recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
+
+        let fixtureDevice = selectedDevice ?? devices.first
+        let fixtureFirmware = matchingFirmware(for: fixtureDevice)
+        let fixtureSnapshot = fixtureDevice.flatMap { device in
+            snapshots.filter { $0.sourceVM == device.name }.sorted { $0.createdAt > $1.createdAt }.first
+        }
+        canonicalFixtureAssessment = CanonicalFixtureStore.assess(
+            device: fixtureDevice, firmware: fixtureFirmware,
+            snapshot: fixtureSnapshot, acceptance: acceptanceReport
+        )
+        let hashes = Set(firmware.compactMap(\.sha256).map { $0.lowercased() })
+        evidenceFreshnessReport = EvidenceLifecycleManager.evaluate(
+            campaigns: qualificationCampaigns, policy: evidenceLifecyclePolicy,
+            host: readiness, backend: backendDescriptor, currentFirmwareHashes: hashes,
+            seals: evidenceSeals
+        )
+        retentionPreview = UnifiedDataLifecycleManager.preview(paths: paths, policy: unifiedRetentionPolicy)
+        operationalObjectiveReport = OperationalObjectiveEvaluator.evaluate(
+            policy: operationalObjectivePolicy, testRuns: testRuns,
+            acceptance: acceptanceReport, resilience: resilienceReport,
+            secondVolumeRestoreRecorded: betaVerification.secondVolumeRestoreRecorded
+        )
+        publicBetaReadiness = PublicBetaReadinessManager.evaluate(
+            record: betaVerification, localizationCount: packagedLocalizationCount()
+        )
+    }
+
+    func relinkExternalStorage(to destination: URL) async {
+        guard devices.allSatisfy({ !$0.isRunning }) else {
+            alertMessage = "Stop every virtual device before relinking lab storage."
+            return
+        }
+        do {
+            storageLocationStatus = try ExternalStorageManager.relink(root: paths.dataRoot, to: destination)
+            appendLog(.success, scope: "storage", "Atomically relinked lab storage to \(destination.path)")
+            persistLogs()
+            didBootstrap = false
+            await bootstrap()
+        } catch { present(error, context: "Relinking external storage") }
+    }
+
+    func decideRecovery(_ entry: OperationJournalEntry, action: RecoveryAction) {
+        do {
+            let decision = try RecoveryCenterStore.decide(
+                entry: entry, action: action, entries: &operationJournalEntries, paths: paths
+            )
+            recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
+            appendLog(.warning, scope: "recovery", "\(action.rawValue) selected for \(entry.target)")
+            persistLogs()
+            if decision.requiresManualAction { alertMessage = decision.guidance }
+        } catch { present(error, context: "Recording recovery decision") }
+    }
+
+    func recordCanonicalFixture(name: String) {
+        guard let device = selectedDevice ?? devices.first,
+              let firmware = matchingFirmware(for: device),
+              let snapshot = snapshots.filter({ $0.sourceVM == device.name }).sorted(by: { $0.createdAt > $1.createdAt }).first
+        else {
+            alertMessage = canonicalFixtureAssessment.blockers.joined(separator: "\n")
+            return
+        }
+        let cloud = self.firmware.first { image in
+            image.kind == .cloudOS && image.build == device.restoreInfo?.cloudOS.build
+        }
+        do {
+            _ = try CanonicalFixtureStore.create(
+                name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Golden \(device.name)" : name,
+                device: device, firmware: firmware, cloudOS: cloud, snapshot: snapshot,
+                smokeApp: appArtifacts.first, backend: backendDescriptor,
+                handshake: guestProtocolHandshakes[device.id], acceptance: acceptanceReport, paths: paths
+            )
+            canonicalFixtures = CanonicalFixtureStore.load(paths: paths)
+            appendLog(.success, scope: "fixture", "Recorded canonical real-VM fixture for \(device.name)")
+            persistLogs()
+        } catch {
+            alertMessage = canonicalFixtureAssessment.blockers.joined(separator: "\n")
+            if canonicalFixtureAssessment.blockers.isEmpty { present(error, context: "Recording canonical fixture") }
+        }
+    }
+
+    func exportCurrentLabfile(to url: URL) {
+        var blockers: [String] = []
+        let desired = devices.compactMap { device -> LabfileDevice? in
+            guard let profile = device.hardwareProfileID else {
+                blockers.append("\(device.name) has no hardware profile assignment.")
+                return nil
+            }
+            guard let hash = matchingFirmware(for: device)?.sha256 else {
+                blockers.append("\(device.name) has no matching firmware SHA-256 in the catalog.")
+                return nil
+            }
+            return LabfileDevice(
+                name: device.name, hardwareProfileID: profile, firmwareSHA256: hash,
+                cloudOSFirmwareSHA256: firmware.first {
+                    $0.kind == .cloudOS && $0.build == device.restoreInfo?.cloudOS.build
+                }?.sha256,
+                cpuCount: device.cpuCount, memoryMB: device.memoryMB,
+                diskSizeGB: max(1, Int(device.diskSizeBytes / 1_073_741_824)),
+                networkMode: device.networkConfiguration?.mode.rawValue ?? device.network.mode,
+                environmentProfileID: environmentAssignments[device.id], workflowNames: []
+            )
+        }
+        guard blockers.isEmpty else { alertMessage = blockers.joined(separator: "\n"); return }
+        let document = LabfileDocument(
+            schemaVersion: 1, name: "iOS Virtual Device Lab",
+            backendID: backendDescriptor.id, devices: desired
+        )
+        do {
+            try LabfilePlanner.save(document, to: url)
+            activeLabfile = document
+            labfilePlan = LabfilePlanner.plan(
+                document, devices: devices, firmware: firmware,
+                profiles: hardwareProfiles, backend: backendDescriptor
+            )
+            reveal(url)
+        } catch { present(error, context: "Exporting Labfile") }
+    }
+
+    func importLabfile(_ url: URL) {
+        do {
+            let document = try LabfilePlanner.load(url)
+            activeLabfile = document
+            labfilePlan = LabfilePlanner.plan(
+                document, devices: devices, firmware: firmware,
+                profiles: hardwareProfiles, backend: backendDescriptor
+            )
+            appendLog(
+                labfilePlan.canApply ? .success : .warning,
+                scope: "labfile",
+                "Planned \(labfilePlan.changes.count) declarative device change(s)"
+            )
+            persistLogs()
+        } catch { present(error, context: "Importing Labfile") }
+    }
+
+    func applyActiveLabfile() async {
+        guard let document = activeLabfile else { alertMessage = "Import a Labfile first."; return }
+        let plan = LabfilePlanner.plan(
+            document, devices: devices, firmware: firmware,
+            profiles: hardwareProfiles, backend: backendDescriptor
+        )
+        labfilePlan = plan
+        guard plan.canApply else {
+            let blockedChanges = plan.changes
+                .filter { $0.kind == .blocked }
+                .map { "\($0.deviceName): \($0.summary)" }
+            alertMessage = (plan.blockers + blockedChanges).joined(separator: "\n")
+            return
+        }
+        guard requireReady(for: "Apply Labfile") else { return }
+        for desired in document.devices {
+            let networkMode = NetworkMode(rawValue: desired.networkMode) ?? .nat
+            let network = NetworkConfiguration(
+                mode: networkMode, proxyURL: nil, captureTraffic: false, allowHostAccess: false
+            )
+            if let current = devices.first(where: { $0.name.caseInsensitiveCompare(desired.name) == .orderedSame }) {
+                guard !current.isRunning else {
+                    alertMessage = "Stop \(current.name) before applying its declarative configuration."
+                    return
+                }
+                await updateConfiguration(
+                    current, cpu: desired.cpuCount, memoryMB: desired.memoryMB,
+                    network: networkMode.backendValue, hardwareProfileID: desired.hardwareProfileID,
+                    networkConfiguration: network
+                )
+            } else {
+                guard let iphone = firmware.first(where: {
+                    $0.sha256?.caseInsensitiveCompare(desired.firmwareSHA256) == .orderedSame
+                }) else { continue }
+                let cloud = desired.cloudOSFirmwareSHA256.flatMap { hash in
+                    firmware.first { $0.sha256?.caseInsensitiveCompare(hash) == .orderedSame }
+                }
+                await createVM(
+                    name: desired.name, variant: .regular, diskSizeGB: desired.diskSizeGB,
+                    iphoneIPSW: iphone.url, cloudOSIPSW: cloud?.url,
+                    hardwareProfileID: desired.hardwareProfileID, network: network
+                )
+            }
+            if let profileID = desired.environmentProfileID,
+               let profile = environmentProfiles.first(where: { $0.id == profileID }),
+               let device = devices.first(where: { $0.name.caseInsensitiveCompare(desired.name) == .orderedSame }) {
+                await applyEnvironmentProfile(profile, to: device)
+            }
+        }
+        await refreshAll()
+        labfilePlan = LabfilePlanner.plan(
+            document, devices: devices, firmware: firmware,
+            profiles: hardwareProfiles, backend: backendDescriptor
+        )
+    }
+
+    func updateEvidenceLifecyclePolicy(_ policy: EvidenceLifecyclePolicy) {
+        do {
+            try EvidenceLifecycleManager.savePolicy(policy, paths: paths)
+            evidenceLifecyclePolicy = policy
+            refreshContinuityAssessments()
+        } catch { present(error, context: "Saving evidence lifecycle policy") }
+    }
+
+    func calibrateHostCapacity() async {
+        let labPaths = paths
+        hostCapacityCalibration = await Task.detached(priority: .utility) {
+            HostCapacityCalibrator.run(paths: labPaths)
+        }.value
+        refreshContinuityAssessments()
+    }
+
+    func applyCapacityRecommendation() async {
+        let calibration = hostCapacityCalibration
+        guard calibration.measuredAt != .distantPast else { alertMessage = "Calibrate host capacity first."; return }
+        var policy = resourcePolicy
+        policy.maximumConcurrentVMs = calibration.recommendedConcurrentVMs
+        policy.maximumAggregateMemoryMB = calibration.recommendedAggregateMemoryMB
+        policy.reservedHostMemoryMB = calibration.reservedHostMemoryMB
+        updateResourcePolicy(policy)
+    }
+
+    func runHostileInputSuite() async {
+        let labPaths = paths
+        hostileInputReport = await Task.detached(priority: .utility) {
+            HostileInputValidator.run(paths: labPaths)
+        }.value
+        appendLog(
+            hostileInputReport.passed ? .success : .error, scope: "security",
+            "Hostile-input suite: \(hostileInputReport.results.filter(\.passed).count)/\(hostileInputReport.results.count) passed"
+        )
+        persistLogs()
+    }
+
+    func updateUnifiedRetentionPolicy(_ policy: UnifiedRetentionPolicy) {
+        do {
+            try UnifiedDataLifecycleManager.save(policy, paths: paths)
+            unifiedRetentionPolicy = policy
+            retentionPreview = UnifiedDataLifecycleManager.preview(paths: paths, policy: policy)
+        } catch { present(error, context: "Saving unified retention policy") }
+    }
+
+    func refreshRetentionPreview() {
+        retentionPreview = UnifiedDataLifecycleManager.preview(paths: paths, policy: unifiedRetentionPolicy)
+    }
+
+    func quarantineExpiredArtifacts() {
+        do {
+            if let output = try UnifiedDataLifecycleManager.quarantine(retentionPreview, paths: paths) {
+                appendLog(.success, scope: "retention", "Moved expired artifacts to recoverable quarantine")
+                persistLogs()
+                reveal(output)
+            }
+            refreshRetentionPreview()
+        } catch { present(error, context: "Quarantining expired artifacts") }
+    }
+
+    func updateOperationalObjectivePolicy(_ policy: OperationalObjectivePolicy) {
+        do {
+            try OperationalObjectiveEvaluator.savePolicy(policy, paths: paths)
+            operationalObjectivePolicy = policy
+            refreshContinuityAssessments()
+        } catch { present(error, context: "Saving operational objectives") }
+    }
+
+    func updateBetaVerification(_ record: BetaVerificationRecord) {
+        do {
+            try PublicBetaReadinessManager.save(record, paths: paths)
+            betaVerification = PublicBetaReadinessManager.load(paths: paths)
+            refreshContinuityAssessments()
+        } catch { present(error, context: "Saving beta verification") }
+    }
+
+    func exportSupportReport() {
+        do {
+            let output = try PublicBetaReadinessManager.createSupportBundle(
+                paths: paths, storage: storageLocationStatus,
+                capacity: hostCapacityCalibration, objectives: operationalObjectiveReport,
+                beta: publicBetaReadiness
+            )
+            reveal(output)
+        } catch { present(error, context: "Creating privacy-safe support report") }
+    }
+
+    private func matchingFirmware(for device: VirtualDevice?) -> FirmwareImage? {
+        guard let device else { return nil }
+        return firmware.first { image in
+            guard image.kind == .iPhone, image.validation?.state == .valid else { return false }
+            let restore = device.restoreInfo
+            return image.version == restore?.ios.version
+                && image.build == restore?.ios.build
+                && (image.device == nil || image.device == restore?.device)
+        }
+    }
+
+    private func packagedLocalizationCount() -> Int {
+        let bundled = Bundle.main.resourceURL.flatMap {
+            try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)
+        }?.filter { $0.pathExtension == "lproj" }.count ?? 0
+        if bundled > 0 { return bundled }
+        let source = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
+        return (try? FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "lproj" }.count ?? 0
     }
 
     // MARK: - Production qualification and recovery
