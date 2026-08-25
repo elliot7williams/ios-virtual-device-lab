@@ -948,6 +948,15 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertEqual(LaunchHealthMonitor.shared.record.lastPhase, "clean-exit")
     }
 
+    func testLaunchHealthForDefaultLabUsesHostLocalStorage() {
+        let root = LaunchHealthLocation.markerRoot(for: .default)
+        XCTAssertEqual(root, LaunchHealthLocation.hostRoot)
+        XCTAssertFalse(root.path.hasPrefix(LabPaths.default.dataRoot.path + "/"))
+
+        let temporary = makePaths(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        XCTAssertEqual(LaunchHealthLocation.markerRoot(for: temporary), temporary.stateRoot)
+    }
+
     func testUpdaterRejectsArchiveSymlinkEscape() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("update-escape-v3-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

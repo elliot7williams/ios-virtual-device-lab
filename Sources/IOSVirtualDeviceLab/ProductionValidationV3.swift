@@ -426,13 +426,27 @@ struct LaunchHealthRecord: Codable, Hashable, Sendable {
     var lastPhase: String
 }
 
+enum LaunchHealthLocation {
+    static var hostRoot: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/iOS Virtual Device Lab", isDirectory: true)
+            .appendingPathComponent("Launch Health", isDirectory: true)
+    }
+
+    static func markerRoot(for paths: LabPaths) -> URL {
+        paths.dataRoot.standardizedFileURL == LabPaths.default.dataRoot.standardizedFileURL
+            ? hostRoot
+            : paths.stateRoot
+    }
+}
+
 @MainActor
 final class LaunchHealthMonitor: ObservableObject {
     static let shared = LaunchHealthMonitor()
     private let logger = Logger(subsystem: "com.elliotwilliams.ios-virtual-device-lab", category: "lifecycle")
     private let heartbeat = HeartbeatState()
     private var timer: DispatchSourceTimer?
-    private var paths = LabPaths.default
+    private var markerRoot = LaunchHealthLocation.hostRoot
 
     @Published private(set) var record = LaunchHealthRecord(
         schemaVersion: 1,
@@ -448,9 +462,13 @@ final class LaunchHealthMonitor: ObservableObject {
     )
 
     func begin(paths: LabPaths) {
-        self.paths = paths
-        try? SecureFilesystem.prepareDirectory(paths.stateRoot)
-        let url = markerURL(paths: paths)
+        markerRoot = LaunchHealthLocation.markerRoot(for: paths)
+        try? FileManager.default.createDirectory(
+            at: markerRoot,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let url = markerURL()
         let previous = try? HardeningJSON.load(LaunchHealthRecord.self, from: url)
         let failures = previous?.cleanExitAt == nil ? (previous?.consecutiveUncleanLaunches ?? 0) + 1 : 0
         record = LaunchHealthRecord(
@@ -507,11 +525,11 @@ final class LaunchHealthMonitor: ObservableObject {
     }
 
     private func persist() {
-        try? HardeningJSON.save(record, to: markerURL(paths: paths))
+        try? HardeningJSON.save(record, to: markerURL())
     }
 
-    private func markerURL(paths: LabPaths) -> URL {
-        paths.stateRoot.appendingPathComponent("launch-health.json")
+    private func markerURL() -> URL {
+        markerRoot.appendingPathComponent("launch-health.json")
     }
 }
 
@@ -526,7 +544,7 @@ private func makeLaunchHangWatchdog(heartbeat: HeartbeatState) -> DispatchSource
 }
 
 private func recordLaunchHang() {
-    let root = LabPaths.default.stateRoot.appendingPathComponent("Crash Reports", isDirectory: true)
+    let root = LaunchHealthLocation.hostRoot.appendingPathComponent("Crash Reports", isDirectory: true)
     try? SecureFilesystem.prepareDirectory(root)
     let report = root.appendingPathComponent("hang-\(Int(Date().timeIntervalSince1970)).txt")
     let text = "Detected a main-thread heartbeat stall at \(Date().formatted(.iso8601)). See launch-health.json for the active launch and phase.\n"
