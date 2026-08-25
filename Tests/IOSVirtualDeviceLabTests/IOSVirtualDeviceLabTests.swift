@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 import XCTest
 @testable import IOSVirtualDeviceLab
 
@@ -851,6 +852,12 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             passphrase: "correct horse battery"
         )
         XCTAssertEqual(archive.pathExtension, "vdlbackup")
+        let archiveHandle = try FileHandle(forReadingFrom: archive)
+        defer { try? archiveHandle.close() }
+        XCTAssertEqual(
+            try archiveHandle.read(upToCount: Data("VDLBACKUP2\n".utf8).count),
+            Data("VDLBACKUP2\n".utf8)
+        )
         XCTAssertFalse(LabBackupManager.verify(archive, passphrase: "incorrect passphrase").passed)
         let verification = LabBackupManager.verify(archive, passphrase: "correct horse battery")
         XCTAssertTrue(verification.passed, verification.issues.joined(separator: ", "))
@@ -863,6 +870,23 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         let staged = try LabBackupManager.stageRestore(archive, paths: paths, passphrase: "correct horse battery")
         let command = try LabBackupManager.writeApplyRestoreCommand(stagedPayload: staged, paths: paths)
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: command.path))
+    }
+
+    func testEncryptedBackupCanOpenLegacyV1Container() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("backup-v1-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("VDL-Backup-Legacy")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("legacy payload".utf8).write(to: source.appendingPathComponent("fixture.txt"))
+        let archive = try makeLegacyBackup(directory: source, passphrase: "correct horse battery")
+
+        let payload = try BackupArchiveCrypto.withDecryptedDirectory(
+            archive,
+            passphrase: "correct horse battery"
+        ) { directory in
+            try Data(contentsOf: directory.appendingPathComponent("fixture.txt"))
+        }
+        XCTAssertEqual(payload, Data("legacy payload".utf8))
     }
 
     func testHardeningJSONConcurrentWritersRemainDecodableAndPrivate() throws {
@@ -1247,5 +1271,34 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             snapshotsRoot: root.appendingPathComponent("Snapshots"),
             stateRoot: root.appendingPathComponent("VirtualDeviceLab")
         )
+    }
+
+    private func makeLegacyBackup(directory: URL, passphrase: String) throws -> URL {
+        let zip = directory.deletingLastPathComponent().appendingPathComponent("legacy.zip")
+        let archive = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/ditto"),
+            arguments: ["-c", "-k", "--keepParent", directory.path, zip.path]
+        )
+        XCTAssertTrue(archive.succeeded, archive.output)
+        let salt = Data(repeating: 0xA5, count: 16)
+        let rounds: UInt32 = 120_000
+        var digest = Data(SHA256.hash(data: Data(passphrase.utf8) + salt))
+        for _ in 1..<rounds { digest = Data(SHA256.hash(data: digest + salt)) }
+        let sealed = try AES.GCM.seal(Data(contentsOf: zip), using: SymmetricKey(data: digest))
+        let combined = try XCTUnwrap(sealed.combined)
+        var container = Data("VDLBACKUP1\n".utf8)
+        container.append(salt)
+        container.append(bigEndianData(rounds))
+        container.append(bigEndianData(UInt32(combined.count)))
+        container.append(combined)
+        container.append(bigEndianData(0))
+        let destination = directory.deletingLastPathComponent().appendingPathComponent("legacy.vdlbackup")
+        try container.write(to: destination, options: .atomic)
+        return destination
+    }
+
+    private func bigEndianData(_ value: UInt32) -> Data {
+        var encoded = value.bigEndian
+        return withUnsafeBytes(of: &encoded) { Data($0) }
     }
 }

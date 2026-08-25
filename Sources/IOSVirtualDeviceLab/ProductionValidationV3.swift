@@ -1,4 +1,5 @@
 import CryptoKit
+import CommonCrypto
 import Darwin
 import Foundation
 import OSLog
@@ -43,19 +44,22 @@ enum BackupArchiveCryptoError: LocalizedError {
     case archiveFailed(String)
     case invalidContainer
     case authenticationFailed
+    case keyDerivationFailed
 
     var errorDescription: String? {
         switch self {
         case let .archiveFailed(message): "Backup archive operation failed: \(message)"
         case .invalidContainer: "The encrypted backup container is invalid or truncated."
         case .authenticationFailed: "The backup passphrase is incorrect or the archive was modified."
+        case .keyDerivationFailed: "The backup encryption key could not be derived."
         }
     }
 }
 
 enum BackupArchiveCrypto {
-    private static let magic = Data("VDLBACKUP1\n".utf8)
-    private static let rounds: UInt32 = 120_000
+    private static let legacyMagic = Data("VDLBACKUP1\n".utf8)
+    private static let magic = Data("VDLBACKUP2\n".utf8)
+    private static let rounds: UInt32 = 200_000
     private static let chunkSize = 4 * 1_024 * 1_024
 
     static func encrypt(directory: URL, passphrase: String) throws -> URL {
@@ -75,7 +79,7 @@ enum BackupArchiveCrypto {
         let output = try FileHandle(forWritingTo: destination)
         defer { try? input.close(); try? output.close() }
         let salt = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })
-        let key = deriveKey(passphrase: passphrase, salt: salt, rounds: rounds)
+        let key = try deriveKey(passphrase: passphrase, salt: salt, rounds: rounds)
         try output.write(contentsOf: magic)
         try output.write(contentsOf: salt)
         try output.write(contentsOf: integerData(rounds))
@@ -125,15 +129,23 @@ enum BackupArchiveCrypto {
         FileManager.default.createFile(atPath: destination.path, contents: nil, attributes: [.posixPermissions: 0o600])
         let output = try FileHandle(forWritingTo: destination)
         defer { try? input.close(); try? output.close() }
-        guard try input.read(upToCount: magic.count) == magic,
+        guard let containerMagic = try input.read(upToCount: magic.count),
+              containerMagic == magic || containerMagic == legacyMagic,
               let salt = try input.read(upToCount: 16), salt.count == 16,
               let roundData = try input.read(upToCount: 4), roundData.count == 4
         else { throw BackupArchiveCryptoError.invalidContainer }
         let configuredRounds = integer(from: roundData)
-        guard configuredRounds >= 10_000, configuredRounds <= 1_000_000 else {
+        let roundsAreValid = containerMagic == legacyMagic
+            ? configuredRounds == 120_000
+            : configuredRounds >= 100_000 && configuredRounds <= 1_000_000
+        guard roundsAreValid else {
             throw BackupArchiveCryptoError.invalidContainer
         }
-        let key = deriveKey(passphrase: passphrase, salt: salt, rounds: configuredRounds)
+        let key = if containerMagic == legacyMagic {
+            legacyKey(passphrase: passphrase, salt: salt, rounds: configuredRounds)
+        } else {
+            try deriveKey(passphrase: passphrase, salt: salt, rounds: configuredRounds)
+        }
         while true {
             guard let sizeData = try input.read(upToCount: 4), sizeData.count == 4 else {
                 throw BackupArchiveCryptoError.invalidContainer
@@ -153,7 +165,32 @@ enum BackupArchiveCrypto {
         try output.synchronize()
     }
 
-    private static func deriveKey(passphrase: String, salt: Data, rounds: UInt32) -> SymmetricKey {
+    private static func deriveKey(passphrase: String, salt: Data, rounds: UInt32) throws -> SymmetricKey {
+        let password = Array(passphrase.utf8)
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = password.withUnsafeBytes { passwordPointer in
+            salt.withUnsafeBytes { saltPointer in
+                CCKeyDerivationPBKDF(
+                    CCPBKDFAlgorithm(kCCPBKDF2),
+                    passwordPointer.bindMemory(to: Int8.self).baseAddress,
+                    password.count,
+                    saltPointer.bindMemory(to: UInt8.self).baseAddress,
+                    salt.count,
+                    CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                    rounds,
+                    &bytes,
+                    bytes.count
+                )
+            }
+        }
+        guard status == kCCSuccess else { throw BackupArchiveCryptoError.keyDerivationFailed }
+        return SymmetricKey(data: bytes)
+    }
+
+    private static func legacyKey(passphrase: String, salt: Data, rounds: UInt32) -> SymmetricKey {
+        // VDLBACKUP1 used this historical KDF. It is decrypt-only so 0.8 archives can be
+        // opened and immediately replaced; all newly created archives use PBKDF2 above.
+        // codeql[swift/weak-password-hashing]
         var digest = Data(SHA256.hash(data: Data(passphrase.utf8) + salt))
         for _ in 1..<rounds { digest = Data(SHA256.hash(data: digest + salt)) }
         return SymmetricKey(data: digest)
