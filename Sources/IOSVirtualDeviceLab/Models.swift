@@ -822,7 +822,10 @@ struct LabPaths: Sendable {
 
     func createDirectories() throws {
         for url in [dataRoot, libraryRoot, firmwareRoot, snapshotsRoot, stateRoot] {
-            try SecureFilesystem.prepareDirectory(url)
+            // VM data may live on an external, ownership-disabled volume. Creating a
+            // missing directory with 0700 is safe; reapplying chmod to every existing
+            // directory can block that volume and must not gate application startup.
+            try SecureFilesystem.prepareDirectory(url, enforceExistingPermissions: false)
         }
     }
 }

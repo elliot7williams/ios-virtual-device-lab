@@ -24,13 +24,16 @@ enum AdvisoryFileLock {
 }
 
 enum SecureFilesystem {
-    static func prepareDirectory(_ url: URL) throws {
+    static func prepareDirectory(_ url: URL, enforceExistingPermissions: Bool = true) throws {
+        let existed = FileManager.default.fileExists(atPath: url.path)
         try FileManager.default.createDirectory(
             at: url,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        if existed && enforceExistingPermissions {
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+        }
     }
 
     static func protectFile(_ url: URL) throws {

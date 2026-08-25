@@ -958,6 +958,23 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertEqual(LaunchHealthLocation.markerRoot(for: temporary), temporary.stateRoot)
     }
 
+    func testStorageBootstrapDoesNotRewriteExistingDirectoryPermissions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bootstrap-permissions-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try FileManager.default.createDirectory(at: paths.dataRoot, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o750], ofItemAtPath: paths.dataRoot.path)
+
+        try paths.createDirectories()
+
+        let permissions = try FileManager.default.attributesOfItem(atPath: paths.dataRoot.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o750)
+        for directory in [paths.libraryRoot, paths.firmwareRoot, paths.snapshotsRoot, paths.stateRoot] {
+            let created = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+            XCTAssertEqual(created?.intValue, 0o700)
+        }
+    }
+
     func testUpdaterRejectsArchiveSymlinkEscape() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("update-escape-v3-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
