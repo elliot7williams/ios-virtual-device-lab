@@ -52,6 +52,16 @@
 | Unified retention | Preview-first artifact retention, telemetry-off default, signed-evidence preservation, and recoverable quarantine |
 | Operational objectives | Success-rate, P95-duration, soak, acceptance, resilience, second-volume restore, RTO, and RPO policy |
 | Public-beta quality | VoiceOver, keyboard, reduced-motion, onboarding, support, asset-policy, legal-reference, localization, and privacy-safe support-report gates |
+| Backend adapter SDK | Versioned protocol-v3 manifests, declared capability validation, executable probing, license references, desktop import/export, and `vdlctl adapter check` |
+| Deterministic test reset | Golden-snapshot, reinstall, app-data, permissions, keychain, network, and environment reset plans that block when guest capabilities are absent |
+| Build identity | App metadata, checksum, code-signing team/authority, entitlement digest, executable UUID, dSYM, and source-revision catalog |
+| Failure reproduction | Hash-pinned privacy-safe replay manifests containing run, Labfile, environment, fixture, and evidence references without protected assets or secrets |
+| Quality trends | Pass rate, consecutive failure, P50/P95 duration, flaky/quarantine classification, and recent performance-regression detection |
+| Multi-Mac scheduling | Capability-, memory-, concurrency-, health-, and drain-aware placement with explicit no-placement results |
+| Unified timelines | Timestamp correlation across run phases, assertions, logs, screenshots, diagnostics, and performance with explicit missing-video capability |
+| Security governance | Formal trust-boundary/threat/control report and metadata-only secret inventory with rotation, revocation, and export policy |
+| Engineering quality | Seeded bounded archive/Labfile fuzz campaigns plus imported source-coverage thresholds that fail closed when coverage is unavailable |
+| Beta operations | Internal/alpha/beta/stable channel policy, staged rollout, launch/crash/support/feedback gates, and privacy-safe feedback packages |
 
 ## Next engineering milestones
 

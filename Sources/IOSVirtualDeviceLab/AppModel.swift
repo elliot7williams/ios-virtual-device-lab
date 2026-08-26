@@ -17,6 +17,7 @@ private struct LocalBootstrapState: Sendable {
     let xcodeIntegration: XcodeIntegrationStatus
     let logs: [LogEntry]
     let hardening: ProductionHardeningState
+    let platformEngineering: PlatformEngineeringState
 
     static func load(paths: LabPaths, safeMode: Bool = false) throws -> LocalBootstrapState {
         if !safeMode { try PluginRegistry.prepare(paths: paths) }
@@ -42,7 +43,8 @@ private struct LocalBootstrapState: Sendable {
             diagnosticPrivacy: DiagnosticPrivacyStore.load(paths: paths),
             xcodeIntegration: DeveloperTools.inspect(paths: paths),
             logs: Array((persistedLogs ?? []).suffix(2_000)),
-            hardening: hardening
+            hardening: hardening,
+            platformEngineering: PlatformEngineeringStore.load(paths: paths)
         )
     }
 }
@@ -125,6 +127,7 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var operationalObjectiveReport: OperationalObjectiveReport = .empty
     @Published private(set) var betaVerification: BetaVerificationRecord = .empty
     @Published private(set) var publicBetaReadiness: PublicBetaReadinessReport = .empty
+    @Published private(set) var platformEngineering: PlatformEngineeringState = .empty
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
 
@@ -193,6 +196,7 @@ final class LabAppModel: ObservableObject {
             stagedUpdate = localState.hardening.stagedUpdate
             supplyChainAssessment = localState.hardening.supplyChain
             resilienceReport = localState.hardening.resilienceReport
+            platformEngineering = localState.platformEngineering
             recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
             canonicalFixtures = CanonicalFixtureStore.load(paths: paths)
             evidenceLifecyclePolicy = EvidenceLifecycleManager.loadPolicy(paths: paths)
@@ -329,6 +333,218 @@ final class LabAppModel: ObservableObject {
         publicBetaReadiness = PublicBetaReadinessManager.evaluate(
             record: betaVerification, localizationCount: packagedLocalizationCount()
         )
+        refreshPlatformEngineeringAssessments()
+    }
+
+    // MARK: - Platform engineering and beta operations
+
+    func refreshPlatformEngineeringAssessments() {
+        platformEngineering.trends = RunTrendAnalyzer.evaluate(
+            runs: testRuns, policy: platformEngineering.retryPolicy
+        )
+        platformEngineering.security = SecurityPostureEvaluator.evaluate(
+            paths: paths, devices: devices, remoteAgentConfigured: remoteAgentConfiguration != nil
+        )
+        platformEngineering.betaOperations = BetaOperationsEvaluator.evaluate(
+            policy: platformEngineering.betaPolicy, runs: testRuns,
+            publicBeta: publicBetaReadiness, quality: platformEngineering.quality,
+            security: platformEngineering.security
+        )
+        persistPlatformEngineering()
+    }
+
+    func importAdapterManifest(_ url: URL) {
+        do {
+            let manifest = try BackendAdapterConformance.load(url)
+            let report = BackendAdapterConformance.evaluate(manifest)
+            platformEngineering.adapterManifests.removeAll { $0.id == manifest.id }
+            platformEngineering.adapterManifests.insert(manifest, at: 0)
+            platformEngineering.adapterConformance = report
+            try PlatformEngineeringStore.save(platformEngineering, paths: paths)
+            appendLog(report.passed ? .success : .warning, scope: "adapters", "Conformance \(report.passed ? "passed" : "failed") for \(manifest.name)")
+            persistLogs()
+        } catch { present(error, context: "Importing backend adapter manifest") }
+    }
+
+    func runAdapterConformance(_ manifest: BackendAdapterManifest? = nil) {
+        guard let manifest = manifest ?? platformEngineering.adapterManifests.first else {
+            alertMessage = "Import an adapter manifest before running conformance."
+            return
+        }
+        platformEngineering.adapterConformance = BackendAdapterConformance.evaluate(manifest)
+        persistPlatformEngineering()
+    }
+
+    func exportAdapterSDK(to directory: URL) {
+        do {
+            let result = try BackendAdapterConformance.exportSDK(to: directory)
+            appendLog(.success, scope: "adapters", "Exported adapter SDK to \(result.path)")
+            persistLogs()
+            reveal(result)
+        } catch { present(error, context: "Exporting backend adapter SDK") }
+    }
+
+    func updateResetPolicy(_ policy: DeterministicResetPolicy) {
+        platformEngineering.resetPolicy = policy
+        planDeterministicReset()
+    }
+
+    func planDeterministicReset() {
+        let device = selectedDevice ?? devices.first
+        let fixture = device.flatMap { selected in canonicalFixtures.first { $0.deviceName == selected.name } }
+        platformEngineering.resetPlan = DeterministicResetPlanner.plan(
+            device: device, fixture: fixture, policy: platformEngineering.resetPolicy,
+            backendCapabilities: platformBackendCapabilityNames()
+        )
+        persistPlatformEngineering()
+    }
+
+    func exportDeterministicResetPlan(to url: URL) {
+        do {
+            try HardeningJSON.save(platformEngineering.resetPlan, to: url)
+            appendLog(.success, scope: "reset", "Exported deterministic reset plan")
+            persistLogs()
+        } catch { present(error, context: "Exporting deterministic reset plan") }
+    }
+
+    func indexBuildIdentity(_ artifact: AppArtifact, sourceRevision: String = "", dSYM: URL? = nil) {
+        let record = BuildIdentityCatalog.index(artifact: artifact, sourceRevision: sourceRevision, dSYM: dSYM)
+        platformEngineering.builds.removeAll { $0.artifactID == artifact.id }
+        platformEngineering.builds.insert(record, at: 0)
+        platformEngineering.builds = Array(platformEngineering.builds.prefix(250))
+        persistPlatformEngineering()
+        appendLog(record.warnings.isEmpty ? .success : .warning, scope: "builds", "Indexed build identity for \(artifact.name)")
+        persistLogs()
+    }
+
+    func createFailureReplayBundle(for run: TestRunRecord) {
+        do {
+            let bundle = try FailureReplayBundler.create(
+                run: run, labfile: activeLabfile, assignments: environmentAssignments,
+                fixtures: canonicalFixtures, paths: paths
+            )
+            platformEngineering.replayBundles.insert(bundle, at: 0)
+            platformEngineering.replayBundles = Array(platformEngineering.replayBundles.prefix(100))
+            try PlatformEngineeringStore.save(platformEngineering, paths: paths)
+            appendLog(.success, scope: "replay", "Created sanitized failure replay bundle for \(run.name)")
+            persistLogs()
+            reveal(URL(fileURLWithPath: bundle.path))
+        } catch { present(error, context: "Creating failure replay bundle") }
+    }
+
+    func updateRetryAndRegressionPolicy(_ policy: RetryAndRegressionPolicy) {
+        platformEngineering.retryPolicy = policy
+        platformEngineering.trends = RunTrendAnalyzer.evaluate(runs: testRuns, policy: policy)
+        persistPlatformEngineering()
+    }
+
+    func registerLocalFleetHost() {
+        let host = FleetScheduler.localHost(
+            capabilities: Array(platformBackendCapabilityNames()),
+            maximumConcurrentVMs: resourcePolicy.maximumConcurrentVMs
+        )
+        platformEngineering.fleetHosts.removeAll { $0.id == host.id }
+        platformEngineering.fleetHosts.insert(host, at: 0)
+        persistPlatformEngineering()
+        previewFleetPlacement()
+    }
+
+    func previewFleetPlacement() {
+        let request = FleetJobRequest(
+            name: "\((selectedDevice ?? devices.first)?.name ?? "Next virtual-device job")",
+            requiredCapabilities: ["lifecycle", "automation"],
+            requiredMemoryMB: (selectedDevice ?? devices.first)?.memoryMB ?? 4_096
+        )
+        platformEngineering.placement = FleetScheduler.place(request, on: platformEngineering.fleetHosts)
+        persistPlatformEngineering()
+    }
+
+    func setFleetHostDrained(_ host: FleetHostRecord, drained: Bool) {
+        guard let index = platformEngineering.fleetHosts.firstIndex(where: { $0.id == host.id }) else { return }
+        platformEngineering.fleetHosts[index].drained = drained
+        platformEngineering.fleetHosts[index].lastSeen = .now
+        persistPlatformEngineering()
+        previewFleetPlacement()
+    }
+
+    func captureUnifiedTimeline(for run: TestRunRecord) {
+        do {
+            let timeline = UnifiedTimelineBuilder.build(
+                run: run, logs: logs, performance: performanceSamples,
+                videoSupported: platformBackendCapabilityNames().contains("timelineVideo")
+            )
+            let saved = try UnifiedTimelineBuilder.save(timeline, paths: paths)
+            platformEngineering.timelines.insert(saved, at: 0)
+            platformEngineering.timelines = Array(platformEngineering.timelines.prefix(100))
+            try PlatformEngineeringStore.save(platformEngineering, paths: paths)
+            appendLog(.success, scope: "timeline", "Captured \(saved.events.count) correlated events for \(run.name)")
+            persistLogs()
+        } catch { present(error, context: "Capturing unified timeline") }
+    }
+
+    func updateQualityPolicy(_ policy: FuzzAndCoveragePolicy) {
+        platformEngineering.qualityPolicy = policy
+        persistPlatformEngineering()
+    }
+
+    func runEngineeringQualitySuite() async {
+        busyKeys.insert("platform-quality")
+        let policy = platformEngineering.qualityPolicy
+        let result = await Task.detached(priority: .userInitiated) {
+            EngineeringQualityEvaluator.run(policy: policy)
+        }.value
+        platformEngineering.quality = result
+        platformEngineering.betaOperations = BetaOperationsEvaluator.evaluate(
+            policy: platformEngineering.betaPolicy, runs: testRuns,
+            publicBeta: publicBetaReadiness, quality: result,
+            security: platformEngineering.security
+        )
+        persistPlatformEngineering()
+        busyKeys.remove("platform-quality")
+        appendLog(result.fuzzGatePassed ? .success : .error, scope: "quality", "Deterministic fuzz campaign completed \(result.totalCases) cases with \(result.failedCases) mismatch(es)")
+        persistLogs()
+    }
+
+    func updateBetaOperationsPolicy(_ policy: BetaOperationsPolicy) {
+        platformEngineering.betaPolicy = policy
+        platformEngineering.betaOperations = BetaOperationsEvaluator.evaluate(
+            policy: policy, runs: testRuns, publicBeta: publicBetaReadiness,
+            quality: platformEngineering.quality, security: platformEngineering.security
+        )
+        persistPlatformEngineering()
+    }
+
+    func createFeedbackPackage() {
+        do {
+            let url = try BetaOperationsEvaluator.createFeedbackPackage(
+                report: platformEngineering.betaOperations, quality: platformEngineering.quality,
+                security: platformEngineering.security, paths: paths
+            )
+            platformEngineering.latestFeedbackPackagePath = url.path
+            try PlatformEngineeringStore.save(platformEngineering, paths: paths)
+            appendLog(.success, scope: "feedback", "Created privacy-safe feedback package")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Creating feedback package") }
+    }
+
+    private func platformBackendCapabilityNames() -> Set<String> {
+        var result: Set<String> = ["lifecycle", "snapshotRestore"]
+        if backendCapabilities.pause { result.insert("pause") }
+        if backendCapabilities.screenshots { result.insert("screenshots") }
+        if backendCapabilities.automation { result.insert("automation") }
+        if backendCapabilities.guestLogs { result.insert("guestLogs") }
+        if backendCapabilities.networking { result.insert("networking") }
+        if backendCapabilities.audio { result.insert("audio") }
+        if backendCapabilities.performanceMetrics { result.insert("performanceMetrics") }
+        if backendCapabilities.crashExport { result.insert("crashExport") }
+        if backendCapabilities.xcodeDeployment { result.insert("xcodeDeployment") }
+        return result
+    }
+
+    private func persistPlatformEngineering() {
+        do { try PlatformEngineeringStore.save(platformEngineering, paths: paths) }
+        catch { present(error, context: "Saving platform engineering state") }
     }
 
     func relinkExternalStorage(to destination: URL) async {
@@ -1704,6 +1920,7 @@ final class LabAppModel: ObservableObject {
             state: .running,
             results: selected.map { DeviceTestResult(deviceName: $0.name, state: .running, message: "Booting and installing") }
         )
+        record.appArtifactID = appArtifacts.first { $0.path == packageURL.path }?.id
         record.assertions = assertions
         testRuns.insert(record, at: 0)
         saveTestRuns()
@@ -1870,6 +2087,7 @@ final class LabAppModel: ObservableObject {
             state: .running,
             results: [DeviceTestResult(deviceName: source.name, state: .running, message: "Cloning baseline")]
         )
+        record.appArtifactID = packageURL.flatMap { package in appArtifacts.first { $0.path == package.path }?.id }
         testRuns.insert(record, at: 0)
         saveTestRuns()
         let cancellation = OperationCancellationFlag()

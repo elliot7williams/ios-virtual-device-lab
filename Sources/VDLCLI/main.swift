@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-private let cliVersion = "0.9.0"
+private let cliVersion = "0.10.0"
 
 enum CLIFileLock {
     static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
@@ -1324,6 +1324,119 @@ enum CLILabfileEngine {
     }
 }
 
+// MARK: - Platform engineering contracts
+
+struct CLIAdapterManifest: Codable {
+    let schemaVersion: Int
+    let id: String
+    let name: String
+    let version: String
+    let protocolVersion: Int
+    let capabilities: [String]
+    let minimumLabVersion: String
+    let executablePath: String?
+    let licenseReference: String
+}
+
+struct CLIAdapterCheck: Codable {
+    let id: String
+    let passed: Bool
+    let evidence: String
+}
+
+struct CLIAdapterReport: Codable {
+    let generatedAt: Date
+    let adapterID: String
+    let checks: [CLIAdapterCheck]
+    var passed: Bool { !checks.isEmpty && checks.allSatisfy(\.passed) }
+}
+
+enum CLIAdapterConformance {
+    private static let supportedCapabilities = Set([
+        "lifecycle", "pause", "screenshots", "automation", "guestLogs", "networking",
+        "audio", "performanceMetrics", "crashExport", "xcodeDeployment", "snapshotRestore",
+        "deterministicReset", "timelineVideo",
+    ])
+
+    static func check(_ url: URL) throws -> CLIAdapterReport {
+        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size <= 1_048_576 else { throw CLIError.message("Adapter manifest exceeds 1 MiB") }
+        let manifest = try JSONDecoder.lab.decode(CLIAdapterManifest.self, from: Data(contentsOf: url))
+        let identifier = manifest.id.range(of: "^[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+){2,}$", options: .regularExpression) != nil
+        let semver = manifest.version.range(of: "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$", options: .regularExpression) != nil
+        let unknown = manifest.capabilities.filter { !supportedCapabilities.contains($0) }.sorted()
+        let duplicates = Dictionary(grouping: manifest.capabilities, by: { $0 }).filter { $0.value.count > 1 }.keys.sorted()
+        let executablePassed = manifest.executablePath.map { FileManager.default.isExecutableFile(atPath: $0) } ?? true
+        return CLIAdapterReport(generatedAt: .now, adapterID: manifest.id, checks: [
+            .init(id: "schema", passed: manifest.schemaVersion == 1, evidence: "Schema \(manifest.schemaVersion); required 1."),
+            .init(id: "identifier", passed: identifier, evidence: "Adapter ID must be a stable reverse-domain identifier."),
+            .init(id: "version", passed: semver, evidence: "Adapter version must use semantic versioning."),
+            .init(id: "minimum-lab-version", passed: compatibleMinimum(manifest.minimumLabVersion), evidence: "Adapter requires lab \(manifest.minimumLabVersion); this build is \(cliVersion)."),
+            .init(id: "protocol", passed: manifest.protocolVersion == 3, evidence: "Protocol \(manifest.protocolVersion); required 3."),
+            .init(id: "capabilities", passed: !manifest.capabilities.isEmpty && unknown.isEmpty && duplicates.isEmpty,
+                  evidence: unknown.isEmpty && duplicates.isEmpty ? "\(manifest.capabilities.count) recognized capability/capabilities." : "Unknown: \(unknown); duplicates: \(duplicates)."),
+            .init(id: "executable", passed: executablePassed, evidence: manifest.executablePath == nil ? "Manifest-only validation." : "Configured executable must be runnable."),
+            .init(id: "license", passed: !manifest.licenseReference.trimmed.isEmpty, evidence: "A provenance and license reference is required."),
+        ])
+    }
+
+    private static func compatibleMinimum(_ required: String) -> Bool {
+        func components(_ value: String) -> [Int]? {
+            let core = value.split(whereSeparator: { $0 == "-" || $0 == "+" }).first ?? ""
+            let values = core.split(separator: ".").compactMap { Int($0) }
+            return values.count == 3 ? values : nil
+        }
+        guard let required = components(required), let current = components(cliVersion) else { return false }
+        return required.lexicographicallyPrecedes(current) || required == current
+    }
+}
+
+struct CLIPlatformStatus: Codable {
+    let schemaVersion: Int?
+    let stateFile: String
+    let adapters: Int
+    let builds: Int
+    let replayBundles: Int
+    let fleetHosts: Int
+    let timelines: Int
+    let fuzzCases: Int
+    let fuzzPassed: Bool
+    let coveragePassed: Bool
+    let betaChannel: String?
+    let betaPromotionReady: Bool
+}
+
+enum CLIPlatformInspector {
+    static func inspect() throws -> CLIPlatformStatus {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".vphone/VirtualDeviceLab/platform-engineering.json")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return CLIPlatformStatus(
+                schemaVersion: nil, stateFile: url.path, adapters: 0, builds: 0, replayBundles: 0,
+                fleetHosts: 0, timelines: 0, fuzzCases: 0, fuzzPassed: false,
+                coveragePassed: false, betaChannel: nil, betaPromotionReady: false
+            )
+        }
+        guard let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+            throw CLIError.message("Platform engineering state is not a JSON object")
+        }
+        let quality = root["quality"] as? [String: Any] ?? [:]
+        let beta = root["betaOperations"] as? [String: Any] ?? [:]
+        let gates = beta["gates"] as? [[String: Any]] ?? []
+        func count(_ key: String) -> Int { (root[key] as? [Any])?.count ?? 0 }
+        return CLIPlatformStatus(
+            schemaVersion: root["schemaVersion"] as? Int, stateFile: url.path,
+            adapters: count("adapterManifests"), builds: count("builds"), replayBundles: count("replayBundles"),
+            fleetHosts: count("fleetHosts"), timelines: count("timelines"),
+            fuzzCases: quality["totalCases"] as? Int ?? 0,
+            fuzzPassed: quality["fuzzGatePassed"] as? Bool ?? false,
+            coveragePassed: quality["coverageGatePassed"] as? Bool ?? false,
+            betaChannel: beta["channel"] as? String,
+            betaPromotionReady: !gates.isEmpty && gates.allSatisfy { $0["passed"] as? Bool == true }
+        )
+    }
+}
+
 enum CLIError: LocalizedError {
     case message(String)
     var errorDescription: String? {
@@ -1343,6 +1456,18 @@ private func resolveVPhone() -> String? {
     return [environment, "/opt/homebrew/bin/vphone-cli", "/Applications/vphone-cli.app/Contents/MacOS/vphone-cli"]
         .compactMap { $0 }
         .first { FileManager.default.isExecutableFile(atPath: $0) }
+}
+private struct CLIAppArtifactRecord: Decodable { let id: UUID; let path: String }
+private func resolveAppArtifact(_ identifier: String) -> String? {
+    guard let id = UUID(uuidString: identifier) else { return nil }
+    let catalog = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".vphone/VirtualDeviceLab/App Artifacts/catalog.json")
+    guard let data = try? Data(contentsOf: catalog),
+          let records = try? JSONDecoder.lab.decode([CLIAppArtifactRecord].self, from: data),
+          let record = records.first(where: { $0.id == id }),
+          FileManager.default.fileExists(atPath: record.path)
+    else { return nil }
+    return record.path
 }
 private func safe(_ value: String) -> String {
     let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
@@ -1390,13 +1515,15 @@ func usage() {
     Usage:
       vdlctl doctor [--json] [--output <directory>]
       vdlctl run --workflow <file|id|name> --device <name> [--device <name> ...]
-                 [--app <ipa>] [--output <directory>] [--max-concurrency <n>]
+                 [--app <ipa>|--app-artifact <uuid>] [--output <directory>] [--max-concurrency <n>]
                  [--memory-budget-mb <n>] [--reserve-memory-mb <n>] [--max-cpu <percent>] [--dry-run]
       vdlctl deploy --device <name> --app <ipa> [--output <directory>]
       vdlctl schedule-install --workflow <file|id|name> --device <name> --interval-seconds <n> [--app <ipa>]
       vdlctl labfile plan --file <Labfile.json> [--json]
       vdlctl labfile diff --file <Labfile.json> [--json]
       vdlctl labfile apply --file <Labfile.json> [--json]
+      vdlctl adapter check --manifest <adapter-manifest.json> [--json]
+      vdlctl platform status [--json]
       vdlctl agent-init [--queue <directory>] [--token-file <path>]
       vdlctl agent-submit --workflow <file|id|name> --device <name> [--device <name> ...]
                           [--app <ipa>] [--queue <directory>] [--token-file <path>] [--dry-run]
@@ -1448,7 +1575,8 @@ enum VDLCLI {
                 let options = RunOptions(
                     workflowReference: workflow,
                     devices: devices,
-                    appPath: value(after: "--app", in: arguments),
+                    appPath: value(after: "--app", in: arguments)
+                        ?? value(after: "--app-artifact", in: arguments).flatMap(resolveAppArtifact),
                     outputDirectory: output,
                     dryRun: arguments.contains("--dry-run"),
                     policy: policy
@@ -1486,6 +1614,33 @@ enum VDLCLI {
                     for blocker in plan.blockers { print("- BLOCKED: \(blocker)") }
                 }
                 exit(plan.canApply ? 0 : 2)
+            case "adapter":
+                guard arguments.indices.contains(1), arguments[1] == "check",
+                      let manifest = value(after: "--manifest", in: arguments)
+                else { throw CLIError.message("Use `vdlctl adapter check --manifest <adapter-manifest.json>`") }
+                let report = try CLIAdapterConformance.check(URL(fileURLWithPath: manifest))
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(report), as: UTF8.self))
+                } else {
+                    print(report.passed ? "Adapter conformance: PASS" : "Adapter conformance: FAIL")
+                    for check in report.checks {
+                        print("- \(check.passed ? "PASS" : "FAIL") \(check.id): \(check.evidence)")
+                    }
+                }
+                exit(report.passed ? 0 : 2)
+            case "platform":
+                guard arguments.indices.contains(1), arguments[1] == "status" else {
+                    throw CLIError.message("Use `vdlctl platform status [--json]`")
+                }
+                let status = try CLIPlatformInspector.inspect()
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(status), as: UTF8.self))
+                } else {
+                    print("Platform engineering schema: \(status.schemaVersion.map(String.init) ?? "not initialized")")
+                    print("Adapters \(status.adapters) • builds \(status.builds) • replay bundles \(status.replayBundles) • hosts \(status.fleetHosts) • timelines \(status.timelines)")
+                    print("Fuzz \(status.fuzzPassed ? "PASS" : "INCOMPLETE") (\(status.fuzzCases) cases) • coverage \(status.coveragePassed ? "PASS" : "INCOMPLETE")")
+                    print("Beta \(status.betaChannel ?? "not evaluated") • promotion \(status.betaPromotionReady ? "READY" : "HOLD")")
+                }
             case "agent-init":
                 let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
                 let token = value(after: "--token-file", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentToken

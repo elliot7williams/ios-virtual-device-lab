@@ -278,7 +278,7 @@ struct LabMigrationReport: Codable, Hashable, Sendable {
 }
 
 enum LabMigrationManager {
-    static let currentSchemaVersion = 5
+    static let currentSchemaVersion = 6
     private static let managedFiles = [
         "activity.json", "automation-workflows.json", "compatibility-manifest.json",
         "diagnostic-privacy.json", "environment-assignments.json", "environment-profiles.json",
@@ -290,6 +290,7 @@ enum LabMigrationManager {
         "canonical-fixtures.json", "evidence-lifecycle-policy.json", "host-capacity.json",
         "hostile-input-report.json", "unified-retention-policy.json",
         "operational-objective-policy.json", "beta-verification.json",
+        "platform-engineering.json",
     ]
 
     static func migrate(paths: LabPaths) throws -> LabMigrationReport {
@@ -317,8 +318,10 @@ enum LabMigrationManager {
                 summary = "Added qualification, guest trust, evidence governance, backup, update, supply-chain, and resilience schemas."
             case 4:
                 summary = "Added full-lab encrypted recovery, companion contracts, credential lifecycle, locked state, launch forensics, and update health rollback."
-            default:
+            case 5:
                 summary = "Added storage relinking, Recovery Center decisions, canonical fixtures, Labfiles, evidence expiry, host calibration, hostile-input boundaries, unified retention, SLOs, and beta verification."
+            default:
+                summary = "Added backend adapter conformance, deterministic reset planning, build identities, failure replay bundles, regression analysis, fleet placement, unified timelines, threat modeling, fuzz and coverage gates, and beta operations."
             }
             let record = LabMigrationRecord(
                 id: UUID(),
