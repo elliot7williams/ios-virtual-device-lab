@@ -278,7 +278,7 @@ struct LabMigrationReport: Codable, Hashable, Sendable {
 }
 
 enum LabMigrationManager {
-    static let currentSchemaVersion = 6
+    static let currentSchemaVersion = 7
     private static let managedFiles = [
         "activity.json", "automation-workflows.json", "compatibility-manifest.json",
         "diagnostic-privacy.json", "environment-assignments.json", "environment-profiles.json",
@@ -291,6 +291,7 @@ enum LabMigrationManager {
         "hostile-input-report.json", "unified-retention-policy.json",
         "operational-objective-policy.json", "beta-verification.json",
         "platform-engineering.json",
+        "lab-expansion.json",
     ]
 
     static func migrate(paths: LabPaths) throws -> LabMigrationReport {
@@ -320,8 +321,10 @@ enum LabMigrationManager {
                 summary = "Added full-lab encrypted recovery, companion contracts, credential lifecycle, locked state, launch forensics, and update health rollback."
             case 5:
                 summary = "Added storage relinking, Recovery Center decisions, canonical fixtures, Labfiles, evidence expiry, host calibration, hostile-input boundaries, unified retention, SLOs, and beta verification."
-            default:
+            case 6:
                 summary = "Added backend adapter conformance, deterministic reset planning, build identities, failure replay bundles, regression analysis, fleet placement, unified timelines, threat modeling, fuzz and coverage gates, and beta operations."
+            default:
+                summary = "Added capability maturity, real-VM qualification publication, runtime adapter hosting, authenticated guest automation, replay execution, crash symbolication, fleet leases, monotonic timelines, coverage import, and hybrid physical-device routing."
             }
             let record = LabMigrationRecord(
                 id: UUID(),
@@ -539,6 +542,7 @@ enum GuestCapability: String, Codable, CaseIterable, Sendable {
     case networking = "network_modes"
     case environmentPolicy = "environment_policy"
     case accessibilityTree = "accessibility_tree"
+    case deterministicReset = "deterministic_reset"
 }
 
 struct GuestProtocolHandshake: Codable, Hashable, Sendable {

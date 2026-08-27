@@ -1013,6 +1013,50 @@ actor VPhoneBackend: LabBackend {
         )
     }
 
+    func performGuestAutomation(
+        _ request: GuestAutomationRequest,
+        on device: VirtualDevice
+    ) -> GuestAutomationResult {
+        let started = Date()
+        let handshake = guestProtocolHandshake(for: device)
+        let blockers = GuestAutomationGate.validate(request: request, handshake: handshake, policy: .strict)
+        guard blockers.isEmpty else {
+            return GuestAutomationResult(
+                id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
+                startedAt: started, completedAt: .now, succeeded: false,
+                message: blockers.joined(separator: " "), accessibilityRoot: nil
+            )
+        }
+        var payload: [String: Any] = [
+            "t": request.action.rawValue,
+            "request_id": request.id.uuidString,
+            "timeout_seconds": request.timeoutSeconds,
+            "screen": false,
+        ]
+        if let bundleIdentifier = request.bundleIdentifier { payload["bundle_id"] = bundleIdentifier }
+        if let selector = request.selector { payload["selector"] = selector }
+        if let value = request.value { payload["value"] = value }
+        let response = sendControlJSON(to: device, payload: payload)
+        guard let json = response.json else {
+            return GuestAutomationResult(
+                id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
+                startedAt: started, completedAt: .now, succeeded: false,
+                message: response.error ?? "Guest automation returned no protocol response.", accessibilityRoot: nil
+            )
+        }
+        let accessibilityRoot: AccessibilityNode? = (json["accessibility_root"] as? [String: Any]).flatMap { object in
+            guard JSONSerialization.isValidJSONObject(object),
+                  let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+            return try? JSONDecoder().decode(AccessibilityNode.self, from: data)
+        }
+        return GuestAutomationResult(
+            id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
+            startedAt: started, completedAt: .now, succeeded: json["ok"] as? Bool == true,
+            message: json["message"] as? String ?? json["error"] as? String ?? "Guest automation completed.",
+            accessibilityRoot: accessibilityRoot
+        )
+    }
+
     private func sendControl(to device: VirtualDevice, payload: [String: Any]) -> ControlResponse {
         let handshake = guestProtocolHandshake(for: device)
         guard isTrustedMutationHandshake(handshake) else {

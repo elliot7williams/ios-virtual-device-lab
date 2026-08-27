@@ -72,6 +72,10 @@ protocol LabBackend: Sendable {
     func captureScreenshot(_ device: VirtualDevice, destination: URL) async -> ControlResponse
     func sendHardwareKey(_ device: VirtualDevice, name: String) async -> ControlResponse
     func guestProtocolHandshake(for device: VirtualDevice) async -> GuestProtocolHandshake
+    func performGuestAutomation(
+        _ request: GuestAutomationRequest,
+        on device: VirtualDevice
+    ) async -> GuestAutomationResult
     func createDiagnosticBundle(
         for device: VirtualDevice,
         activityLog: String
@@ -287,13 +291,24 @@ actor MockLabBackend: LabBackend {
             negotiatedVersion: 3,
             minimumSupportedVersion: 1,
             maximumSupportedVersion: 3,
-            capabilities: [.screenshots, .hardwareKeys, .guestFiles, .audioOutput, .networking],
+            capabilities: [.screenshots, .hardwareKeys, .guestFiles, .audioOutput, .networking, .accessibilityTree, .deterministicReset],
             maximumMessageBytes: 1_048_576,
             authenticated: true,
             replayProtected: true,
             authenticationClockSkewSeconds: 30,
             transport: "Mock in-memory transport",
             message: "Mock authenticated guest protocol v3"
+        )
+    }
+
+    func performGuestAutomation(
+        _ request: GuestAutomationRequest,
+        on device: VirtualDevice
+    ) -> GuestAutomationResult {
+        GuestAutomationResult(
+            id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
+            startedAt: .now, completedAt: .now, succeeded: true,
+            message: "Mock guest automation completed.", accessibilityRoot: nil
         )
     }
 

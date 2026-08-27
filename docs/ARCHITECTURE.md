@@ -81,6 +81,12 @@ Automation is an ordered typed sequence with values, delays, retries, conditions
 
 The guest protocol is negotiated through `LabBackend.guestProtocolHandshake`. Environment assignments remain stored test intent unless the backend or a trusted extension declares the corresponding capability. The remote/CI agent reuses `HeadlessRunner` through an HMAC-authenticated local queue rather than introducing a second orchestration engine.
 
+### Qualification and scale boundary
+
+`LabExpansionState` is the persisted evidence index for the 0.11 execution layer. It records derived maturity, exact qualification rows, installed adapter checksums and invocations, guest-automation results, replay executions, symbolication, fleet leases/heartbeats, monotonic timeline sessions, coverage reports, and physical target discovery. `LabAppModel` coordinates these services but does not weaken their gates.
+
+The runtime adapter host is process-isolated from SwiftUI and validates the declared operation, executable checksum, bounded protocol response, schema version, and request ID. Guest automation remains inside `LabBackend`, so the frontend still never constructs vphone host-control messages. Hybrid routing normalizes virtual devices and CoreDevice physical devices into a shared target record; routing is policy only and does not silently deploy to a physical phone.
+
 ### Continuity and beta boundary
 
 `LabContinuityView` is an operator surface over small, testable services rather than a second backend. `ExternalStorageManager` records the resolved volume identity outside the lab root, detects a broken `~/.vphone` symlink before backend directory creation, and atomically swaps only an existing symlink. It refuses to overwrite a real directory or accept a filesystem/home root.

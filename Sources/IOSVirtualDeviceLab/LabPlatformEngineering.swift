@@ -31,7 +31,7 @@ struct AdapterConformanceReport: Codable, Hashable, Sendable {
 
 enum BackendAdapterConformance {
     static let protocolVersion = 3
-    static let labVersion = "0.10.0"
+    static let labVersion = "0.11.0"
     static let capabilities = Set([
         "lifecycle", "pause", "screenshots", "automation", "guestLogs", "networking",
         "audio", "performanceMetrics", "crashExport", "xcodeDeployment", "snapshotRestore",
@@ -45,7 +45,7 @@ enum BackendAdapterConformance {
         version: "0.1.0",
         protocolVersion: protocolVersion,
         capabilities: ["lifecycle", "screenshots", "snapshotRestore"],
-        minimumLabVersion: "0.10.0",
+        minimumLabVersion: "0.11.0",
         executablePath: nil,
         licenseReference: "THIRD_PARTY.md#example-virtual-device-adapter"
     )

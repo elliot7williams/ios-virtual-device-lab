@@ -62,18 +62,28 @@
 | Security governance | Formal trust-boundary/threat/control report and metadata-only secret inventory with rotation, revocation, and export policy |
 | Engineering quality | Seeded bounded archive/Labfile fuzz campaigns plus imported source-coverage thresholds that fail closed when coverage is unavailable |
 | Beta operations | Internal/alpha/beta/stable channel policy, staged rollout, launch/crash/support/feedback gates, and privacy-safe feedback packages |
+| Capability maturity | Evidence-derived designed/implemented/integrated/real-VM-qualified/release-ready levels with explicit blockers |
+| Qualification publication | Exact device/profile/backend campaigns and approved-seal-only compatibility export |
+| Runtime adapter host | Versioned checksum-pinned installation, sandboxed JSON invocation, audit records, upgrade, and rollback |
+| Guest automation | Typed reset and accessibility operations gated by authenticated replay-protected guest capabilities |
+| Replay execution | Hash, device, fixture, environment, artifact, and backend validation followed by a tracked real test run |
+| Crash symbolication | Crash/dSYM UUID matching, indexed build verification, bounded `atos`, frames, and fingerprints |
+| Fleet control | Heartbeats, stale-host rejection, reservations, expiring leases, release state, and dispatch audit schema |
+| High-fidelity timeline | Host monotonic clock calibration, nanosecond events, source identity, artifact paths, and unavailable-source evidence |
+| Automated quality evidence | LLVM/xccov JSON import, report checksum/source revision, and automatic coverage-gate input |
+| Hybrid device lab | CoreDevice physical discovery and version/capability-aware virtual-or-physical target routing |
 
 ## Next engineering milestones
 
 1. Complete and publish the first real baseline acceptance result after the required host restart and supported IPSW import.
 2. Validate guest diagnostic export against the companion vphone host-control build on a running guest.
 3. Run the ordered iOS 15 → 14 → 13 → 12 research matrix and update evidence only from reproducible results.
-4. Implement the defined guest accessibility-tree API before claiming UI-element assertions; screenshot-diff and host/log/resource assertions are implemented.
+4. Implement `deterministic_reset` and `accessibility_tree` in the vphone companion guest; the typed host API and trust gates are implemented, but a real guest has not advertised them yet.
 5. Populate Apple Developer credentials and update-signing keys, then publish the first Developer ID signed and notarized release.
-6. Expand full application UI automation after a stable real-VM fixture exists.
+6. Qualify full application UI automation and replay execution after a stable real-VM fixture exists.
 7. Research audio interruption/background-media and proxy/capture extensions without presenting unsupported simulation as available.
 8. Exercise disaster-recovery staging on a second APFS volume and document operator recovery time.
-9. Convert the authenticated queue into a supervised self-hosted runner only after threat-model review and mid-execution cancellation design.
+9. Exercise fleet heartbeats, expiring leases, dispatch audit, and the authenticated queue across two Macs; add mTLS network transport only after that threat-model review.
 10. Prototype a QEMU adapter only after choosing a pinned research implementation, completing component-level licensing review, and recording a reproducible iOS boot experiment.
 
 ## Older-iOS compatibility research

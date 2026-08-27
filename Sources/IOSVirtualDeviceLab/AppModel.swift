@@ -18,6 +18,7 @@ private struct LocalBootstrapState: Sendable {
     let logs: [LogEntry]
     let hardening: ProductionHardeningState
     let platformEngineering: PlatformEngineeringState
+    let labExpansion: LabExpansionState
 
     static func load(paths: LabPaths, safeMode: Bool = false) throws -> LocalBootstrapState {
         if !safeMode { try PluginRegistry.prepare(paths: paths) }
@@ -44,7 +45,8 @@ private struct LocalBootstrapState: Sendable {
             xcodeIntegration: DeveloperTools.inspect(paths: paths),
             logs: Array((persistedLogs ?? []).suffix(2_000)),
             hardening: hardening,
-            platformEngineering: PlatformEngineeringStore.load(paths: paths)
+            platformEngineering: PlatformEngineeringStore.load(paths: paths),
+            labExpansion: LabExpansionStore.load(paths: paths)
         )
     }
 }
@@ -128,6 +130,7 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var betaVerification: BetaVerificationRecord = .empty
     @Published private(set) var publicBetaReadiness: PublicBetaReadinessReport = .empty
     @Published private(set) var platformEngineering: PlatformEngineeringState = .empty
+    @Published private(set) var labExpansion: LabExpansionState = .empty
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
 
@@ -197,6 +200,7 @@ final class LabAppModel: ObservableObject {
             supplyChainAssessment = localState.hardening.supplyChain
             resilienceReport = localState.hardening.resilienceReport
             platformEngineering = localState.platformEngineering
+            labExpansion = localState.labExpansion
             recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
             canonicalFixtures = CanonicalFixtureStore.load(paths: paths)
             evidenceLifecyclePolicy = EvidenceLifecycleManager.loadPolicy(paths: paths)
@@ -351,6 +355,7 @@ final class LabAppModel: ObservableObject {
             security: platformEngineering.security
         )
         persistPlatformEngineering()
+        refreshLabExpansionAssessments()
     }
 
     func importAdapterManifest(_ url: URL) {
@@ -547,6 +552,348 @@ final class LabAppModel: ObservableObject {
         catch { present(error, context: "Saving platform engineering state") }
     }
 
+    // MARK: - Qualification and scale expansion
+
+    func refreshLabExpansionAssessments() {
+        labExpansion.fleetLeases = FleetControlPlane.expire(labExpansion.fleetLeases)
+        labExpansion.qualificationMatrix = QualificationMatrixEvaluator.evaluate(
+            devices: devices, campaigns: qualificationCampaigns, seals: evidenceSeals
+        )
+        let guestAutomationAvailable = guestProtocolHandshakes.values.contains { handshake in
+            handshake.status == .compatible && handshake.authenticated && handshake.replayProtected
+                && (handshake.capabilities.contains(.deterministicReset)
+                    || handshake.capabilities.contains(.accessibilityTree))
+        }
+        let evidence = CapabilityMaturityEvaluator.Evidence(
+            adapterInstalled: labExpansion.installedAdapters.contains { $0.active },
+            adapterInvocationSucceeded: labExpansion.installedAdapters.contains { adapter in
+                adapter.active && labExpansion.adapterInvocations.contains { $0.adapterID == adapter.adapterID && $0.succeeded }
+            },
+            guestAutomationAvailable: guestAutomationAvailable,
+            replayValidated: labExpansion.replayExecutions.contains { $0.validation.passed },
+            symbolicationSucceeded: labExpansion.symbolicationReports.contains { $0.succeeded },
+            fleetLeaseActive: labExpansion.fleetLeases.contains { lease in
+                lease.state == .active && lease.expiresAt > .now
+                    && labExpansion.fleetDispatches.contains { $0.leaseID == lease.id && $0.authenticated }
+            },
+            timelineCaptured: !labExpansion.highFidelityTimelines.isEmpty,
+            coverageImported: !labExpansion.coverageReports.isEmpty,
+            physicalTargetDiscovered: labExpansion.physicalDeployments.contains { $0.installed && $0.launched },
+            approvedQualificationCount: labExpansion.qualificationMatrix.filter { $0.state == .approved }.count
+        )
+        labExpansion.maturity = CapabilityMaturityEvaluator.evaluate(evidence)
+        persistLabExpansion()
+    }
+
+    func publishApprovedCompatibility(to url: URL) {
+        do {
+            _ = try QualificationMatrixEvaluator.publishApproved(
+                labExpansion.qualificationMatrix, seals: evidenceSeals, to: url
+            )
+            appendLog(.success, scope: "qualification", "Published approved compatibility evidence")
+            persistLogs()
+            reveal(url)
+        } catch {
+            present(error, context: "Publishing approved compatibility evidence")
+        }
+    }
+
+    func installRuntimeAdapter(_ manifest: BackendAdapterManifest? = nil) {
+        guard let manifest = manifest ?? platformEngineering.adapterManifests.first else {
+            alertMessage = "Import a conformant adapter manifest with an executablePath before installation."
+            return
+        }
+        do {
+            var installed = try RuntimeAdapterInstaller.install(
+                manifest: manifest, paths: paths, existing: labExpansion.installedAdapters
+            )
+            for index in labExpansion.installedAdapters.indices where labExpansion.installedAdapters[index].adapterID == installed.adapterID {
+                labExpansion.installedAdapters[index].active = false
+            }
+            installed.active = true
+            labExpansion.installedAdapters.insert(installed, at: 0)
+            refreshLabExpansionAssessments()
+            appendLog(.success, scope: "adapters", "Installed checksum-pinned adapter \(installed.id)")
+            persistLogs()
+        } catch { present(error, context: "Installing runtime adapter") }
+    }
+
+    func rollbackRuntimeAdapter(_ adapter: InstalledAdapterRecord) {
+        guard let previousVersion = adapter.replacedVersion,
+              let previous = labExpansion.installedAdapters.first(where: {
+                  $0.adapterID == adapter.adapterID && $0.version == previousVersion
+              }) else {
+            alertMessage = "No previously installed version is available for rollback."
+            return
+        }
+        for index in labExpansion.installedAdapters.indices where labExpansion.installedAdapters[index].adapterID == adapter.adapterID {
+            labExpansion.installedAdapters[index].active = labExpansion.installedAdapters[index].id == previous.id
+        }
+        refreshLabExpansionAssessments()
+        appendLog(.warning, scope: "adapters", "Rolled back \(adapter.adapterID) to \(previous.version)")
+        persistLogs()
+    }
+
+    func probeRuntimeAdapter(_ adapter: InstalledAdapterRecord) async {
+        guard let operation = adapter.capabilities.first else {
+            alertMessage = "The adapter declares no operations to probe."
+            return
+        }
+        busyKeys.insert("adapter-probe")
+        let request = AdapterRuntimeRequest(
+            schemaVersion: 1, requestID: UUID(), operation: operation,
+            deviceName: selectedDevice?.name, arguments: ["probe": "true"]
+        )
+        let labPaths = paths
+        let result = await Task.detached {
+            RuntimeAdapterHost.invoke(adapter: adapter, request: request, paths: labPaths)
+        }.value
+        labExpansion.adapterInvocations.insert(result.1, at: 0)
+        labExpansion.adapterInvocations = Array(labExpansion.adapterInvocations.prefix(1_000))
+        busyKeys.remove("adapter-probe")
+        persistLabExpansion()
+        appendLog(result.1.succeeded ? .success : .error, scope: "adapters", result.1.message)
+        persistLogs()
+    }
+
+    func performGuestAutomation(
+        _ action: GuestAutomationAction,
+        bundleIdentifier: String? = nil,
+        selector: String? = nil,
+        value: String? = nil
+    ) async {
+        guard let device = selectedDevice ?? devices.first else {
+            alertMessage = "Select a virtual device before running guest automation."
+            return
+        }
+        let request = GuestAutomationRequest(
+            id: UUID(), action: action,
+            bundleIdentifier: bundleIdentifier.flatMap { $0.isEmpty ? nil : $0 },
+            selector: selector.flatMap { $0.isEmpty ? nil : $0 },
+            value: value.flatMap { $0.isEmpty ? nil : $0 }, timeoutSeconds: 30
+        )
+        let blockers = GuestAutomationGate.validate(
+            request: request, handshake: guestProtocolHandshakes[device.id], policy: guestTrustPolicy
+        )
+        guard blockers.isEmpty else {
+            alertMessage = blockers.joined(separator: " ")
+            return
+        }
+        busyKeys.insert("guest-automation")
+        let result = await backend.performGuestAutomation(request, on: device)
+        labExpansion.guestAutomationResults.insert(result, at: 0)
+        labExpansion.guestAutomationResults = Array(labExpansion.guestAutomationResults.prefix(1_000))
+        busyKeys.remove("guest-automation")
+        refreshLabExpansionAssessments()
+        appendLog(result.succeeded ? .success : .error, scope: "guest-automation", result.message)
+        persistLogs()
+    }
+
+    func validateReplay(_ bundle: FailureReplayBundleRecord) -> ReplayValidationReport {
+        let (_, report) = ReplayValidator.validate(
+            record: bundle, devices: devices, artifacts: appArtifacts,
+            fixtures: canonicalFixtures, environments: environmentProfiles,
+            backend: backendDescriptor
+        )
+        if let manifestID = report.manifestID {
+            labExpansion.replayExecutions.insert(ReplayExecutionRecord(
+                id: UUID(), manifestID: manifestID, validation: report,
+                startedAt: .now, completedAt: .now, runID: nil,
+                state: report.passed ? .queued : .failed,
+                message: report.passed ? "Replay is validated and ready to execute." : "Replay validation failed."
+            ), at: 0)
+            persistLabExpansion()
+        }
+        refreshLabExpansionAssessments()
+        return report
+    }
+
+    func executeReplay(_ bundle: FailureReplayBundleRecord) async {
+        let (manifest, report) = ReplayValidator.validate(
+            record: bundle, devices: devices, artifacts: appArtifacts,
+            fixtures: canonicalFixtures, environments: environmentProfiles,
+            backend: backendDescriptor
+        )
+        guard report.passed, let manifest else {
+            _ = validateReplay(bundle)
+            alertMessage = "Replay validation failed; review the failed checks before execution."
+            return
+        }
+        var execution = ReplayExecutionRecord(
+            id: UUID(), manifestID: manifest.id, validation: report,
+            startedAt: .now, completedAt: nil, runID: nil,
+            state: .running, message: "Validated replay is executing."
+        )
+        labExpansion.replayExecutions.insert(execution, at: 0)
+        persistLabExpansion()
+        let prior = Set(testRuns.map(\.id))
+        if let artifactID = manifest.appArtifactID,
+           let artifact = appArtifacts.first(where: { $0.id == artifactID }) {
+            await startDeploymentTest(
+                name: "Replay — \(manifest.runName)",
+                deviceIDs: Set(manifest.deviceNames), packageURL: artifact.url
+            )
+        } else if let device = devices.first(where: { manifest.deviceNames.contains($0.name) }) {
+            await runBaselineAcceptance(on: device, packageURL: nil)
+        }
+        let run = testRuns.first { !prior.contains($0.id) }
+        execution.runID = run?.id
+        execution.completedAt = .now
+        execution.state = run?.state ?? .failed
+        execution.message = run.map { "Replay completed with run state \($0.state.rawValue)." } ?? "No test run was created."
+        if let index = labExpansion.replayExecutions.firstIndex(where: { $0.id == execution.id }) {
+            labExpansion.replayExecutions[index] = execution
+        }
+        refreshLabExpansionAssessments()
+    }
+
+    func symbolicateCrash(_ crash: URL, dSYM: URL) async {
+        busyKeys.insert("symbolication")
+        let builds = platformEngineering.builds
+        let report = await Task.detached {
+            CrashSymbolicator.symbolicate(crash: crash, dSYM: dSYM, builds: builds)
+        }.value
+        labExpansion.symbolicationReports.insert(report, at: 0)
+        labExpansion.symbolicationReports = Array(labExpansion.symbolicationReports.prefix(500))
+        busyKeys.remove("symbolication")
+        refreshLabExpansionAssessments()
+        appendLog(report.succeeded ? .success : .error, scope: "symbolication",
+                  report.succeeded ? "Symbolicated \(report.frames.count) crash frame(s)." : report.blockers.joined(separator: " "))
+        persistLogs()
+    }
+
+    func acquireFleetLease() {
+        let request = FleetJobRequest(
+            name: selectedDevice?.name ?? "Next hybrid lab job",
+            requiredCapabilities: ["lifecycle", "automation"],
+            requiredMemoryMB: selectedDevice?.memoryMB ?? 4_096
+        )
+        let result = FleetControlPlane.acquire(
+            request: request, hosts: platformEngineering.fleetHosts,
+            leases: labExpansion.fleetLeases
+        )
+        platformEngineering.placement = result.0
+        if let lease = result.1 { labExpansion.fleetLeases.insert(lease, at: 0) }
+        refreshLabExpansionAssessments()
+    }
+
+    func releaseFleetLease(_ lease: FleetLease) {
+        guard let index = labExpansion.fleetLeases.firstIndex(where: { $0.id == lease.id }) else { return }
+        labExpansion.fleetLeases[index].state = .released
+        refreshLabExpansionAssessments()
+    }
+
+    func dispatchFleetLease(_ lease: FleetLease) async {
+        guard lease.state == .active, lease.expiresAt > .now else {
+            alertMessage = "Only an active, unexpired fleet lease can be dispatched."
+            return
+        }
+        let device = selectedDevice?.name ?? lease.jobName
+        guard let result = await runRemoteAgentCommand([
+            "agent-submit", "--workflow", "boot-smoke", "--device", device,
+        ]) else { return }
+        let jobID = result.output
+            .split(whereSeparator: { $0.isWhitespace || $0 == ":" })
+            .compactMap { UUID(uuidString: String($0)) }.first
+        let dispatch = FleetDispatchRecord(
+            id: UUID(), leaseID: lease.id, hostID: lease.hostID, submittedAt: .now,
+            authenticated: result.succeeded && jobID != nil,
+            queuePath: remoteAgentConfiguration?.queuePath, jobID: jobID,
+            message: cleanAgentOutput(result.output).isEmpty ? "Agent submission returned no output." : cleanAgentOutput(result.output)
+        )
+        labExpansion.fleetDispatches.insert(dispatch, at: 0)
+        labExpansion.fleetDispatches = Array(labExpansion.fleetDispatches.prefix(1_000))
+        persistLabExpansion()
+        appendLog(dispatch.authenticated ? .success : .error, scope: "fleet", dispatch.message)
+        persistLogs()
+        await refreshRemoteAgentHealth()
+    }
+
+    func recordFleetHeartbeat(_ host: FleetHostRecord) {
+        labExpansion.fleetHeartbeats.insert(
+            FleetControlPlane.heartbeat(host: host, activeKeyID: remoteAgentConfiguration?.activeKeyID), at: 0
+        )
+        labExpansion.fleetHeartbeats = Array(labExpansion.fleetHeartbeats.prefix(1_000))
+        persistLabExpansion()
+    }
+
+    func captureHighFidelityTimeline(_ run: TestRunRecord) {
+        do {
+            var available: Set<HighFidelitySource> = [.hostLogs, .screenshots, .performance]
+            if backendCapabilities.guestLogs { available.insert(.guestLogs) }
+            if backendCapabilities.audio { available.insert(.audio) }
+            if backendCapabilities.networking { available.insert(.network) }
+            if platformBackendCapabilityNames().contains("timelineVideo") { available.insert(.video) }
+            let session = try HighFidelityTimelineBuilder.capture(
+                run: run, logs: logs, performance: performanceSamples,
+                availableSources: available, paths: paths
+            )
+            labExpansion.highFidelityTimelines.insert(session, at: 0)
+            refreshLabExpansionAssessments()
+            appendLog(.success, scope: "timeline", "Captured monotonic timeline with \(session.events.count) event(s)")
+            persistLogs()
+        } catch { present(error, context: "Capturing high-fidelity timeline") }
+    }
+
+    func importSourceCoverage(_ url: URL, sourceRevision: String = "") {
+        do {
+            let coverage = try SourceCoverageImporter.importReport(url, sourceRevision: sourceRevision)
+            labExpansion.coverageReports.insert(coverage, at: 0)
+            platformEngineering.qualityPolicy.measuredSourceCoveragePercent = coverage.linePercent
+            platformEngineering.quality = EngineeringQualityEvaluator.run(policy: platformEngineering.qualityPolicy)
+            persistPlatformEngineering()
+            refreshLabExpansionAssessments()
+            appendLog(.success, scope: "quality", String(format: "Imported %.1f%% source coverage from %@", coverage.linePercent, coverage.producer))
+            persistLogs()
+        } catch { present(error, context: "Importing source coverage") }
+    }
+
+    func discoverPhysicalDevices() async {
+        busyKeys.insert("physical-discovery")
+        labExpansion.physicalDevices = await Task.detached { PhysicalDeviceDiscovery.discover() }.value
+        busyKeys.remove("physical-discovery")
+        refreshLabExpansionAssessments()
+        appendLog(.info, scope: "hybrid-lab", "CoreDevice discovered \(labExpansion.physicalDevices.count) physical target(s)")
+        persistLogs()
+    }
+
+    func routeHybridTarget(preferPhysical: Bool, requiredCapabilities: [String] = ["networking", "audio"]) {
+        let virtual = HybridTargetRouter.virtualTargets(devices, backendCapabilities: platformBackendCapabilityNames())
+        let requestedMajor: Int?
+        if let version = selectedDevice?.restoreInfo?.ios.version {
+            requestedMajor = Int(version.split(separator: ".").first ?? "")
+        } else {
+            requestedMajor = nil
+        }
+        labExpansion.hybridRoute = HybridTargetRouter.route(
+            HybridRouteRequest(
+                iosMajor: requestedMajor,
+                requiredCapabilities: Array(Set(requiredCapabilities.filter { !$0.isEmpty })).sorted(),
+                preferPhysical: preferPhysical
+            ),
+            targets: virtual + labExpansion.physicalDevices
+        )
+        persistLabExpansion()
+    }
+
+    func deployToPhysicalTarget(app: URL, target: ExecutionTargetRecord) async {
+        busyKeys.insert("physical-deployment")
+        let deployment = await Task.detached {
+            PhysicalDeviceService.installAndLaunch(app: app, on: target)
+        }.value
+        labExpansion.physicalDeployments.insert(deployment, at: 0)
+        labExpansion.physicalDeployments = Array(labExpansion.physicalDeployments.prefix(250))
+        busyKeys.remove("physical-deployment")
+        refreshLabExpansionAssessments()
+        appendLog(deployment.launched ? .success : .error, scope: "hybrid-lab", deployment.message)
+        persistLogs()
+    }
+
+    private func persistLabExpansion() {
+        do { try LabExpansionStore.save(labExpansion, paths: paths) }
+        catch { present(error, context: "Saving qualification and scale state") }
+    }
+
     func relinkExternalStorage(to destination: URL) async {
         guard devices.allSatisfy({ !$0.isRunning }) else {
             alertMessage = "Stop every virtual device before relinking lab storage."
@@ -652,6 +999,7 @@ final class LabAppModel: ObservableObject {
                 "Planned \(labfilePlan.changes.count) declarative device change(s)"
             )
             persistLogs()
+            refreshLabExpansionAssessments()
         } catch { present(error, context: "Importing Labfile") }
     }
 
@@ -847,6 +1195,7 @@ final class LabAppModel: ObservableObject {
                 campaign.state == .passed ? "Recorded a passing real-VM qualification campaign" : "Created a gated qualification campaign with \(campaign.blockers.count) blocker(s)"
             )
             persistLogs()
+            refreshLabExpansionAssessments()
         } catch { present(error, context: "Saving qualification campaign") }
     }
 
@@ -910,6 +1259,7 @@ final class LabAppModel: ObservableObject {
             evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
             appendLog(.success, scope: "evidence", "Sealed acceptance evidence \(seal.id.uuidString)")
             persistLogs()
+            refreshLabExpansionAssessments()
         } catch { present(error, context: "Sealing acceptance evidence") }
     }
 
@@ -928,6 +1278,7 @@ final class LabAppModel: ObservableObject {
                 paths: paths
             )
             evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
+            refreshLabExpansionAssessments()
         } catch { present(error, context: "Reviewing evidence") }
     }
 

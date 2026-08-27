@@ -7,7 +7,7 @@
   "executablePath": null,
   "id": "com.example.virtual-device-adapter",
   "licenseReference": "THIRD_PARTY.md#example-virtual-device-adapter",
-  "minimumLabVersion": "0.10.0",
+  "minimumLabVersion": "0.11.0",
   "name": "Example Virtual Device Adapter",
   "protocolVersion": 3,
   "schemaVersion": 1,

@@ -1433,6 +1433,230 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         }
     }
 
+    func testCapabilityMaturityDoesNotInventRealVMQualification() {
+        let records = CapabilityMaturityEvaluator.evaluate(.init(
+            adapterInstalled: true, adapterInvocationSucceeded: true,
+            guestAutomationAvailable: true, replayValidated: true,
+            symbolicationSucceeded: true, fleetLeaseActive: true, timelineCaptured: true,
+            coverageImported: true, physicalTargetDiscovered: true, approvedQualificationCount: 0
+        ))
+        XCTAssertEqual(records.count, 10)
+        XCTAssertFalse(records.contains { $0.level >= .realVMQualified })
+        XCTAssertEqual(records.first { $0.id == "runtime-adapters" }?.level, .integrated)
+    }
+
+    func testQualificationMatrixPublishesOnlyApprovedSeals() throws {
+        let device = expansionDevice()
+        let sealID = UUID()
+        let campaign = QualificationCampaign(
+            id: UUID(), deviceName: device.name, firmwareSHA256: String(repeating: "a", count: 64),
+            hardwareProfileID: "iphone-x", hostFingerprint: "host", backendID: "backend",
+            backendVersion: "1.0.0", createdAt: .now, completedAt: .now, state: .passed,
+            blockers: [], acceptance: .empty, evidenceSealID: sealID
+        )
+        let seal = EvidenceSeal(
+            id: sealID, schemaVersion: 1, createdAt: .now, subject: "fixture", hostFingerprint: "host",
+            appVersion: "0.11.0", backendID: "backend", backendVersion: "1.0.0",
+            payloadSHA256: String(repeating: "b", count: 64), previousSealSHA256: nil,
+            signingPublicKey: "public", signature: "signature", reviewState: .approved,
+            reviewer: "reviewer", reviewedAt: .now, reviewNote: "approved"
+        )
+        let matrix = QualificationMatrixEvaluator.evaluate(devices: [device], campaigns: [campaign], seals: [seal])
+        XCTAssertEqual(matrix.first?.state, .approved)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("qualification-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(try QualificationMatrixEvaluator.publishApproved(matrix, seals: [seal], to: url).entries.count, 1)
+    }
+
+    func testRuntimeAdapterInstallerPinsChecksumAndInvocationFailsClosed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("adapter-runtime-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        var manifest = BackendAdapterConformance.example
+        manifest.executablePath = "/usr/bin/true"
+        let installed = try RuntimeAdapterInstaller.install(manifest: manifest, paths: paths, existing: [])
+        XCTAssertEqual(installed.executableSHA256, try fileSHA256(URL(fileURLWithPath: installed.executablePath)))
+        let request = AdapterRuntimeRequest(
+            schemaVersion: 1, requestID: UUID(), operation: "lifecycle",
+            deviceName: nil, arguments: ["probe": "true"]
+        )
+        let response = RuntimeAdapterHost.invoke(adapter: installed, request: request, paths: paths)
+        XCTAssertNil(response.0)
+        XCTAssertFalse(response.1.succeeded)
+    }
+
+    func testGuestAutomationRequiresAuthenticatedDeclaredCapability() {
+        let request = GuestAutomationRequest(
+            id: UUID(), action: .resetAppData, bundleIdentifier: "dev.example.app",
+            selector: nil, value: nil, timeoutSeconds: 30
+        )
+        var handshake = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.deterministicReset],
+            maximumMessageBytes: 1_048_576, authenticated: true, replayProtected: true,
+            authenticationClockSkewSeconds: 10, transport: "test", message: "test"
+        )
+        XCTAssertTrue(GuestAutomationGate.validate(request: request, handshake: handshake, policy: .strict).isEmpty)
+        handshake = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.deterministicReset],
+            maximumMessageBytes: 1_048_576, authenticated: false, replayProtected: true,
+            authenticationClockSkewSeconds: 10, transport: "test", message: "test"
+        )
+        XCTAssertFalse(GuestAutomationGate.validate(request: request, handshake: handshake, policy: .strict).isEmpty)
+    }
+
+    func testReplayValidationChecksExactFixtureAndManifestHash() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("replay-validation-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let device = expansionDevice()
+        let fixture = expansionFixture(device: device)
+        let directory = paths.stateRoot.appendingPathComponent("replay")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest = FailureReplayManifest(
+            id: UUID(), schemaVersion: 1, generatedAt: .now, runID: UUID(), runName: "Replay",
+            runState: .failed, deviceNames: [device.name], appArtifactID: nil, labfile: nil,
+            environmentAssignments: [:], fixtureIDs: [fixture.id], diagnosticPaths: [],
+            screenshotPaths: [], exclusions: ["Apple firmware"]
+        )
+        let manifestURL = directory.appendingPathComponent("replay-manifest.json")
+        try HardeningJSON.save(manifest, to: manifestURL)
+        let record = FailureReplayBundleRecord(
+            id: manifest.id, generatedAt: manifest.generatedAt, runID: manifest.runID,
+            path: directory.path, manifestSHA256: try fileSHA256(manifestURL)
+        )
+        let report = ReplayValidator.validate(
+            record: record, devices: [device], artifacts: [], fixtures: [fixture],
+            environments: [], backend: .vphone
+        ).1
+        XCTAssertTrue(report.passed)
+    }
+
+    func testSymbolicationRejectsUnmatchedDSYM() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("symbolication-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let crash = root.appendingPathComponent("Fixture.crash")
+        let dSYM = root.appendingPathComponent("Fixture.dSYM")
+        try FileManager.default.createDirectory(at: dSYM.appendingPathComponent("Contents/Resources/DWARF"), withIntermediateDirectories: true)
+        try Data("UUID: 11111111-1111-1111-1111-111111111111\n0x100001234".utf8).write(to: crash)
+        let report = CrashSymbolicator.symbolicate(crash: crash, dSYM: dSYM, builds: [])
+        XCTAssertFalse(report.succeeded)
+        XCTAssertTrue(report.blockers.contains { $0.contains("dSYM") })
+    }
+
+    func testFleetControlPlanePreventsDoubleCapacityAndExpiresLeases() throws {
+        var host = FleetScheduler.localHost(capabilities: ["automation"], maximumConcurrentVMs: 1)
+        host.lastSeen = .now
+        let request = FleetJobRequest(name: "one", requiredCapabilities: ["automation"], requiredMemoryMB: 512)
+        let first = FleetControlPlane.acquire(request: request, hosts: [host], leases: [], durationSeconds: 60)
+        let lease = try XCTUnwrap(first.1)
+        XCTAssertNil(FleetControlPlane.acquire(request: request, hosts: [host], leases: [lease], durationSeconds: 60).1)
+        var expired = lease
+        expired = FleetLease(
+            id: expired.id, hostID: expired.hostID, jobName: expired.jobName,
+            createdAt: expired.createdAt, expiresAt: .distantPast, state: .active,
+            requiredCapabilities: expired.requiredCapabilities, reservedMemoryMB: expired.reservedMemoryMB
+        )
+        XCTAssertEqual(FleetControlPlane.expire([expired]).first?.state, .expired)
+    }
+
+    func testHighFidelityTimelineUsesMonotonicEventsAndReportsMissingSources() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("timeline-v11-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let start = Date(timeIntervalSinceNow: -1)
+        let run = TestRunRecord(
+            id: UUID(), kind: .deployment, name: "Timeline", packagePath: nil,
+            createdAt: start, completedAt: .now, state: .passed,
+            results: [DeviceTestResult(
+                id: UUID(), deviceName: "phone", state: .passed, message: "passed",
+                screenshotPath: "/tmp/screen.png", diagnosticBundlePath: nil,
+                startedAt: start, completedAt: .now
+            )]
+        )
+        let session = try HighFidelityTimelineBuilder.capture(
+            run: run, logs: [LogEntry(level: .info, scope: "phone", message: "ready")],
+            performance: [:], availableSources: [.hostLogs, .screenshots], paths: paths
+        )
+        XCTAssertEqual(session.events, session.events.sorted { $0.monotonicNanoseconds < $1.monotonicNanoseconds })
+        XCTAssertNotNil(session.unavailableSources[.video])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: session.artifactPath ?? ""))
+    }
+
+    func testCoverageImporterReadsLLVMReportAndFeedsGate() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("coverage-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let object: [String: Any] = ["data": [["totals": [
+            "lines": ["percent": 82.5], "functions": ["percent": 78.0], "regions": ["percent": 80.0],
+        ]]]]
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+        let record = try SourceCoverageImporter.importReport(url, sourceRevision: "deadbeef")
+        XCTAssertEqual(record.linePercent, 82.5)
+        XCTAssertEqual(record.producer, "llvm-cov")
+        var policy = FuzzAndCoveragePolicy.standard
+        policy.measuredSourceCoveragePercent = record.linePercent
+        XCTAssertTrue(EngineeringQualityEvaluator.run(policy: policy).coverageGatePassed)
+    }
+
+    func testHybridRouterUsesPhysicalTargetForPhysicalOnlyCapability() {
+        let virtual = HybridTargetRouter.virtualTargets([expansionDevice()], backendCapabilities: ["networking", "audio"])
+        let physical = ExecutionTargetRecord(
+            id: "physical", kind: .physical, name: "Test iPhone", productType: "iPhone17,3",
+            osVersion: "15.8", available: true, authorized: true,
+            capabilities: ["networking", "audio", "camera"], source: "test"
+        )
+        let decision = HybridTargetRouter.route(
+            HybridRouteRequest(iosMajor: 15, requiredCapabilities: ["camera"], preferPhysical: false),
+            targets: virtual + [physical]
+        )
+        XCTAssertEqual(decision.target?.kind, .physical)
+    }
+
+    func testPhysicalDeploymentFailsClosedForVirtualTarget() {
+        let target = ExecutionTargetRecord(
+            id: "virtual", kind: .virtual, name: "Virtual", productType: nil,
+            osVersion: "15.8", available: true, authorized: true,
+            capabilities: ["xcodeDeployment"], source: "test"
+        )
+        let result = PhysicalDeviceService.installAndLaunch(
+            app: URL(fileURLWithPath: "/tmp/Fixture.app"), on: target
+        )
+        XCTAssertFalse(result.installed)
+        XCTAssertFalse(result.launched)
+    }
+
+    func testExpansionStateRoundTripsAndCriticalActionsAreAccessible() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("expansion-state-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        var state = LabExpansionState.empty
+        state.maturity = CapabilityMaturityEvaluator.evaluate(.init(
+            adapterInstalled: false, adapterInvocationSucceeded: false,
+            guestAutomationAvailable: false, replayValidated: false,
+            symbolicationSucceeded: false, fleetLeaseActive: false, timelineCaptured: false,
+            coverageImported: false, physicalTargetDiscovered: false, approvedQualificationCount: 0
+        ))
+        try LabExpansionStore.save(state, paths: paths)
+        XCTAssertEqual(LabExpansionStore.load(paths: paths).maturity.count, 10)
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/LabExpansionView.swift"), encoding: .utf8
+        )
+        for identifier in [
+            "expansion.refresh", "expansion.qualification-record", "expansion.adapter-install",
+            "expansion.symbolicate", "expansion.fleet-lease", "expansion.timeline-capture",
+            "expansion.coverage-import", "expansion.physical-discover",
+            "expansion.physical-deploy",
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)\")"), identifier)
+        }
+    }
+
     func testContinuityCriticalActionsHaveAccessibilityIdentifiers() throws {
         let source = try String(
             contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -1452,6 +1676,33 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             state: .ready, macOSVersion: "26.3", model: "Mac16,12", architecture: "arm64",
             sipStatus: "enabled", researchGuestsStatus: "enabled", binaryPath: "/mock/vphone-cli",
             binaryExitCode: 0, nestedVirtualization: true, checkedAt: .now
+        )
+    }
+
+    private func expansionDevice() -> VirtualDevice {
+        VirtualDevice(
+            name: "expansion-phone", cpuCount: 4, memoryMB: 4_096,
+            diskSizeBytes: 32 * 1_073_741_824,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil),
+            restoreInfo: RestoreInfoReport(
+                ios: OSVersionReport(version: "15.8", build: "19H370"),
+                cloudOS: OSVersionReport(version: "15.8", build: "19H370"),
+                variant: "regular", device: "iPhone10,6"
+            ), udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/expansion-phone"),
+            diskURL: URL(fileURLWithPath: "/tmp/expansion-phone/Disk.img"),
+            isRunning: false, hardwareProfileID: "iphone-x"
+        )
+    }
+
+    private func expansionFixture(device: VirtualDevice) -> CanonicalVMFixture {
+        CanonicalVMFixture(
+            id: UUID(), schemaVersion: 1, name: "Expansion", createdAt: .now,
+            deviceName: device.name, deviceProductType: device.restoreInfo?.device ?? "unknown",
+            firmwareSHA256: String(repeating: "a", count: 64), cloudOSFirmwareSHA256: nil,
+            hardwareProfileID: device.hardwareProfileID ?? "unknown", backendID: BackendDescriptor.vphone.id,
+            backendVersion: "0.8.0", guestProtocolVersion: 3,
+            snapshotSHA256: String(repeating: "b", count: 64), smokeAppSHA256: nil,
+            acceptanceGeneratedAt: .now, acceptanceGateIDs: AcceptanceGateKind.allCases.map(\.rawValue)
         )
     }
 

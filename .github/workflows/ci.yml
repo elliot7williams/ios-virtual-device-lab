@@ -18,7 +18,11 @@ jobs:
           xcodebuild -version
 
       - name: Unit tests
-        run: swift test
+        run: |
+          swift test --enable-code-coverage
+          coverage_report="$(swift test --show-codecov-path)"
+          swift scripts/check_coverage.swift "$coverage_report" 25 65
+          cp "$coverage_report" .build/coverage.json
 
       - name: Build signed app bundle
         run: ./scripts/build_app.sh
@@ -74,3 +78,9 @@ jobs:
         with:
           name: ios-virtual-device-lab-${{ github.sha }}
           path: .build/iOS Virtual Device Lab.app
+
+      - name: Upload coverage evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-coverage-${{ github.sha }}
+          path: .build/coverage.json

@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-private let cliVersion = "0.10.0"
+private let cliVersion = "0.11.0"
 
 enum CLIFileLock {
     static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
@@ -1437,6 +1437,149 @@ enum CLIPlatformInspector {
     }
 }
 
+struct CLIExpansionStatus: Codable {
+    let schemaVersion: Int?
+    let stateFile: String
+    let maturityRecords: Int
+    let approvedQualifications: Int
+    let installedAdapters: Int
+    let successfulAdapterInvocations: Int
+    let guestAutomationResults: Int
+    let replayExecutions: Int
+    let successfulSymbolications: Int
+    let activeFleetLeases: Int
+    let highFidelityTimelines: Int
+    let coverageReports: Int
+    let physicalDevices: Int
+    let successfulPhysicalDeployments: Int
+    let routedTarget: String?
+}
+
+enum CLIExpansionInspector {
+    static func inspect() throws -> CLIExpansionStatus {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".vphone/VirtualDeviceLab/lab-expansion.json")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return CLIExpansionStatus(
+                schemaVersion: nil, stateFile: url.path, maturityRecords: 0,
+                approvedQualifications: 0, installedAdapters: 0,
+                successfulAdapterInvocations: 0, guestAutomationResults: 0,
+                replayExecutions: 0, successfulSymbolications: 0,
+                activeFleetLeases: 0, highFidelityTimelines: 0,
+                coverageReports: 0, physicalDevices: 0,
+                successfulPhysicalDeployments: 0, routedTarget: nil
+            )
+        }
+        guard let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+            throw CLIError.message("Qualification and scale state is not a JSON object")
+        }
+        func records(_ key: String) -> [[String: Any]] { root[key] as? [[String: Any]] ?? [] }
+        let route = root["hybridRoute"] as? [String: Any]
+        let target = route?["target"] as? [String: Any]
+        return CLIExpansionStatus(
+            schemaVersion: root["schemaVersion"] as? Int,
+            stateFile: url.path,
+            maturityRecords: records("maturity").count,
+            approvedQualifications: records("qualificationMatrix").filter { $0["state"] as? String == "approved" }.count,
+            installedAdapters: records("installedAdapters").count,
+            successfulAdapterInvocations: records("adapterInvocations").filter { $0["succeeded"] as? Bool == true }.count,
+            guestAutomationResults: records("guestAutomationResults").count,
+            replayExecutions: records("replayExecutions").count,
+            successfulSymbolications: records("symbolicationReports").filter { $0["succeeded"] as? Bool == true }.count,
+            activeFleetLeases: records("fleetLeases").filter { $0["state"] as? String == "active" }.count,
+            highFidelityTimelines: records("highFidelityTimelines").count,
+            coverageReports: records("coverageReports").count,
+            physicalDevices: records("physicalDevices").count,
+            successfulPhysicalDeployments: records("physicalDeployments").filter { $0["installed"] as? Bool == true && $0["launched"] as? Bool == true }.count,
+            routedTarget: target?["name"] as? String
+        )
+    }
+}
+
+struct CLIExecutionTarget: Codable {
+    let id: String
+    let kind: String
+    let name: String
+    let osVersion: String?
+    let available: Bool
+    let capabilities: [String]
+}
+
+enum CLITargetDiscovery {
+    static func list() -> [CLIExecutionTarget] {
+        var targets: [CLIExecutionTarget] = []
+        let virtualCapabilities = ["lifecycle", "automation", "networking", "audio", "screenshots"]
+        let virtualRoots = ((try? FileManager.default.contentsOfDirectory(
+            at: libraryRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+        )) ?? []).filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        targets += virtualRoots.map {
+            CLIExecutionTarget(id: $0.lastPathComponent, kind: "virtual", name: $0.lastPathComponent,
+                               osVersion: virtualOSVersion(at: $0), available: true,
+                               capabilities: virtualCapabilities)
+        }
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("vdl-targets-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: output) }
+        let result = Shell.run("/usr/bin/xcrun", ["devicectl", "list", "devices", "--timeout", "10", "--json-output", output.path], timeout: 15)
+        if result.passed,
+           let object = try? JSONSerialization.jsonObject(with: Data(contentsOf: output)) {
+            var seen = Set<String>()
+            let physical = dictionaries(in: object).compactMap { dictionary -> CLIExecutionTarget? in
+                let properties = dictionary["deviceProperties"] as? [String: Any] ?? [:]
+                guard let id = string(dictionary["identifier"] ?? properties["identifier"]),
+                      seen.insert(id).inserted else { return nil }
+                let name = string(dictionary["name"] ?? properties["name"]) ?? "Physical iOS device"
+                let version = string(properties["osVersionNumber"] ?? dictionary["osVersionNumber"])
+                let connection = dictionary["connectionProperties"] as? [String: Any] ?? [:]
+                let state = (string(connection["tunnelState"] ?? dictionary["connectionState"] ?? properties["connectionState"]) ?? "").lowercased()
+                let pairing = (string(connection["pairingState"] ?? dictionary["pairingState"]) ?? "").lowercased()
+                let developerMode = (string(properties["developerModeStatus"] ?? dictionary["developerModeStatus"]) ?? "").lowercased()
+                return CLIExecutionTarget(
+                    id: id, kind: "physical", name: name, osVersion: version,
+                    available: (state == "connected" || properties["ddiServicesAvailable"] as? Bool == true)
+                        && pairing == "paired" && developerMode == "enabled",
+                    capabilities: ["camera", "cellular", "secureEnclave", "biometrics", "bluetooth", "motion", "audio", "networking", "xcodeDeployment"]
+                )
+            }
+            targets += physical
+        }
+        return targets.sorted { ($0.kind, $0.name) < ($1.kind, $1.name) }
+    }
+
+    static func route(targets: [CLIExecutionTarget], required: [String], iosMajor: Int?, preferPhysical: Bool) -> CLIExecutionTarget? {
+        let required = Set(required)
+        return targets.filter { target in
+            target.available && required.isSubset(of: Set(target.capabilities))
+                && iosMajor.map { target.osVersion.flatMap { Int($0.split(separator: ".").first ?? "") } == $0 } != false
+        }.sorted { left, right in
+            if left.kind != right.kind { return preferPhysical ? left.kind == "physical" : left.kind == "virtual" }
+            return left.name < right.name
+        }.first
+    }
+
+    private static func virtualOSVersion(at root: URL) -> String? {
+        let paths = [root.appendingPathComponent("config.plist"), root.appendingPathComponent("restore-info.plist")]
+        for path in paths {
+            guard let data = try? Data(contentsOf: path),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { continue }
+            if let value = plist["ProductVersion"] as? String { return value }
+            if let restore = plist["restoreInfo"] as? [String: Any], let ios = restore["iOS"] as? [String: Any], let value = ios["version"] as? String { return value }
+        }
+        return nil
+    }
+
+    private static func dictionaries(in value: Any) -> [[String: Any]] {
+        if let dictionary = value as? [String: Any] { return [dictionary] + dictionary.values.flatMap(dictionaries) }
+        if let array = value as? [Any] { return array.flatMap(dictionaries) }
+        return []
+    }
+
+    private static func string(_ value: Any?) -> String? {
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber { return number.stringValue }
+        return nil
+    }
+}
+
 enum CLIError: LocalizedError {
     case message(String)
     var errorDescription: String? {
@@ -1524,6 +1667,9 @@ func usage() {
       vdlctl labfile apply --file <Labfile.json> [--json]
       vdlctl adapter check --manifest <adapter-manifest.json> [--json]
       vdlctl platform status [--json]
+      vdlctl expansion status [--json]
+      vdlctl targets list [--json]
+      vdlctl targets route [--capability <name> ...] [--ios-major <n>] [--prefer-physical] [--json]
       vdlctl agent-init [--queue <directory>] [--token-file <path>]
       vdlctl agent-submit --workflow <file|id|name> --device <name> [--device <name> ...]
                           [--app <ipa>] [--queue <directory>] [--token-file <path>] [--dry-run]
@@ -1640,6 +1786,48 @@ enum VDLCLI {
                     print("Adapters \(status.adapters) • builds \(status.builds) • replay bundles \(status.replayBundles) • hosts \(status.fleetHosts) • timelines \(status.timelines)")
                     print("Fuzz \(status.fuzzPassed ? "PASS" : "INCOMPLETE") (\(status.fuzzCases) cases) • coverage \(status.coveragePassed ? "PASS" : "INCOMPLETE")")
                     print("Beta \(status.betaChannel ?? "not evaluated") • promotion \(status.betaPromotionReady ? "READY" : "HOLD")")
+                }
+            case "expansion":
+                guard arguments.indices.contains(1), arguments[1] == "status" else {
+                    throw CLIError.message("Use `vdlctl expansion status [--json]`")
+                }
+                let status = try CLIExpansionInspector.inspect()
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(status), as: UTF8.self))
+                } else {
+                    print("Qualification & scale schema: \(status.schemaVersion.map(String.init) ?? "not initialized")")
+                    print("Maturity \(status.maturityRecords) • approved qualifications \(status.approvedQualifications) • installed adapters \(status.installedAdapters)")
+                    print("Adapter calls \(status.successfulAdapterInvocations) • guest automation \(status.guestAutomationResults) • replays \(status.replayExecutions) • symbolications \(status.successfulSymbolications)")
+                    print("Active leases \(status.activeFleetLeases) • timelines \(status.highFidelityTimelines) • coverage reports \(status.coverageReports) • physical devices \(status.physicalDevices) • physical deployments \(status.successfulPhysicalDeployments)")
+                    print("Hybrid route: \(status.routedTarget ?? "not routed")")
+                }
+            case "targets":
+                guard arguments.indices.contains(1), ["list", "route"].contains(arguments[1]) else {
+                    throw CLIError.message("Use `vdlctl targets <list|route> [options]`")
+                }
+                let targets = CLITargetDiscovery.list()
+                if arguments[1] == "list" {
+                    if arguments.contains("--json") {
+                        print(String(decoding: try JSONEncoder.lab.encode(targets), as: UTF8.self))
+                    } else if targets.isEmpty {
+                        print("No virtual or authorized physical targets were discovered")
+                    } else {
+                        for target in targets {
+                            print("\(target.kind.uppercased()) \(target.name) • iOS \(target.osVersion ?? "unknown") • \(target.available ? "available" : "unavailable")")
+                        }
+                    }
+                } else {
+                    let required = values(after: "--capability", in: arguments)
+                    let iosMajor = value(after: "--ios-major", in: arguments).flatMap(Int.init)
+                    guard let target = CLITargetDiscovery.route(
+                        targets: targets, required: required, iosMajor: iosMajor,
+                        preferPhysical: arguments.contains("--prefer-physical")
+                    ) else { throw CLIError.message("No available target satisfies the requested version and capabilities") }
+                    if arguments.contains("--json") {
+                        print(String(decoding: try JSONEncoder.lab.encode(target), as: UTF8.self))
+                    } else {
+                        print("Routed to \(target.kind) target \(target.name)")
+                    }
                 }
             case "agent-init":
                 let queue = value(after: "--queue", in: arguments).map(URL.init(fileURLWithPath:)) ?? defaultAgentQueue
