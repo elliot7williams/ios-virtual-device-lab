@@ -1881,7 +1881,7 @@ enum VDLCLI {
                     print("Production depth schema: \(status.schemaVersion.map(String.init) ?? "not initialized")")
                     print("Companions \(status.activeCompanions)/\(status.companionPackages) active • signing \(status.passingSigningAssessments) passing • physical \(status.readyPhysicalDevices) ready / \(status.activePhysicalLeases) leased")
                     print("Visual \(status.passingVisualRegressions) passing • faults \(status.successfulFaultInjections) successful • mTLS probes \(status.authenticatedMTLSProbes)")
-                    print("SQLite \(status.sqliteIntegrityPassed ? "PASS" : "NOT READY") (\(status.sqliteEventRows) events) • certificates \(status.compatibilityCertificates) • upgrade \(status.upgradeAllowed ? "ALLOWED" : "HOLD")")
+                    print("SQLite \(status.sqliteIntegrityPassed ? "PASS" : "NOT READY") (\(status.sqliteEventRows) events) • upgrade \(status.upgradeAllowed ? "ALLOWED" : "HOLD")")
                     print("CI lifecycle \(status.ciMaintenancePassed ? "PASS" : "NOT AUDITED") • runbook drills \(status.passingRunbookDrills) passing")
                 }
             case "targets":
