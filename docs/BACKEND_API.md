@@ -14,10 +14,13 @@ An adapter provides:
 - snapshot create, verify, restore, retention support, and deletion;
 - app deployment, screenshots, hardware input, and cancellation;
 - a versioned guest-protocol handshake with capabilities, payload limit, transport, and authentication status;
+- typed guest-companion deployment and typed network/audio fault-injection requests, both gated by authenticated replay-protected protocol v3 and explicit guest capabilities;
 - diagnostic bundles, bounded guest diagnostic export, and performance samples;
 - `LabProgressEvent` callbacks with operation, phase, fraction, and message.
 
 Unsupported capabilities must be reported as unavailable and return an explanatory result. They must not silently ignore a request while claiming success.
+
+The host owns companion package building, version history, checksum validation, and rollback. A backend receives only a fully validated deployment request. Likewise, the frontend describes a bounded fault scenario; only the adapter translates it into its guest transport. Neither operation may downgrade to an unauthenticated legacy message.
 
 Environment profiles are accepted as lab test intent. An adapter may apply only fields it can reproduce and must identify the rest as unsupported; saving a profile is not evidence that the guest changed.
 

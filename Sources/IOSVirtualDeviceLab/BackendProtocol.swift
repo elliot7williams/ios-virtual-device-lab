@@ -76,6 +76,14 @@ protocol LabBackend: Sendable {
         _ request: GuestAutomationRequest,
         on device: VirtualDevice
     ) async -> GuestAutomationResult
+    func deployGuestCompanion(
+        _ request: GuestCompanionDeploymentRequest,
+        on device: VirtualDevice
+    ) async -> GuestCompanionDeploymentResult
+    func injectFault(
+        _ scenario: FaultInjectionScenario,
+        on device: VirtualDevice
+    ) async -> FaultInjectionResult
     func createDiagnosticBundle(
         for device: VirtualDevice,
         activityLog: String
@@ -291,7 +299,7 @@ actor MockLabBackend: LabBackend {
             negotiatedVersion: 3,
             minimumSupportedVersion: 1,
             maximumSupportedVersion: 3,
-            capabilities: [.screenshots, .hardwareKeys, .guestFiles, .audioOutput, .networking, .accessibilityTree, .deterministicReset],
+            capabilities: [.screenshots, .hardwareKeys, .guestFiles, .audioOutput, .networking, .accessibilityTree, .deterministicReset, .companionLifecycle, .faultInjection],
             maximumMessageBytes: 1_048_576,
             authenticated: true,
             replayProtected: true,
@@ -309,6 +317,27 @@ actor MockLabBackend: LabBackend {
             id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
             startedAt: .now, completedAt: .now, succeeded: true,
             message: "Mock guest automation completed.", accessibilityRoot: nil
+        )
+    }
+
+    func deployGuestCompanion(
+        _ request: GuestCompanionDeploymentRequest,
+        on device: VirtualDevice
+    ) -> GuestCompanionDeploymentResult {
+        GuestCompanionDeploymentResult(
+            requestID: request.id, deviceName: device.name, succeeded: true,
+            installedVersion: request.version, message: "Mock companion deployment completed."
+        )
+    }
+
+    func injectFault(
+        _ scenario: FaultInjectionScenario,
+        on device: VirtualDevice
+    ) -> FaultInjectionResult {
+        FaultInjectionResult(
+            id: UUID(), scenarioID: scenario.id, deviceName: device.name,
+            startedAt: .now, completedAt: .now, succeeded: true,
+            message: "Mock fault injection completed."
         )
     }
 

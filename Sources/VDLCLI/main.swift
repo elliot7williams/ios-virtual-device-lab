@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-private let cliVersion = "0.11.0"
+private let cliVersion = "0.12.0"
 
 enum CLIFileLock {
     static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
@@ -1496,6 +1496,74 @@ enum CLIExpansionInspector {
     }
 }
 
+struct CLIProductionDepthStatus: Codable {
+    let schemaVersion: Int?
+    let stateFile: String
+    let companionPackages: Int
+    let activeCompanions: Int
+    let passingSigningAssessments: Int
+    let readyPhysicalDevices: Int
+    let activePhysicalLeases: Int
+    let passingVisualRegressions: Int
+    let successfulFaultInjections: Int
+    let mtlsConfigured: Bool
+    let authenticatedMTLSProbes: Int
+    let sqliteIntegrityPassed: Bool
+    let sqliteEventRows: Int
+    let compatibilityCertificates: Int
+    let upgradeAllowed: Bool
+    let ciMaintenancePassed: Bool
+    let passingRunbookDrills: Int
+}
+
+enum CLIProductionDepthInspector {
+    static func inspect() throws -> CLIProductionDepthStatus {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".vphone/VirtualDeviceLab/production-depth.json")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return CLIProductionDepthStatus(
+                schemaVersion: nil, stateFile: url.path, companionPackages: 0, activeCompanions: 0,
+                passingSigningAssessments: 0, readyPhysicalDevices: 0, activePhysicalLeases: 0,
+                passingVisualRegressions: 0, successfulFaultInjections: 0, mtlsConfigured: false,
+                authenticatedMTLSProbes: 0, sqliteIntegrityPassed: false, sqliteEventRows: 0,
+                compatibilityCertificates: 0, upgradeAllowed: false, ciMaintenancePassed: false,
+                passingRunbookDrills: 0
+            )
+        }
+        guard let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+            throw CLIError.message("Production-depth state is not a JSON object")
+        }
+        func records(_ key: String) -> [[String: Any]] { root[key] as? [[String: Any]] ?? [] }
+        let eventStore = root["eventStore"] as? [String: Any] ?? [:]
+        let upgrade = root["upgradeDecision"] as? [String: Any] ?? [:]
+        let ci = root["ciMaintenance"] as? [String: Any] ?? [:]
+        return CLIProductionDepthStatus(
+            schemaVersion: root["schemaVersion"] as? Int,
+            stateFile: url.path,
+            companionPackages: records("companions").count,
+            activeCompanions: records("companions").filter { $0["active"] as? Bool == true }.count,
+            passingSigningAssessments: records("signingAssessments").filter {
+                $0["signatureValid"] as? Bool == true && $0["provisioningValid"] as? Bool == true
+            }.count,
+            readyPhysicalDevices: records("physicalDetails").filter {
+                $0["connected"] as? Bool == true && $0["paired"] as? Bool == true
+                    && $0["developerModeEnabled"] as? Bool == true && $0["ddiServicesReady"] as? Bool == true
+            }.count,
+            activePhysicalLeases: records("physicalLeases").filter { $0["state"] as? String == "active" }.count,
+            passingVisualRegressions: records("visualRegressions").filter { $0["passed"] as? Bool == true }.count,
+            successfulFaultInjections: records("faultResults").filter { $0["succeeded"] as? Bool == true }.count,
+            mtlsConfigured: root["mtlsConfiguration"] != nil,
+            authenticatedMTLSProbes: records("mtlsProbes").filter { $0["authenticated"] as? Bool == true }.count,
+            sqliteIntegrityPassed: eventStore["integrityPassed"] as? Bool ?? false,
+            sqliteEventRows: eventStore["rowCount"] as? Int ?? 0,
+            compatibilityCertificates: records("compatibilityCertificates").count,
+            upgradeAllowed: upgrade["allowed"] as? Bool ?? false,
+            ciMaintenancePassed: ci["passed"] as? Bool ?? false,
+            passingRunbookDrills: records("runbookDrills").filter { $0["passed"] as? Bool == true }.count
+        )
+    }
+}
+
 struct CLIExecutionTarget: Codable {
     let id: String
     let kind: String
@@ -1668,6 +1736,7 @@ func usage() {
       vdlctl adapter check --manifest <adapter-manifest.json> [--json]
       vdlctl platform status [--json]
       vdlctl expansion status [--json]
+      vdlctl depth status [--json]
       vdlctl targets list [--json]
       vdlctl targets route [--capability <name> ...] [--ios-major <n>] [--prefer-physical] [--json]
       vdlctl agent-init [--queue <directory>] [--token-file <path>]
@@ -1800,6 +1869,20 @@ enum VDLCLI {
                     print("Adapter calls \(status.successfulAdapterInvocations) • guest automation \(status.guestAutomationResults) • replays \(status.replayExecutions) • symbolications \(status.successfulSymbolications)")
                     print("Active leases \(status.activeFleetLeases) • timelines \(status.highFidelityTimelines) • coverage reports \(status.coverageReports) • physical devices \(status.physicalDevices) • physical deployments \(status.successfulPhysicalDeployments)")
                     print("Hybrid route: \(status.routedTarget ?? "not routed")")
+                }
+            case "depth":
+                guard arguments.indices.contains(1), arguments[1] == "status" else {
+                    throw CLIError.message("Use `vdlctl depth status [--json]`")
+                }
+                let status = try CLIProductionDepthInspector.inspect()
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(status), as: UTF8.self))
+                } else {
+                    print("Production depth schema: \(status.schemaVersion.map(String.init) ?? "not initialized")")
+                    print("Companions \(status.activeCompanions)/\(status.companionPackages) active • signing \(status.passingSigningAssessments) passing • physical \(status.readyPhysicalDevices) ready / \(status.activePhysicalLeases) leased")
+                    print("Visual \(status.passingVisualRegressions) passing • faults \(status.successfulFaultInjections) successful • mTLS probes \(status.authenticatedMTLSProbes)")
+                    print("SQLite \(status.sqliteIntegrityPassed ? "PASS" : "NOT READY") (\(status.sqliteEventRows) events) • certificates \(status.compatibilityCertificates) • upgrade \(status.upgradeAllowed ? "ALLOWED" : "HOLD")")
+                    print("CI lifecycle \(status.ciMaintenancePassed ? "PASS" : "NOT AUDITED") • runbook drills \(status.passingRunbookDrills) passing")
                 }
             case "targets":
                 guard arguments.indices.contains(1), ["list", "route"].contains(arguments[1]) else {

@@ -278,7 +278,7 @@ struct LabMigrationReport: Codable, Hashable, Sendable {
 }
 
 enum LabMigrationManager {
-    static let currentSchemaVersion = 7
+    static let currentSchemaVersion = 8
     private static let managedFiles = [
         "activity.json", "automation-workflows.json", "compatibility-manifest.json",
         "diagnostic-privacy.json", "environment-assignments.json", "environment-profiles.json",
@@ -292,6 +292,7 @@ enum LabMigrationManager {
         "operational-objective-policy.json", "beta-verification.json",
         "platform-engineering.json",
         "lab-expansion.json",
+        "production-depth.json", "lab-events.sqlite3", "lab-events.sqlite3-wal",
     ]
 
     static func migrate(paths: LabPaths) throws -> LabMigrationReport {
@@ -323,8 +324,10 @@ enum LabMigrationManager {
                 summary = "Added storage relinking, Recovery Center decisions, canonical fixtures, Labfiles, evidence expiry, host calibration, hostile-input boundaries, unified retention, SLOs, and beta verification."
             case 6:
                 summary = "Added backend adapter conformance, deterministic reset planning, build identities, failure replay bundles, regression analysis, fleet placement, unified timelines, threat modeling, fuzz and coverage gates, and beta operations."
-            default:
+            case 7:
                 summary = "Added capability maturity, real-VM qualification publication, runtime adapter hosting, authenticated guest automation, replay execution, crash symbolication, fleet leases, monotonic timelines, coverage import, and hybrid physical-device routing."
+            default:
+                summary = "Added guest companion lifecycle, signing and provisioning management, physical-device leasing, visual regression, fault injection, mTLS fleet transport, SQLite event storage, upgrade certification, CI lifecycle enforcement, and operator runbook drills."
             }
             let record = LabMigrationRecord(
                 id: UUID(),
@@ -543,6 +546,8 @@ enum GuestCapability: String, Codable, CaseIterable, Sendable {
     case environmentPolicy = "environment_policy"
     case accessibilityTree = "accessibility_tree"
     case deterministicReset = "deterministic_reset"
+    case companionLifecycle = "companion_lifecycle"
+    case faultInjection = "fault_injection"
 }
 
 struct GuestProtocolHandshake: Codable, Hashable, Sendable {

@@ -19,6 +19,7 @@ private struct LocalBootstrapState: Sendable {
     let hardening: ProductionHardeningState
     let platformEngineering: PlatformEngineeringState
     let labExpansion: LabExpansionState
+    let productionDepth: ProductionDepthState
 
     static func load(paths: LabPaths, safeMode: Bool = false) throws -> LocalBootstrapState {
         if !safeMode { try PluginRegistry.prepare(paths: paths) }
@@ -46,7 +47,8 @@ private struct LocalBootstrapState: Sendable {
             logs: Array((persistedLogs ?? []).suffix(2_000)),
             hardening: hardening,
             platformEngineering: PlatformEngineeringStore.load(paths: paths),
-            labExpansion: LabExpansionStore.load(paths: paths)
+            labExpansion: LabExpansionStore.load(paths: paths),
+            productionDepth: ProductionDepthStore.load(paths: paths)
         )
     }
 }
@@ -131,6 +133,8 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var publicBetaReadiness: PublicBetaReadinessReport = .empty
     @Published private(set) var platformEngineering: PlatformEngineeringState = .empty
     @Published private(set) var labExpansion: LabExpansionState = .empty
+    @Published private(set) var productionDepth: ProductionDepthState = .empty
+    @Published private(set) var availableSigningIdentities: [CodeSigningIdentityRecord] = []
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
 
@@ -139,6 +143,7 @@ final class LabAppModel: ObservableObject {
     private var didBootstrap = false
     private var orchestrationFlags: [UUID: OperationCancellationFlag] = [:]
     private let updateService = UpdateService()
+    private var scalableEventStore: ScalableEventStore?
 
     init(paths: LabPaths = .default, backend: (any LabBackend)? = nil) {
         self.paths = paths
@@ -201,6 +206,25 @@ final class LabAppModel: ObservableObject {
             resilienceReport = localState.hardening.resilienceReport
             platformEngineering = localState.platformEngineering
             labExpansion = localState.labExpansion
+            productionDepth = localState.productionDepth
+            do {
+                let store = try ScalableEventStore(
+                    url: paths.stateRoot.appendingPathComponent("lab-events.sqlite3")
+                )
+                scalableEventStore = store
+                productionDepth.eventStore = try store.status(
+                    lastMigratedAt: productionDepth.eventStore.lastMigratedAt
+                )
+                persistProductionDepth()
+            } catch {
+                productionDepth.eventStore = ScalableEventStoreStatus(
+                    databasePath: paths.stateRoot.appendingPathComponent("lab-events.sqlite3").path,
+                    schemaVersion: ScalableEventStore.schemaVersion, journalMode: "unavailable",
+                    integrityPassed: false, rowCount: 0,
+                    lastMigratedAt: productionDepth.eventStore.lastMigratedAt,
+                    message: error.localizedDescription
+                )
+            }
             recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
             canonicalFixtures = CanonicalFixtureStore.load(paths: paths)
             evidenceLifecyclePolicy = EvidenceLifecycleManager.loadPolicy(paths: paths)
@@ -889,6 +913,399 @@ final class LabAppModel: ObservableObject {
         persistLogs()
     }
 
+    // MARK: - Production depth
+
+    func buildGuestCompanionPackage(
+        payload: URL, identifier: String, version: String, destination: URL
+    ) {
+        do {
+            let package = try GuestCompanionLifecycleManager.buildPackage(
+                payload: payload, identifier: identifier, version: version,
+                supportedBackendIDs: [backendDescriptor.id], outputRoot: destination
+            )
+            appendLog(.success, scope: "guest-companion", "Built verified companion package at \(package.path)")
+            persistLogs()
+            installGuestCompanionPackage(package)
+            reveal(package)
+        } catch { present(error, context: "Building guest companion package") }
+    }
+
+    func installGuestCompanionPackage(_ url: URL) {
+        do {
+            let package = try GuestCompanionLifecycleManager.install(
+                package: url, backendID: backendDescriptor.id,
+                existing: productionDepth.companions, paths: paths
+            )
+            productionDepth.companions.removeAll {
+                $0.identifier == package.identifier && $0.version == package.version
+            }
+            productionDepth.companions.append(package)
+            productionDepth.companions = GuestCompanionLifecycleManager.activate(
+                package, in: productionDepth.companions
+            )
+            recordCompanionLifecycle(
+                action: .imported, package: package, deviceName: nil,
+                succeeded: true, message: "Imported, hash-verified, and activated companion \(package.identifier) \(package.version)."
+            )
+        } catch {
+            let fallback = ManagedGuestCompanion(
+                id: UUID(), identifier: "rejected-package", version: "0.0.0",
+                protocolMinimum: 0, protocolMaximum: 0, payloadPath: url.path,
+                payloadSHA256: "", installedAt: .now, active: false, replacedVersion: nil
+            )
+            recordCompanionLifecycle(
+                action: .rejected, package: fallback, deviceName: nil,
+                succeeded: false, message: error.localizedDescription
+            )
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func rollbackGuestCompanion(_ package: ManagedGuestCompanion) {
+        do {
+            productionDepth.companions = try GuestCompanionLifecycleManager.rollback(
+                package, in: productionDepth.companions
+            )
+            let active = productionDepth.companions.first {
+                $0.identifier == package.identifier && $0.active
+            } ?? package
+            recordCompanionLifecycle(
+                action: .rolledBack, package: active, deviceName: nil,
+                succeeded: true, message: "Rolled back to checksum-valid companion \(active.version)."
+            )
+        } catch { present(error, context: "Rolling back guest companion") }
+    }
+
+    func deployGuestCompanion(_ package: ManagedGuestCompanion) async {
+        guard let device = selectedDevice, device.isRunning else {
+            alertMessage = "Select and start a virtual device before deploying a guest companion."
+            return
+        }
+        busyKeys.insert("companion-deploy")
+        let result = await backend.deployGuestCompanion(
+            GuestCompanionDeploymentRequest(
+                id: UUID(), identifier: package.identifier, version: package.version,
+                payloadPath: package.payloadPath, payloadSHA256: package.payloadSHA256
+            ),
+            on: device
+        )
+        busyKeys.remove("companion-deploy")
+        recordCompanionLifecycle(
+            action: result.succeeded ? .deployed : .rejected,
+            package: package, deviceName: device.name,
+            succeeded: result.succeeded, message: result.message
+        )
+    }
+
+    func refreshSigningIdentities() async {
+        busyKeys.insert("signing-identities")
+        availableSigningIdentities = await Task.detached {
+            SigningProvisioningManager.identities()
+        }.value
+        busyKeys.remove("signing-identities")
+        appendLog(.info, scope: "signing", "Found \(availableSigningIdentities.count) valid code-signing identity record(s)")
+        persistLogs()
+    }
+
+    func inspectSigningAndProvisioning(_ app: URL) async {
+        busyKeys.insert("signing-inspect")
+        let assessment = await Task.detached {
+            SigningProvisioningManager.inspect(app: app)
+        }.value
+        busyKeys.remove("signing-inspect")
+        productionDepth.signingAssessments.insert(assessment, at: 0)
+        productionDepth.signingAssessments = Array(productionDepth.signingAssessments.prefix(250))
+        persistProductionDepth()
+        appendLog(assessment.passed ? .success : .warning, scope: "signing", assessment.passed ? "Signing and provisioning checks passed" : "Signing or provisioning checks remain blocked")
+        persistLogs()
+    }
+
+    func stageAndSign(_ app: URL, identity: CodeSigningIdentityRecord) async {
+        busyKeys.insert("signing-stage")
+        do {
+            let labPaths = paths
+            let assessment = try await Task.detached {
+                try SigningProvisioningManager.stageAndSign(app: app, identity: identity, paths: labPaths)
+            }.value
+            productionDepth.signingAssessments.insert(assessment, at: 0)
+            productionDepth.signingAssessments = Array(productionDepth.signingAssessments.prefix(250))
+            persistProductionDepth()
+            appendLog(assessment.passed ? .success : .warning, scope: "signing", "Created staged signed build at \(assessment.stagedSignedAppPath ?? "unknown")")
+            persistLogs()
+        } catch { present(error, context: "Staging and signing app") }
+        busyKeys.remove("signing-stage")
+    }
+
+    func inspectPhysicalDevice(_ target: ExecutionTargetRecord, autoMountDDI: Bool = true) async {
+        busyKeys.insert("physical-lifecycle")
+        let detail = await Task.detached {
+            PhysicalDeviceLifecycleService.inspect(target: target, autoMountDDI: autoMountDDI)
+        }.value
+        busyKeys.remove("physical-lifecycle")
+        productionDepth.physicalDetails.removeAll { $0.targetID == detail.targetID }
+        productionDepth.physicalDetails.insert(detail, at: 0)
+        productionDepth.physicalDetails = Array(productionDepth.physicalDetails.prefix(250))
+        persistProductionDepth()
+        appendLog(detail.ready ? .success : .warning, scope: "physical-lifecycle", detail.ready ? "Physical target \(detail.name) is paired, connected, in Developer Mode, and DDI-ready" : "Physical target \(detail.name) is not lifecycle-ready")
+        persistLogs()
+    }
+
+    func pairPhysicalDevice(_ target: ExecutionTargetRecord) async {
+        busyKeys.insert("physical-pair")
+        let result = await Task.detached {
+            PhysicalDeviceLifecycleService.pair(targetID: target.id)
+        }.value
+        busyKeys.remove("physical-pair")
+        appendLog(result.passed ? .success : .error, scope: "physical-lifecycle", result.evidence)
+        persistLogs()
+        await inspectPhysicalDevice(target)
+    }
+
+    func acquirePhysicalDeviceLease(_ target: ExecutionTargetRecord, owner: String, minutes: Int) {
+        do {
+            productionDepth.physicalLeases = PhysicalDeviceLifecycleService.normalize(productionDepth.physicalLeases)
+            let lease = try PhysicalDeviceLifecycleService.acquireLease(
+                targetID: target.id, owner: owner,
+                duration: TimeInterval(minutes * 60), existing: productionDepth.physicalLeases
+            )
+            productionDepth.physicalLeases.insert(lease, at: 0)
+            productionDepth.physicalLeases = Array(productionDepth.physicalLeases.prefix(1_000))
+            persistProductionDepth()
+            try? scalableEventStore?.append(category: "physical-lease", entityID: lease.id.uuidString, occurredAt: lease.acquiredAt, value: lease)
+            appendLog(.success, scope: "physical-lifecycle", "Acquired exclusive lease for \(target.name)")
+            persistLogs()
+        } catch { present(error, context: "Acquiring physical-device lease") }
+    }
+
+    func releasePhysicalDeviceLease(_ lease: PhysicalDeviceLease) {
+        guard let index = productionDepth.physicalLeases.firstIndex(where: { $0.id == lease.id }) else { return }
+        productionDepth.physicalLeases[index].state = .released
+        persistProductionDepth()
+    }
+
+    func compareVisualBaseline(
+        baseline: URL,
+        candidate: URL,
+        masks: [VisualMaskRect] = [],
+        threshold: Int = 8,
+        maximumChangedPercent: Double = 0.5
+    ) async {
+        busyKeys.insert("visual-regression")
+        do {
+            let output = paths.stateRoot.appendingPathComponent("Visual Regression", isDirectory: true)
+            let report = try await Task.detached {
+                try VisualRegressionEngine.compare(
+                    baseline: baseline, candidate: candidate, masks: masks,
+                    perChannelThreshold: threshold,
+                    maximumChangedPercent: maximumChangedPercent, outputRoot: output
+                )
+            }.value
+            productionDepth.visualRegressions.insert(report, at: 0)
+            productionDepth.visualRegressions = Array(productionDepth.visualRegressions.prefix(250))
+            persistProductionDepth()
+            appendLog(report.passed ? .success : .warning, scope: "visual-regression", String(format: "Visual difference %.3f%%", report.changedPercent))
+            persistLogs()
+        } catch { present(error, context: "Comparing visual baseline") }
+        busyKeys.remove("visual-regression")
+    }
+
+    func compareLatestAccessibilitySnapshots() {
+        let roots = labExpansion.guestAutomationResults.compactMap(\.accessibilityRoot)
+        guard roots.count >= 2 else {
+            alertMessage = "Capture at least two guest accessibility trees before comparing them."
+            return
+        }
+        let report = VisualRegressionEngine.compareAccessibility(roots[1], roots[0])
+        productionDepth.accessibilityRegressions.insert(report, at: 0)
+        productionDepth.accessibilityRegressions = Array(productionDepth.accessibilityRegressions.prefix(250))
+        persistProductionDepth()
+    }
+
+    func injectFaultScenario(_ scenario: FaultInjectionScenario) async {
+        guard let device = selectedDevice, device.isRunning else {
+            alertMessage = "Select and start a virtual device before injecting a fault."
+            return
+        }
+        busyKeys.insert("fault-injection")
+        let result = await backend.injectFault(scenario, on: device)
+        busyKeys.remove("fault-injection")
+        productionDepth.faultResults.insert(result, at: 0)
+        productionDepth.faultResults = Array(productionDepth.faultResults.prefix(1_000))
+        persistProductionDepth()
+        appendLog(result.succeeded ? .success : .warning, scope: "fault-injection", result.message)
+        persistLogs()
+    }
+
+    func saveMTLSEnrollment(_ configuration: MTLSEnrollmentConfiguration) {
+        let blockers = MTLSEnrollmentValidator.validate(configuration)
+        guard blockers.isEmpty else {
+            alertMessage = blockers.joined(separator: " ")
+            return
+        }
+        let record = MTLSEnrollmentRecord(
+            id: UUID(), enrolledAt: .now, agentID: configuration.agentID,
+            endpoint: configuration.endpoint, clientIdentityLabel: configuration.clientIdentityLabel,
+            serverCertificateSHA256Pins: configuration.serverCertificateSHA256Pins,
+            certificateExpiresAt: nil, revokedAt: nil, replacedBy: nil
+        )
+        for index in productionDepth.mtlsEnrollments.indices where productionDepth.mtlsEnrollments[index].revokedAt == nil {
+            productionDepth.mtlsEnrollments[index].revokedAt = .now
+            productionDepth.mtlsEnrollments[index].replacedBy = record.id
+        }
+        productionDepth.mtlsConfiguration = configuration
+        productionDepth.mtlsEnrollments.insert(record, at: 0)
+        productionDepth.mtlsEnrollments = Array(productionDepth.mtlsEnrollments.prefix(100))
+        persistProductionDepth()
+    }
+
+    func revokeActiveMTLSEnrollment() {
+        let now = Date()
+        var revoked = false
+        for index in productionDepth.mtlsEnrollments.indices
+            where productionDepth.mtlsEnrollments[index].revokedAt == nil {
+            productionDepth.mtlsEnrollments[index].revokedAt = now
+            revoked = true
+        }
+        productionDepth.mtlsConfiguration = nil
+        persistProductionDepth()
+        appendLog(
+            revoked ? .success : .warning, scope: "fleet-mtls",
+            revoked ? "Revoked the active mTLS enrollment; fleet submissions now fail closed" : "No active mTLS enrollment was available to revoke"
+        )
+        persistLogs()
+    }
+
+    func probeMTLSFleet() async {
+        guard let configuration = productionDepth.mtlsConfiguration else {
+            alertMessage = "Save a valid mTLS fleet enrollment first."
+            return
+        }
+        busyKeys.insert("mtls-probe")
+        let probe = await MTLSFleetTransport.probe(configuration)
+        busyKeys.remove("mtls-probe")
+        productionDepth.mtlsProbes.insert(probe, at: 0)
+        productionDepth.mtlsProbes = Array(productionDepth.mtlsProbes.prefix(250))
+        persistProductionDepth()
+        appendLog(probe.authenticated ? .success : .warning, scope: "fleet-mtls", probe.message)
+        persistLogs()
+    }
+
+    func migrateHighVolumeStateToSQLite() async {
+        busyKeys.insert("event-store-migration")
+        do {
+            let store: ScalableEventStore
+            if let scalableEventStore { store = scalableEventStore }
+            else {
+                store = try ScalableEventStore(url: paths.stateRoot.appendingPathComponent("lab-events.sqlite3"))
+                scalableEventStore = store
+            }
+            let currentLogs = logs
+            let currentRuns = testRuns
+            let fleet = labExpansion.fleetLeases
+            let physical = productionDepth.physicalLeases
+            let status = try await Task.detached {
+                try store.migrate(logs: currentLogs, testRuns: currentRuns, fleetLeases: fleet, physicalLeases: physical)
+            }.value
+            productionDepth.eventStore = status
+            persistProductionDepth()
+            appendLog(.success, scope: "event-store", status.message)
+            persistLogs()
+        } catch { present(error, context: "Migrating high-volume state to SQLite") }
+        busyKeys.remove("event-store-migration")
+    }
+
+    func issueCurrentCompatibilityCertificate(suiteURL: URL) {
+        do {
+            let tuple = currentRuntimeCompatibilityTuple()
+            guard let campaign = qualificationCampaigns.first(where: { $0.state == .passed && $0.evidenceSealID != nil }),
+                  let sealID = campaign.evidenceSealID,
+                  let seal = evidenceSeals.first(where: { $0.id == sealID }) else {
+                throw ProductionDepthError.invalid("A passing campaign linked to an approved evidence seal is required.")
+            }
+            let data = try Data(contentsOf: suiteURL)
+            let certificate = try RuntimeCompatibilityCertificationEngine.issue(
+                tuple: tuple, campaign: campaign, seal: seal, suiteData: data
+            )
+            productionDepth.compatibilityCertificates.insert(certificate, at: 0)
+            productionDepth.compatibilityCertificates = Array(productionDepth.compatibilityCertificates.prefix(500))
+            productionDepth.upgradeDecision = RuntimeCompatibilityCertificationEngine.evaluate(
+                candidate: tuple, certificates: productionDepth.compatibilityCertificates
+            )
+            persistProductionDepth()
+        } catch { present(error, context: "Issuing runtime compatibility certificate") }
+    }
+
+    func evaluateCurrentRuntimeUpgrade() {
+        productionDepth.upgradeDecision = RuntimeCompatibilityCertificationEngine.evaluate(
+            candidate: currentRuntimeCompatibilityTuple(),
+            certificates: productionDepth.compatibilityCertificates
+        )
+        persistProductionDepth()
+    }
+
+    func auditCIMaintenance(repositoryRoot: URL? = nil) {
+        let candidate = repositoryRoot ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        productionDepth.ciMaintenance = CIMaintenanceAuditor.inspect(repositoryRoot: candidate)
+        persistProductionDepth()
+        appendLog(productionDepth.ciMaintenance.passed ? .success : .warning, scope: "ci-maintenance", productionDepth.ciMaintenance.message)
+        persistLogs()
+    }
+
+    func runOperatorDrill(_ runbook: OperatorRunbook) {
+        let context = OperatorRunbookContext(
+            migrationBackupAvailable: migrationReport.latestBackupPath != nil,
+            remoteAgentKeyringAvailable: remoteAgentConfiguration?.activeKeyID != nil,
+            fleetDrainControlAvailable: !platformEngineering.fleetHosts.isEmpty,
+            evidenceLedgerValid: evidenceVerificationIssues.isEmpty && !evidenceSeals.isEmpty,
+            updateRollbackAvailable: stagedUpdate?.rollbackScriptPath != nil,
+            physicalLeaseControlAvailable: true
+        )
+        let drill = OperatorRunbookCatalog.drill(runbook, context: context)
+        productionDepth.runbookDrills.insert(drill, at: 0)
+        productionDepth.runbookDrills = Array(productionDepth.runbookDrills.prefix(1_000))
+        persistProductionDepth()
+        appendLog(drill.passed ? .success : .warning, scope: "runbook", "\(runbook.title): \(drill.message)")
+        persistLogs()
+    }
+
+    private func currentRuntimeCompatibilityTuple() -> RuntimeCompatibilityTuple {
+        let companion = productionDepth.companions.first(where: \.active)
+        let adapter = labExpansion.installedAdapters.first(where: \.active)
+        return RuntimeCompatibilityTuple(
+            hostModel: readiness.model, macOSVersion: readiness.macOSVersion,
+            backendID: backendDescriptor.id, backendVersion: backendDescriptor.version,
+            guestCompanionID: companion?.identifier, guestCompanionVersion: companion?.version,
+            adapterID: adapter?.adapterID, adapterVersion: adapter?.version,
+            labSchemaVersion: LabMigrationManager.currentSchemaVersion
+        )
+    }
+
+    private func recordCompanionLifecycle(
+        action: GuestCompanionLifecycleAction,
+        package: ManagedGuestCompanion,
+        deviceName: String?,
+        succeeded: Bool,
+        message: String
+    ) {
+        productionDepth.companionLifecycle.insert(
+            GuestCompanionLifecycleRecord(
+                id: UUID(), occurredAt: .now, action: action,
+                identifier: package.identifier, version: package.version,
+                deviceName: deviceName, succeeded: succeeded, message: message
+            ),
+            at: 0
+        )
+        productionDepth.companionLifecycle = Array(productionDepth.companionLifecycle.prefix(1_000))
+        persistProductionDepth()
+        appendLog(succeeded ? .success : .warning, scope: "companion", message)
+        persistLogs()
+    }
+
+    private func persistProductionDepth() {
+        do { try ProductionDepthStore.save(productionDepth, paths: paths) }
+        catch { present(error, context: "Saving production-depth state") }
+    }
+
     private func persistLabExpansion() {
         do { try LabExpansionStore.save(labExpansion, paths: paths) }
         catch { present(error, context: "Saving qualification and scale state") }
@@ -1291,6 +1708,7 @@ final class LabAppModel: ObservableObject {
     func createLabBackup(destination: URL, passphrase: String? = nil) {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         do {
+            try scalableEventStore?.checkpoint()
             let backup = try LabBackupManager.create(
                 paths: paths,
                 destination: destination,
@@ -2850,6 +3268,10 @@ final class LabAppModel: ObservableObject {
             testRuns.insert(record, at: 0)
         }
         saveTestRuns()
+        try? scalableEventStore?.append(
+            category: "test-run", entityID: record.id.uuidString,
+            occurredAt: record.createdAt, value: record
+        )
     }
 
     private func saveWorkflows() {
@@ -2941,8 +3363,13 @@ final class LabAppModel: ObservableObject {
     private func appendLog(_ level: LogLevel, scope: String, _ message: String) {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        logs.append(LogEntry(level: level, scope: scope, message: trimmed))
+        let entry = LogEntry(level: level, scope: scope, message: trimmed)
+        logs.append(entry)
         if logs.count > 2_000 { logs.removeFirst(logs.count - 2_000) }
+        try? scalableEventStore?.append(
+            category: "activity", entityID: scope,
+            occurredAt: entry.timestamp, value: entry
+        )
     }
 
     private var activityURL: URL {

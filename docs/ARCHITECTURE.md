@@ -95,6 +95,12 @@ The runtime adapter host is process-isolated from SwiftUI and validates the decl
 
 Evidence recertification, capacity recommendations, hostile-input fixtures, retention preview/quarantine, operational objectives, and beta verification are independent policy/evaluation services. Empty or stale evidence fails closed. Human accessibility and legal checkboxes remain attestations with timestamps, not automatically manufactured claims.
 
+### Production depth boundary
+
+`ProductionDepthState` records bounded control-plane metadata, never private signing keys, mTLS private identities, Apple firmware, or guest credentials. `GuestCompanionLifecycleManager` creates and verifies versioned packages before the backend sees a deployment request. `SigningProvisioningManager` evaluates expanded iOS applications and signs only a staged copy. CoreDevice detail and exclusive leases remain distinct from hybrid routing, so discovery does not grant ownership.
+
+Visual and accessibility regressions produce explicit artifacts and structured changes. `FaultInjectionGate` refuses unauthenticated or undeclared guest behavior. `MTLSFleetTransport` uses a Keychain identity, platform server trust, and configured certificate pins. `ScalableEventStore` dual-writes selected high-volume records to SQLite/WAL while JSON remains a migration-compatible control-plane source. Runtime certificates apply only to an exact tested tuple; CI and read-only runbook drills expose lifecycle and recovery prerequisites without bypassing approval gates.
+
 ## Replaceable backend
 
 Future backend implementations should conform to the same conceptual surface:

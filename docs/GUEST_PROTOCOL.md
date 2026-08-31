@@ -32,8 +32,8 @@ The companion accepts a 30-second timestamp window and remembers accepted nonces
 | `screenshots`, `hardware_keys`, `guest_files`, `audio_input`, `audio_output` | Boolean compatibility fields |
 | `network_modes` | Actual modes supported by the runtime |
 
-Known capability identifiers are `screenshots`, `hardware_keys`, `guest_files`, `audio_input`, `audio_output`, `network_modes`, `environment_policy`, and `accessibility_tree`.
+Known capability identifiers are `screenshots`, `hardware_keys`, `guest_files`, `audio_input`, `audio_output`, `network_modes`, `environment_policy`, `accessibility_tree`, `deterministic_reset`, `companion_lifecycle`, and `fault_injection`.
 
 Version 1 responses without `protocol_version` remain readable as legacy metadata. Version 2 remains negotiable for compatibility inspection, but its unauthenticated channel cannot pass mutation or acceptance policy. A response outside versions 1–3 is incompatible, and unavailable sockets never become passing acceptance evidence.
 
-The transport is local, bounded, newline-delimited JSON. Authentication proves possession of the local per-VM host-control key; it does not authenticate an iOS account or expose a network endpoint. `accessibility_tree` remains false until a real guest provider is implemented.
+The transport is local, bounded, newline-delimited JSON. Authentication proves possession of the local per-VM host-control key; it does not authenticate an iOS account or expose a network endpoint. Companion installation uses `companion_install`; typed network/audio faults use `fault_injection`. Both requests include their normal v3 authentication envelope and are sent only after the guest advertises the matching capability. These capabilities and `accessibility_tree` remain false until a real guest provider is implemented.

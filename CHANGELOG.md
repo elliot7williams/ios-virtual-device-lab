@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.12.0
+
+- Added a Production Depth workspace spanning all ten productionization tracks: guest companion lifecycle, signing/provisioning, physical-device lifecycle, visual/accessibility regression, real fault injection, mTLS fleet transport, SQLite event storage, exact-tuple upgrade certification, CI dependency lifecycle, and operator runbooks.
+- Added a bounded guest package builder plus manifest, protocol-v3, backend allow-list, size, path, SHA-256, version activation, deployment, and rollback controls.
+- Added Keychain-identity mTLS enrollment with platform trust, server-certificate pins, explicit rotation/revocation, health probes, bounded submissions, and request correlation.
+- Added idempotent JSON-to-SQLite migration in WAL/FULL mode, ongoing dual writes, payload hashes, integrity checks, and backup checkpointing.
+- Updated checkout to v6/Node 24 and CodeQL Action to v4 at immutable commits, with a workflow-maintenance gate.
+- Added ten focused production-depth tests, six bundled incident runbooks, `vdlctl depth status`, schema migration 8, and version 0.12.0 packaging.
+
 ## 0.8.0
 
 - Added a fast, versioned companion contract and fail-closed host enforcement for backend 0.8, protocol v3, and credential-free VM exports.

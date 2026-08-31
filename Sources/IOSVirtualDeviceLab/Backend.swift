@@ -1057,6 +1057,90 @@ actor VPhoneBackend: LabBackend {
         )
     }
 
+    func deployGuestCompanion(
+        _ request: GuestCompanionDeploymentRequest,
+        on device: VirtualDevice
+    ) -> GuestCompanionDeploymentResult {
+        let handshake = guestProtocolHandshake(for: device)
+        guard handshake.status == .compatible,
+              handshake.negotiatedVersion == 3,
+              handshake.authenticated,
+              handshake.replayProtected,
+              handshake.capabilities.contains(.companionLifecycle) else {
+            return GuestCompanionDeploymentResult(
+                requestID: request.id, deviceName: device.name, succeeded: false,
+                installedVersion: nil,
+                message: "Companion deployment requires authenticated protocol v3 and the companion_lifecycle capability."
+            )
+        }
+        let payload = URL(fileURLWithPath: request.payloadPath)
+        guard FileManager.default.fileExists(atPath: payload.path),
+              (try? fileSHA256(payload))?.caseInsensitiveCompare(request.payloadSHA256) == .orderedSame else {
+            return GuestCompanionDeploymentResult(
+                requestID: request.id, deviceName: device.name, succeeded: false,
+                installedVersion: nil, message: "The pinned companion payload is missing or changed."
+            )
+        }
+        let response = sendControlJSON(to: device, payload: [
+            "t": "companion_install",
+            "request_id": request.id.uuidString,
+            "identifier": request.identifier,
+            "version": request.version,
+            "payload_path": request.payloadPath,
+            "payload_sha256": request.payloadSHA256,
+            "screen": false,
+        ])
+        let succeeded = response.json?["ok"] as? Bool == true
+        return GuestCompanionDeploymentResult(
+            requestID: request.id, deviceName: device.name, succeeded: succeeded,
+            installedVersion: succeeded ? (response.json?["installed_version"] as? String ?? request.version) : nil,
+            message: response.json?["message"] as? String
+                ?? response.json?["error"] as? String
+                ?? response.error
+                ?? "Guest companion deployment returned no result."
+        )
+    }
+
+    func injectFault(
+        _ scenario: FaultInjectionScenario,
+        on device: VirtualDevice
+    ) -> FaultInjectionResult {
+        let started = Date()
+        let handshake = guestProtocolHandshake(for: device)
+        let blockers = FaultInjectionGate.validate(scenario: scenario, handshake: handshake)
+        guard blockers.isEmpty else {
+            return FaultInjectionResult(
+                id: UUID(), scenarioID: scenario.id, deviceName: device.name,
+                startedAt: started, completedAt: .now, succeeded: false,
+                message: blockers.joined(separator: " ")
+            )
+        }
+        var payload: [String: Any] = [
+            "t": "fault_injection",
+            "request_id": scenario.id.uuidString,
+            "name": scenario.name,
+            "domain": scenario.domain.rawValue,
+            "duration_seconds": scenario.durationSeconds,
+            "offline": scenario.offline,
+            "screen": false,
+        ]
+        if let value = scenario.latencyMilliseconds { payload["latency_ms"] = value }
+        if let value = scenario.packetLossPercent { payload["packet_loss_percent"] = value }
+        if let value = scenario.proxyURL { payload["proxy_url"] = value }
+        if let value = scenario.audioFault { payload["audio_fault"] = value.rawValue }
+        if let value = scenario.audioRoute { payload["audio_route"] = value }
+        let response = sendControlJSON(to: device, payload: payload)
+        let succeeded = response.json?["ok"] as? Bool == true
+        return FaultInjectionResult(
+            id: UUID(), scenarioID: scenario.id, deviceName: device.name,
+            startedAt: started, completedAt: .now, succeeded: succeeded,
+            message: response.json?["message"] as? String
+                ?? response.json?["error"] as? String
+                ?? response.error
+                ?? "Fault injection returned no result."
+        )
+    }
+
     private func sendControl(to device: VirtualDevice, payload: [String: Any]) -> ControlResponse {
         let handshake = guestProtocolHandshake(for: device)
         guard isTrustedMutationHandshake(handshake) else {

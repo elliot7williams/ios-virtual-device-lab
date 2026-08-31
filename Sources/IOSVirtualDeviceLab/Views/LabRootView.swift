@@ -120,6 +120,8 @@ struct LabRootView: View {
             PlatformEngineeringView()
         case .qualificationAndScale:
             LabExpansionView()
+        case .productionDepth:
+            ProductionDepthView()
         case .productionReadiness:
             ProductionReadinessView()
         case .developerTools:

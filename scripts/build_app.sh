@@ -28,6 +28,8 @@ cp "$ROOT/Resources/hardware-profiles.json" "$CONTENTS/Resources/hardware-profil
 cp "$ROOT/Resources/host-compatibility.json" "$CONTENTS/Resources/host-compatibility.json"
 cp "$ROOT/Resources/backend-catalog.json" "$CONTENTS/Resources/backend-catalog.json"
 cp "$ROOT/Resources/third-party-catalog.json" "$CONTENTS/Resources/third-party-catalog.json"
+mkdir -p "$CONTENTS/Resources/Runbooks"
+cp "$ROOT"/docs/runbooks/*.md "$CONTENTS/Resources/Runbooks/"
 for localization in "$ROOT"/Resources/*.lproj; do
     [[ -d "$localization" ]] || continue
     cp -R "$localization" "$CONTENTS/Resources/"

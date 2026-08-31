@@ -15,10 +15,10 @@ jobs:
   analyze-swift:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: github/codeql-action/init@42947a340483f03ba47bb1a039b2c519aab3df85 # v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         with:
           languages: swift
       - name: Build analyzed targets
         run: swift build
-      - uses: github/codeql-action/analyze@42947a340483f03ba47bb1a039b2c519aab3df85 # v3
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4

@@ -19,13 +19,15 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>0.11.0</string>
+	<string>0.12.0</string>
     <key>CFBundleVersion</key>
-	<string>11</string>
+	<string>12</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>iOS Virtual Device Lab accesses the external volume selected for virtual machines, firmware, snapshots, test evidence, and lab state.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Built for local iOS virtualization research and testing.</string>
     <key>NSPrincipalClass</key>
