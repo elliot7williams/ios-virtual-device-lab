@@ -78,7 +78,7 @@
 | Production fleet transport | Keychain client identities, platform trust plus certificate pinning, enrollment rotation/revocation, probes, and correlated bounded submissions |
 | Scalable state | SQLite/WAL high-volume event store with full sync, payload hashes, idempotent JSON migration, integrity checks, and checkpointed backup |
 | Upgrade certification | Exact host/macOS/backend/companion/adapter/schema certificates linked to passed campaigns and approved evidence seals |
-| Dependency lifecycle | Immutable GitHub Action revisions, checkout v6/Node 24, CodeQL v4, and a CI-enforced maintenance audit |
+| Dependency lifecycle | Immutable GitHub Action revisions, checkout v6/Node 24, upload-artifact v7/Node 24, CodeQL v4, and a CI-enforced maintenance audit |
 | Operator drills | Bundled recovery, credential, compromised-host, evidence, failed-update, and device-loss runbooks with non-destructive prerequisite drills |
 
 ## Next engineering milestones

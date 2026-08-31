@@ -8,7 +8,7 @@
 - Added a bounded guest package builder plus manifest, protocol-v3, backend allow-list, size, path, SHA-256, version activation, deployment, and rollback controls.
 - Added Keychain-identity mTLS enrollment with platform trust, server-certificate pins, explicit rotation/revocation, health probes, bounded submissions, and request correlation.
 - Added idempotent JSON-to-SQLite migration in WAL/FULL mode, ongoing dual writes, payload hashes, integrity checks, and backup checkpointing.
-- Updated checkout to v6/Node 24 and CodeQL Action to v4 at immutable commits, with a workflow-maintenance gate.
+- Updated checkout to v6/Node 24, upload-artifact to v7/Node 24, and CodeQL Action to v4 at immutable commits, with a workflow-maintenance gate.
 - Added ten focused production-depth tests, six bundled incident runbooks, `vdlctl depth status`, schema migration 8, and version 0.12.0 packaging.
 
 ## 0.8.0

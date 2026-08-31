@@ -1416,6 +1416,9 @@ enum CIMaintenanceAuditor {
                 if token.hasPrefix("github/codeql-action/") && !comment.contains("# v4") {
                     deprecated.append(location + " requires CodeQL Action v4")
                 }
+                if token.hasPrefix("actions/upload-artifact@") && !comment.contains("# v7") {
+                    deprecated.append(location + " requires upload-artifact v7/Node 24")
+                }
             }
         }
         let passed = !files.isEmpty && unpinned.isEmpty && deprecated.isEmpty

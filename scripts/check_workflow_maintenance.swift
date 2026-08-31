@@ -43,6 +43,9 @@ for file in files.sorted(by: { $0.path < $1.path }) {
         if token.hasPrefix("github/codeql-action/"), !comment.contains("# v4") {
             issues.append("\(location): CodeQL Action must document v4")
         }
+        if token.hasPrefix("actions/upload-artifact@"), !comment.contains("# v7") {
+            issues.append("\(location): upload-artifact must document v7 (Node 24)")
+        }
     }
 }
 

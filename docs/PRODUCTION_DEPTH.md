@@ -12,7 +12,7 @@ Version 0.12 turns the architecture promises into bounded, fail-closed operator 
 6. Fleet enrollment requires credential-free HTTPS, a Keychain client identity, and SHA-256 server-certificate pins. The transport presents the client certificate, verifies platform trust plus the pin, bounds payloads, and correlates request IDs.
 7. High-volume activities, test runs, and leases migrate idempotently to SQLite in WAL mode with full sync, payload hashes, transactions, integrity checks, and continued JSON compatibility.
 8. Runtime upgrades require an unexpired certificate for the exact host, macOS, backend, guest companion, adapter, and schema tuple. Certificates derive from passed campaigns and approved evidence seals.
-9. CI rejects mutable action references and enforces checkout v6/Node 24 plus CodeQL Action v4. Every action remains pinned to a full commit SHA.
+9. CI rejects mutable action references and enforces checkout v6/Node 24, upload-artifact v7/Node 24, and CodeQL Action v4. Every action remains pinned to a full commit SHA.
 10. Six bundled runbooks cover lab recovery, credential rotation, compromised hosts, evidence revocation, failed updates, and lost devices. In-app drills validate prerequisites and documentation without performing destructive operations.
 
 ## Honest boundaries
