@@ -42,8 +42,10 @@ jobs:
           test -f "$app/Contents/Resources/sbom.cdx.json"
           test -f "$app/Contents/Resources/build-provenance.json"
           test -f "$app/Contents/Resources/en.lproj/Localizable.strings"
+          test "$(find "$app/Contents/Resources/Runbooks" -type f -name '*.md' | wc -l | tr -d ' ')" = 6
           test -x "$app/Contents/MacOS/vdlctl"
           "$app/Contents/MacOS/vdlctl" version
+          "$app/Contents/MacOS/vdlctl" depth status --json
           "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
           test -f .build/vdl-dry-run/junit.xml
           queue='.build/agent-smoke/Queue'
