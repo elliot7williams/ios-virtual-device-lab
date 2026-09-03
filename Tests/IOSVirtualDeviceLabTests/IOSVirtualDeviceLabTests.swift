@@ -1915,6 +1915,220 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         }
     }
 
+    func testV1SupportContractMustPinIOSProfileAndWorkflows() {
+        XCTAssertFalse(SupportContractValidator.evaluate(.draft).allSatisfy(\.passed))
+        var contract = V1SupportContract.draft
+        contract.supportedIOSVersions = ["15", "15"]
+        contract.hardwareProfileIDs = ["iphone-x"]
+        let candidate = SupportContractValidator.candidate(contract)
+        XCTAssertEqual(candidate.status, .candidate)
+        XCTAssertEqual(candidate.supportedIOSVersions, ["15"])
+        XCTAssertTrue(SupportContractValidator.evaluate(candidate).allSatisfy(\.passed))
+    }
+
+    func testGuestCompanionSourceAuditorRequiresConcreteModulesAndContract() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("guest-audit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = root.appendingPathComponent("sources/vphone-cli/VPhoneHostControl.swift")
+        let guest = root.appendingPathComponent("scripts/vphoned/vphoned.m")
+        try FileManager.default.createDirectory(at: host.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: guest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("// fixture".utf8).write(to: root.appendingPathComponent("Package.swift"))
+        let all = GuestCompanionSourceAuditor.requiredCapabilities.map { "\"\($0)\"" }.joined(separator: " ")
+        let guestOperations = ["deterministic_reset", "accessibility_tree", "fault_injection", "fault_clear", "fault_status"]
+            .map { "\"\($0)\"" }.joined(separator: " ")
+        try Data(all.utf8).write(to: host)
+        try Data(guestOperations.utf8).write(to: guest)
+        try Data("vp_handle_reset_command reset_app_data reset_permissions reset_keychain reset_network".utf8)
+            .write(to: root.appendingPathComponent("scripts/vphoned/vphoned_reset.m"))
+        try Data("accessibility_root".utf8)
+            .write(to: root.appendingPathComponent("scripts/vphoned/vphoned_accessibility.m"))
+        try Data("vp_handle_fault_command fault_clear fault_status".utf8)
+            .write(to: root.appendingPathComponent("scripts/vphoned/vphoned_faults.m"))
+        let contract = try JSONSerialization.data(withJSONObject: ["guestCapabilities": GuestCompanionSourceAuditor.requiredCapabilities])
+        try contract.write(to: root.appendingPathComponent("sources/vdl-backend-contract.json"))
+        for arguments in [
+            ["-C", root.path, "init"],
+            ["-C", root.path, "add", "."],
+            ["-C", root.path, "-c", "user.name=VDL Test", "-c", "user.email=vdl@example.invalid", "commit", "-m", "fixture"],
+        ] {
+            let result = ProcessExecutor.run(executable: URL(fileURLWithPath: "/usr/bin/git"), arguments: arguments)
+            XCTAssertTrue(result.succeeded, result.output)
+        }
+        let report = GuestCompanionSourceAuditor.inspect(repositoryRoot: root)
+        XCTAssertTrue(report.passed, report.checks.filter { !$0.passed }.map(\.id).joined(separator: ", "))
+        XCTAssertEqual(report.sourceRevision?.count, 40)
+    }
+
+    func testUIAutomationEvidenceImporterRejectsMissingIdentifiersAndPinsValidReport() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ui-evidence-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        func writeReport(identifiers: [String], name: String) throws -> URL {
+            let checks = identifiers.map { UIAutomationEvidenceCheck(id: "identifier:\($0)", passed: true, evidence: "observed") }
+            let report = UIAutomationEvidence(
+                schemaVersion: 1, id: UUID(), generatedAt: .now, appPath: "/Applications/VDL.app",
+                appVersion: "1.0.0", sourceRevision: String(repeating: "a", count: 40), harnessVersion: "1.0.0",
+                checks: checks, observedIdentifiers: identifiers, passed: true, reportSHA256: nil
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let url = root.appendingPathComponent(name)
+            try encoder.encode(report).write(to: url)
+            return url
+        }
+        XCTAssertThrowsError(try UIAutomationEvidenceImporter.load(writeReport(
+            identifiers: Array(UIAutomationEvidenceImporter.requiredIdentifiers.dropLast()), name: "incomplete.json"
+        )))
+        let imported = try UIAutomationEvidenceImporter.load(writeReport(
+            identifiers: UIAutomationEvidenceImporter.requiredIdentifiers, name: "valid.json"
+        ))
+        XCTAssertTrue(imported.passed)
+        XCTAssertEqual(imported.reportSHA256?.count, 64)
+    }
+
+    func testFaultRecoveryReceiptRequiresClearStatusAndEmptyFaultList() async {
+        let backend = MockLabBackend()
+        let receipt = await backend.recoverFaults(scenarioID: UUID(), on: expansionDevice())
+        XCTAssertTrue(receipt.recovered)
+        XCTAssertTrue(receipt.remainingFaults.isEmpty)
+        XCTAssertTrue(receipt.completedAt >= receipt.requestedAt)
+    }
+
+    func testFleetRBACRequiresPinsSeparationAndLeastPrivilege() {
+        let pinA = String(repeating: "a", count: 64)
+        let pinB = String(repeating: "b", count: 64)
+        let policy = FleetAccessPolicy(
+            schemaVersion: 1,
+            principals: [
+                FleetPrincipal(id: UUID(), subject: "operator", role: .operatorRole, certificateSHA256: pinA, enabled: true),
+                FleetPrincipal(id: UUID(), subject: "administrator", role: .administrator, certificateSHA256: pinB, enabled: true),
+            ],
+            requirePinnedClientCertificate: true, requireDistinctOperatorAndAdministrator: true, updatedAt: .now
+        )
+        XCTAssertTrue(FleetAuthorizationEvaluator.evaluate(policy).allSatisfy(\.passed))
+        XCTAssertTrue(FleetAuthorizationEvaluator.authorize(subject: "operator", certificateSHA256: pinA, permission: .submitJob, policy: policy))
+        XCTAssertFalse(FleetAuthorizationEvaluator.authorize(subject: "operator", certificateSHA256: pinA, permission: .rotateCredentials, policy: policy))
+    }
+
+    func testFleetQualificationRequiresTwoHostsAndEveryTransportControl() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fleet-evidence-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let exercise = FleetQualificationExercise(
+            schemaVersion: 1, id: UUID(), startedAt: Date(timeIntervalSince1970: 10), completedAt: Date(timeIntervalSince1970: 20),
+            controllerHostID: "mac-a", agentHostIDs: ["mac-b"], mutualTLSVerified: true,
+            heartbeatVerified: true, leaseExpiryVerified: true, cancellationVerified: true,
+            dispatchAuditVerified: true, requestCorrelationVerified: true, passed: true, reportSHA256: nil
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let url = root.appendingPathComponent("exercise.json")
+        try encoder.encode(exercise).write(to: url)
+        let imported = try FleetQualificationImporter.load(url)
+        XCTAssertTrue(imported.passed)
+        XCTAssertEqual(imported.reportSHA256?.count, 64)
+    }
+
+    func testReliabilityCampaignRequiresSoakAndRecoveredInterruptions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("reliability-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let results = ReliabilityScenarioKind.allCases.map {
+            ReliabilityScenarioResult(
+                id: UUID(), scenario: $0, startedAt: Date(timeIntervalSince1970: 10),
+                completedAt: Date(timeIntervalSince1970: 20), passed: true, recoveryVerified: true,
+                evidence: "fixture recovered"
+            )
+        }
+        let campaign = ReliabilityCampaignEvidence(
+            schemaVersion: 1, id: UUID(), hostFingerprint: "host-a", backendID: BackendDescriptor.vphone.id,
+            backendVersion: "0.8.0", startedAt: Date(timeIntervalSince1970: 10),
+            completedAt: Date(timeIntervalSince1970: 86_500), soakHours: 24,
+            scenarios: results, passed: true, reportSHA256: nil
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let url = root.appendingPathComponent("campaign.json")
+        try encoder.encode(campaign).write(to: url)
+        XCTAssertTrue(try ReliabilityCampaignManager.loadEvidence(url).passed)
+    }
+
+    func testCoverageRatchetAdvancesOnlyWithCoverageAndRealUIEvidence() throws {
+        let coverage = SourceCoverageRecord(
+            id: UUID(), importedAt: .now, sourceRevision: nil, producer: "llvm-cov", sourcePath: "/tmp/report.json",
+            sourceSHA256: String(repeating: "c", count: 64), linePercent: 80, functionPercent: 80, regionPercent: 80
+        )
+        let checks = (0..<8).map { UIAutomationEvidenceCheck(id: "check-\($0)", passed: true, evidence: "pass") }
+        let ui = UIAutomationEvidence(
+            schemaVersion: 1, id: UUID(), generatedAt: .now, appPath: "/Applications/VDL.app", appVersion: "1.0.0",
+            sourceRevision: nil, harnessVersion: "1.0.0", checks: checks,
+            observedIdentifiers: UIAutomationEvidenceImporter.requiredIdentifiers, passed: true, reportSHA256: String(repeating: "d", count: 64)
+        )
+        XCTAssertThrowsError(try CoverageRatchet.advance(.standard, coverage: nil, uiEvidence: ui))
+        let advanced = try CoverageRatchet.advance(.standard, coverage: coverage, uiEvidence: ui)
+        XCTAssertEqual(advanced.currentOverallFloor, 30)
+        XCTAssertEqual(advanced.nextOverallFloor, 35)
+    }
+
+    func testReleaseCompletionEvaluatorNeverAuthorizesMissingRealEvidence() {
+        let report = ReleaseCompletionEvaluator.evaluate(
+            state: .empty,
+            context: ReleaseCompletionContext(
+                liveGuestCapabilities: [], acceptance: .empty, qualificationMatrix: [],
+                successfulFaultScenarioIDs: [], coverage: nil,
+                publicBeta: .empty, stagedUpdate: nil, secondVolumeRestoreRecorded: false
+            )
+        )
+        XCTAssertEqual(report.gates.count, 10)
+        XCTAssertFalse(report.releaseAuthorized)
+        XCTAssertTrue(report.gates.allSatisfy { !$0.passed })
+    }
+
+    func testUITestRootIsConfinedToTemporaryDirectory() {
+        let temporary = URL(fileURLWithPath: "/tmp/vdl-tests", isDirectory: true)
+        XCTAssertEqual(
+            LabPaths.uiTestRoot(
+                arguments: ["app", "--vdl-ui-test-root", "/tmp/vdl-tests/run-1"],
+                temporaryDirectory: temporary
+            )?.path,
+            "/tmp/vdl-tests/run-1"
+        )
+        XCTAssertNil(
+            LabPaths.uiTestRoot(
+                arguments: ["app", "--vdl-ui-test-root", "/Volumes/external"],
+                temporaryDirectory: temporary
+            )
+        )
+        XCTAssertNil(
+            LabPaths.uiTestRoot(
+                arguments: ["app", "--vdl-ui-test-root", "/tmp/vdl-tests/../escape"],
+                temporaryDirectory: temporary
+            )
+        )
+    }
+
+    func testReleaseCompletionStatePersistsAndCriticalActionsAreAccessible() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("completion-state-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try FileManager.default.createDirectory(at: paths.stateRoot, withIntermediateDirectories: true)
+        var state = ReleaseCompletionState.empty
+        state.supportContract.hardwareProfileIDs = ["iphone-x"]
+        try ReleaseCompletionStore.save(state, paths: paths)
+        XCTAssertEqual(ReleaseCompletionStore.load(paths: paths).supportContract.hardwareProfileIDs, ["iphone-x"])
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/ReleaseCompletionView.swift"), encoding: .utf8
+        )
+        for identifier in [
+            "completion.contract.save", "completion.companion.audit", "completion.ui.import",
+            "completion.fault.clear", "completion.fleet.policy", "completion.evaluate",
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)\")"), identifier)
+        }
+    }
+
     private func makeCompanionPackage(root: URL, version: String, payload: Data) throws -> URL {
         let package = root.appendingPathComponent("companion-\(version)", isDirectory: true)
         try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)

@@ -43,6 +43,7 @@ A native macOS SwiftUI laboratory for virtual iOS research and cross-version app
 - A Platform Engineering workspace with a backend-adapter SDK and conformance suite, deterministic reset plans, build/signing/symbol identities, sanitized failure replay bundles, flakiness/regression analysis, multi-Mac placement, correlated run timelines, a formal threat/secrets inventory, deterministic fuzz and coverage gates, and staged beta feedback operations.
 - A Qualification & Scale workspace with evidence-derived maturity, approved real-VM compatibility publication, checksum-pinned executable adapters, authenticated guest automation, validated replay execution, UUID-verified symbolication, fleet leases/heartbeats, monotonic timelines, machine-readable coverage import, and capability-aware virtual/physical routing.
 - A Production Depth workspace with build/install/upgrade/rollback for hash-pinned guest companions, signing/provisioning inspection, exclusive physical-device leases, visual/accessibility regression, typed network/audio faults, pinned mTLS fleet enrollment, SQLite/WAL event storage, exact-tuple upgrade certification, immutable CI action checks, and bundled recovery drills.
+- A fail-closed v1 Completion workspace covering the support contract, concrete guest companion, real-VM acceptance and version matrix, live macOS UI automation, verified fault cleanup, an mTLS/RBAC fleet coordinator, reliability campaigns, a coverage ratchet, and signed release exit evidence.
 
 ## Requirements
 
@@ -78,6 +79,9 @@ swift run vdlctl adapter check --manifest adapter-manifest.json
 swift run vdlctl platform status --json
 swift run vdlctl expansion status --json
 swift run vdlctl depth status --json
+swift run vdlctl completion status
+swift run vdl-ui-smoke --help
+swift run vdl-fleetd --help
 swift run vdlctl targets list --json
 ```
 
@@ -92,7 +96,7 @@ To regenerate the macOS `.icns` bundle from the checked-in 1024 px master:
 To create a versioned ZIP and checksum:
 
 ```sh
-./scripts/release_app.sh 0.12.0
+./scripts/release_app.sh 0.13.0
 ```
 
 Developer ID signing and notarization are supported through `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE`; see [Release engineering](docs/RELEASES.md).
@@ -119,6 +123,6 @@ To keep multi-gigabyte firmware and VM disks off the internal system volume, `~/
 - VM creation uses the backend’s native authentication dialog rather than storing a sudo password.
 - The manager never weakens SIP/AMFI itself.
 
-See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), [Production depth](docs/PRODUCTION_DEPTH.md), [Platform engineering](docs/PLATFORM_ENGINEERING.md), [Qualification and scale](docs/QUALIFICATION_AND_SCALE.md), [Operational readiness](docs/OPERATIONAL_READINESS.md), [Continuity and beta](docs/CONTINUITY_AND_BETA.md), [Production readiness v2](docs/PRODUCTION_READINESS_V2.md), [Production readiness v3](docs/PRODUCTION_READINESS_V3.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
+See [Architecture](docs/ARCHITECTURE.md), [Backend API](docs/BACKEND_API.md), [v1 completion](docs/V1_COMPLETION.md), [Production depth](docs/PRODUCTION_DEPTH.md), [Platform engineering](docs/PLATFORM_ENGINEERING.md), [Qualification and scale](docs/QUALIFICATION_AND_SCALE.md), [Operational readiness](docs/OPERATIONAL_READINESS.md), [Continuity and beta](docs/CONTINUITY_AND_BETA.md), [Production readiness v2](docs/PRODUCTION_READINESS_V2.md), [Production readiness v3](docs/PRODUCTION_READINESS_V3.md), and [Roadmap](docs/ROADMAP.md) for design boundaries and the older-iOS research track.
 
 Also read [Compatibility](docs/COMPATIBILITY.md), [Multi-backend and attribution](docs/MULTI_BACKEND_AND_ATTRIBUTION.md), [Limitations](docs/LIMITATIONS.md), [Remote agent](docs/REMOTE_AGENT.md), and [Plugin development](docs/PLUGINS.md). An entry marked `researching` or `unverified` is never a support claim.

@@ -15,6 +15,7 @@ enum LabSection: String, CaseIterable, Identifiable {
     case platformEngineering = "Platform Engineering"
     case qualificationAndScale = "Qualification & Scale"
     case productionDepth = "Production Depth"
+    case releaseCompletion = "v1 Completion"
     case productionReadiness = "Production Readiness"
     case developerTools = "Developer Tools"
     case plugins = "Plugins"
@@ -38,6 +39,7 @@ enum LabSection: String, CaseIterable, Identifiable {
         case .platformEngineering: "wrench.and.screwdriver.fill"
         case .qualificationAndScale: "point.3.connected.trianglepath.dotted"
         case .productionDepth: "building.2.crop.circle"
+        case .releaseCompletion: "flag.checkered.2.crossed"
         case .productionReadiness: "shield.lefthalf.filled.badge.checkmark"
         case .developerTools: "hammer"
         case .plugins: "puzzlepiece.extension"
@@ -816,7 +818,8 @@ struct LabPaths: Sendable {
 
     static var `default`: LabPaths {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let root = home.appendingPathComponent(".vphone", isDirectory: true)
+        let root = uiTestRoot(arguments: ProcessInfo.processInfo.arguments)
+            ?? home.appendingPathComponent(".vphone", isDirectory: true)
         return LabPaths(
             dataRoot: root,
             libraryRoot: root.appendingPathComponent("VMs", isDirectory: true),
@@ -824,6 +827,20 @@ struct LabPaths: Sendable {
             snapshotsRoot: root.appendingPathComponent("Snapshots", isDirectory: true),
             stateRoot: root.appendingPathComponent("VirtualDeviceLab", isDirectory: true)
         )
+    }
+
+    static func uiTestRoot(
+        arguments: [String],
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory
+    ) -> URL? {
+        guard let option = arguments.firstIndex(of: "--vdl-ui-test-root"),
+              arguments.indices.contains(option + 1) else { return nil }
+        let candidate = URL(fileURLWithPath: arguments[option + 1], isDirectory: true)
+            .standardizedFileURL
+        let temporaryRoot = temporaryDirectory.standardizedFileURL
+        guard candidate.path.hasPrefix(temporaryRoot.path + "/"),
+              candidate.pathComponents.count > temporaryRoot.pathComponents.count else { return nil }
+        return candidate
     }
 
     func createDirectories() throws {

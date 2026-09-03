@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
+
+- Added the v1 Completion workspace and report, with ten fail-closed gates spanning support scope, guest/runtime conformance, real VM and compatibility evidence, desktop UI automation, fault recovery, fleet operation, reliability, coverage, and release exit.
+- Added a real macOS Accessibility smoke runner that launches the packaged app, navigates critical workspaces, verifies stable identifiers, and emits checksum-pinned importable JSON evidence.
+- Added an mTLS fleet coordinator with Keychain server identity, platform trust, exact client-certificate pins, viewer/operator/administrator authorization, bounded HTTP requests, durable job/cancel state, and JSONL audit records.
+- Added explicit fault clear/status receipts, reliability and two-Mac evidence importers, a monotonic coverage ratchet, schema migration 9, `vdlctl completion status`, and ten focused completion tests (105 total).
+- Implemented the companion source/runtime path for deterministic app resets, application-root accessibility, checksum-pinned daemon lifecycle, and bounded network-offline fault inject/clear/status. Real-guest and physical multi-Mac qualification remain evidence gates.
 
 ## 0.12.0
 

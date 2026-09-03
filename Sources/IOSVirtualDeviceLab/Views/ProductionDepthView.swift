@@ -19,12 +19,12 @@ struct ProductionDepthView: View {
     @State private var maskY = 0
     @State private var maskWidth = 0
     @State private var maskHeight = 0
-    @State private var faultName = "Network degradation"
+    @State private var faultName = "Network offline"
     @State private var faultDomain: FaultInjectionDomain = .network
     @State private var faultDuration = 30
-    @State private var faultLatency = 250
-    @State private var faultLoss = 5.0
-    @State private var faultOffline = false
+    @State private var faultLatency = 0
+    @State private var faultLoss = 0.0
+    @State private var faultOffline = true
     @State private var faultProxy = ""
     @State private var audioFault: AudioFaultKind = .interruption
     @State private var audioRoute = "speaker"
@@ -36,7 +36,7 @@ struct ProductionDepthView: View {
 
     var body: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 16) {
                 header
                 companionLifecycle
                 signingProvisioning
@@ -243,6 +243,9 @@ struct ProductionDepthView: View {
                     Button("Inject") { Task { await model.injectFaultScenario(faultScenario) } }
                         .disabled(model.isBusy("fault-injection"))
                         .accessibilityIdentifier("depth.fault.inject")
+                    Button("Clear & Verify") { Task { await model.recoverLatestFaults() } }
+                        .disabled(model.isBusy("fault-recovery"))
+                        .accessibilityIdentifier("depth.fault.clear")
                 }
                 if faultDomain == .network {
                     HStack {
@@ -264,6 +267,14 @@ struct ProductionDepthView: View {
                 } else {
                     Text("Execution requires authenticated protocol v3 and an explicit fault_injection guest capability; policy alone is not reported as a pass.")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+                if let receipt = model.releaseCompletion.faultRecoveries.first {
+                    gateRow(
+                        receipt.recovered, "Latest cleanup",
+                        receipt.recovered
+                            ? "Guest status confirms that no active faults remain."
+                            : "\(receipt.message) Remaining: \(receipt.remainingFaults.joined(separator: ", "))."
+                    )
                 }
             }.padding(.top, 6)
         }

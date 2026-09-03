@@ -63,3 +63,9 @@ The **Production Readiness** workspace exposes the same health, rotation/revocat
 - Use a dedicated macOS account and a physically controlled Apple-silicon host.
 
 The queue authenticates job integrity and origin to holders of an active shared key. It does not provide multi-user authorization, non-repudiation, network transport security, mid-execution preemption, or isolation between mutually untrusted teams.
+
+## Optional fleet coordinator
+
+Version 0.13 packages `vdl-fleetd` for deployments that require a real network listener and distinct subjects. It requires a Keychain server identity, mutual TLS with normal platform trust, an exact certificate SHA-256 for each enabled subject, and viewer/operator/administrator authorization. Its endpoints are `GET /v1/health`, `POST /v1/jobs`, and `POST /v1/jobs/<uuid>/cancel`; request bodies are capped at 1 MiB and authorization decisions are audited.
+
+Copy and edit `docs/examples/fleet-server-policy.json`, replace every placeholder path and fingerprint, then run `vdl-fleetd --policy <file>`. This server does not manufacture the required two-Mac release evidence: heartbeats, lease expiry, cancellation, dispatch audit, and request correlation must be exercised across physically distinct enrolled hosts and imported through **v1 Completion**.

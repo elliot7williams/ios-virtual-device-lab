@@ -84,6 +84,10 @@ protocol LabBackend: Sendable {
         _ scenario: FaultInjectionScenario,
         on device: VirtualDevice
     ) async -> FaultInjectionResult
+    func recoverFaults(
+        scenarioID: UUID?,
+        on device: VirtualDevice
+    ) async -> FaultRecoveryReceipt
     func createDiagnosticBundle(
         for device: VirtualDevice,
         activityLog: String
@@ -338,6 +342,15 @@ actor MockLabBackend: LabBackend {
             id: UUID(), scenarioID: scenario.id, deviceName: device.name,
             startedAt: .now, completedAt: .now, succeeded: true,
             message: "Mock fault injection completed."
+        )
+    }
+
+    func recoverFaults(scenarioID: UUID?, on device: VirtualDevice) -> FaultRecoveryReceipt {
+        FaultRecoveryReceipt(
+            id: UUID(), scenarioID: scenarioID, deviceName: device.name,
+            requestedAt: .now, completedAt: .now,
+            clearAcknowledged: true, statusVerified: true, remainingFaults: [],
+            message: "Mock guest acknowledged fault cleanup and reported no active faults."
         )
     }
 

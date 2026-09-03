@@ -10,6 +10,8 @@ let package = Package(
     products: [
         .executable(name: "IOSVirtualDeviceLab", targets: ["IOSVirtualDeviceLab"]),
         .executable(name: "vdlctl", targets: ["VDLCLI"]),
+        .executable(name: "vdl-ui-smoke", targets: ["VDLUISmoke"]),
+        .executable(name: "vdl-fleetd", targets: ["VDLFleetCoordinator"]),
     ],
     targets: [
         .executableTarget(
@@ -24,6 +26,14 @@ let package = Package(
         .executableTarget(
             name: "VDLCLI",
             path: "Sources/VDLCLI"
+        ),
+        .executableTarget(
+            name: "VDLUISmoke",
+            path: "Sources/VDLUISmoke"
+        ),
+        .executableTarget(
+            name: "VDLFleetCoordinator",
+            path: "Sources/VDLFleetCoordinator"
         ),
     ]
 )

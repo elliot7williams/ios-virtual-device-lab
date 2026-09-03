@@ -22,7 +22,7 @@ jobs:
           swift scripts/check_workflow_maintenance.swift .
           swift test --enable-code-coverage
           coverage_report="$(swift test --show-codecov-path)"
-          swift scripts/check_coverage.swift "$coverage_report" 25 65 60
+          swift scripts/check_coverage.swift "$coverage_report" 25 65 60 85
           cp "$coverage_report" .build/coverage.json
 
       - name: Build signed app bundle
@@ -38,14 +38,20 @@ jobs:
           test -f "$app/Contents/Resources/host-compatibility.json"
           test -f "$app/Contents/Resources/backend-catalog.json"
           test -f "$app/Contents/Resources/third-party-catalog.json"
+          test -f "$app/Contents/Resources/fleet-server-policy.example.json"
           test -f "$app/Contents/Resources/supply-chain-manifest.json"
           test -f "$app/Contents/Resources/sbom.cdx.json"
           test -f "$app/Contents/Resources/build-provenance.json"
           test -f "$app/Contents/Resources/en.lproj/Localizable.strings"
           test "$(find "$app/Contents/Resources/Runbooks" -type f -name '*.md' | wc -l | tr -d ' ')" = 6
           test -x "$app/Contents/MacOS/vdlctl"
+          test -x "$app/Contents/MacOS/vdl-ui-smoke"
+          test -x "$app/Contents/MacOS/vdl-fleetd"
           "$app/Contents/MacOS/vdlctl" version
           "$app/Contents/MacOS/vdlctl" depth status --json
+          "$app/Contents/MacOS/vdlctl" completion status --json
+          "$app/Contents/MacOS/vdl-ui-smoke" --help
+          "$app/Contents/MacOS/vdl-fleetd" --help
           "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
           test -f .build/vdl-dry-run/junit.xml
           queue='.build/agent-smoke/Queue'

@@ -80,18 +80,19 @@
 | Upgrade certification | Exact host/macOS/backend/companion/adapter/schema certificates linked to passed campaigns and approved evidence seals |
 | Dependency lifecycle | Immutable GitHub Action revisions, checkout v6/Node 24, upload-artifact v7/Node 24, CodeQL v4, and a CI-enforced maintenance audit |
 | Operator drills | Bundled recovery, credential, compromised-host, evidence, failed-update, and device-loss runbooks with non-destructive prerequisite drills |
+| v1 completion control | Versioned support contract, concrete companion audit, real-acceptance/matrix aggregation, macOS UI harness, fault receipts, mTLS/RBAC fleet server, reliability evidence, coverage ratchet, and signed release exit report |
 
 ## Next engineering milestones
 
 1. Complete and publish the first real baseline acceptance result after the required host restart and supported IPSW import.
 2. Validate guest diagnostic export against the companion vphone host-control build on a running guest.
 3. Run the ordered iOS 15 → 14 → 13 → 12 research matrix and update evidence only from reproducible results.
-4. Implement `deterministic_reset`, `accessibility_tree`, `companion_lifecycle`, and `fault_injection` in the vphone companion guest; the typed host API and trust gates are implemented, but a real guest has not advertised them yet.
+4. Qualify the implemented `deterministic_reset`, application-root `accessibility_tree`, `companion_lifecycle`, and network-offline `fault_injection` companion operations on a running guest; source/runtime integration exists, but real-guest evidence is still required.
 5. Populate Apple Developer credentials and update-signing keys, then publish the first Developer ID signed and notarized release.
-6. Qualify full application UI automation and replay execution after a stable real-VM fixture exists.
+6. Run the packaged macOS UI harness and qualify full guest element-level automation/replay after a stable real-VM fixture exists; the current guest provider exposes application-root fidelity only.
 7. Research audio interruption/background-media and proxy/capture extensions without presenting unsupported simulation as available.
 8. Exercise disaster-recovery staging on a second APFS volume and document operator recovery time.
-9. Exercise fleet heartbeats, expiring leases, dispatch audit, authenticated queue, and the pinned mTLS transport across two enrolled Macs.
+9. Deploy the packaged mTLS/RBAC fleet coordinator and exercise heartbeats, expiring leases, cancellation, dispatch audit, and request correlation across two enrolled Macs.
 10. Prototype a QEMU adapter only after choosing a pinned research implementation, completing component-level licensing review, and recording a reproducible iOS boot experiment.
 
 ## Older-iOS compatibility research

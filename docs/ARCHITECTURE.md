@@ -101,6 +101,12 @@ Evidence recertification, capacity recommendations, hostile-input fixtures, rete
 
 Visual and accessibility regressions produce explicit artifacts and structured changes. `FaultInjectionGate` refuses unauthenticated or undeclared guest behavior. `MTLSFleetTransport` uses a Keychain identity, platform server trust, and configured certificate pins. `ScalableEventStore` dual-writes selected high-volume records to SQLite/WAL while JSON remains a migration-compatible control-plane source. Runtime certificates apply only to an exact tested tuple; CI and read-only runbook drills expose lifecycle and recovery prerequisites without bypassing approval gates.
 
+### v1 completion boundary
+
+`ReleaseCompletionState` aggregates the ten release gates without becoming a second source of truth. It consumes acceptance, approved qualification rows, guest negotiation, coverage, beta verification, staged updates, and recovery evidence from their owning services. Evidence importers bound file size, reject symlinks, validate every required control, and pin the imported bytes with SHA-256. A candidate support contract cannot authorize release until it is explicitly approved and all ten derived gates pass.
+
+The packaged `vdl-ui-smoke` executable performs real macOS Accessibility navigation. `vdl-fleetd` is a separate mTLS process whose Keychain identity and certificate-pinned RBAC policy remain outside SwiftUI. The desktop stores only public identities, pins, receipts, and evidence metadata.
+
 ## Replaceable backend
 
 Future backend implementations should conform to the same conceptual surface:

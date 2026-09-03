@@ -1141,6 +1141,54 @@ actor VPhoneBackend: LabBackend {
         )
     }
 
+    func recoverFaults(
+        scenarioID: UUID?,
+        on device: VirtualDevice
+    ) -> FaultRecoveryReceipt {
+        let requestedAt = Date()
+        let handshake = guestProtocolHandshake(for: device)
+        let trusted = handshake.status == .compatible
+            && handshake.negotiatedVersion == 3
+            && handshake.authenticated
+            && handshake.replayProtected
+            && handshake.capabilities.contains(.faultInjection)
+        guard trusted else {
+            return FaultRecoveryReceipt(
+                id: UUID(), scenarioID: scenarioID, deviceName: device.name,
+                requestedAt: requestedAt, completedAt: .now,
+                clearAcknowledged: false, statusVerified: false, remainingFaults: [],
+                message: "Fault cleanup requires authenticated, replay-protected guest protocol v3 and fault_injection capability."
+            )
+        }
+        var clearPayload: [String: Any] = [
+            "t": "fault_clear", "request_id": UUID().uuidString, "screen": false,
+        ]
+        if let scenarioID { clearPayload["scenario_id"] = scenarioID.uuidString }
+        let clear = sendControlJSON(to: device, payload: clearPayload)
+        let clearAcknowledged = clear.json?["ok"] as? Bool == true
+        let status = sendControlJSON(to: device, payload: [
+            "t": "fault_status", "request_id": UUID().uuidString, "screen": false,
+        ])
+        let statusVerified = status.json?["ok"] as? Bool == true
+        let remaining = status.json?["active_faults"] as? [String] ?? []
+        let recovered = clearAcknowledged && statusVerified && remaining.isEmpty
+        let message = recovered
+            ? "Guest acknowledged fault cleanup and verified that no active faults remain."
+            : clear.json?["message"] as? String
+                ?? clear.json?["error"] as? String
+                ?? status.json?["message"] as? String
+                ?? status.json?["error"] as? String
+                ?? clear.error
+                ?? status.error
+                ?? "Fault cleanup could not be verified."
+        return FaultRecoveryReceipt(
+            id: UUID(), scenarioID: scenarioID, deviceName: device.name,
+            requestedAt: requestedAt, completedAt: .now,
+            clearAcknowledged: clearAcknowledged, statusVerified: statusVerified,
+            remainingFaults: remaining, message: message
+        )
+    }
+
     private func sendControl(to device: VirtualDevice, payload: [String: Any]) -> ControlResponse {
         let handshake = guestProtocolHandshake(for: device)
         guard isTrustedMutationHandshake(handshake) else {

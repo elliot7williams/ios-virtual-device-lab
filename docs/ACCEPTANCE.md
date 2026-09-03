@@ -13,3 +13,5 @@ An environment-blocked report is useful evidence but is not a pass. Host Recover
 The **Lab Operations** dashboard expands this into explicit host, firmware identity, boot/control, networking, audio, deployment, snapshot/restore, diagnostics, and sustained-stability gates. Every gate remains pending or blocked until its required evidence exists.
 
 A new backend cannot be promoted from `plannedAdapter` or `researchOnly` to selectable until its exact implementation is pinned, licensing obligations are reviewed, host readiness is implemented, capability claims have evidence, and at least one firmware-specific acceptance run passes. A commercial reference platform is never eligible for promotion without a separately authorized integration.
+
+The baseline result feeds gate 3 of the [v1 completion contract](V1_COMPLETION.md). It does not by itself approve an iOS support range: every declared major version also needs an exact approved qualification row, and the remaining desktop, recovery, fleet, reliability, coverage, signing, accessibility, privacy, legal, and restore gates must pass independently.

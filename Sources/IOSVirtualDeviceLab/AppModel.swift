@@ -20,6 +20,7 @@ private struct LocalBootstrapState: Sendable {
     let platformEngineering: PlatformEngineeringState
     let labExpansion: LabExpansionState
     let productionDepth: ProductionDepthState
+    let releaseCompletion: ReleaseCompletionState
 
     static func load(paths: LabPaths, safeMode: Bool = false) throws -> LocalBootstrapState {
         if !safeMode { try PluginRegistry.prepare(paths: paths) }
@@ -48,7 +49,8 @@ private struct LocalBootstrapState: Sendable {
             hardening: hardening,
             platformEngineering: PlatformEngineeringStore.load(paths: paths),
             labExpansion: LabExpansionStore.load(paths: paths),
-            productionDepth: ProductionDepthStore.load(paths: paths)
+            productionDepth: ProductionDepthStore.load(paths: paths),
+            releaseCompletion: ReleaseCompletionStore.load(paths: paths)
         )
     }
 }
@@ -134,6 +136,7 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var platformEngineering: PlatformEngineeringState = .empty
     @Published private(set) var labExpansion: LabExpansionState = .empty
     @Published private(set) var productionDepth: ProductionDepthState = .empty
+    @Published private(set) var releaseCompletion: ReleaseCompletionState = .empty
     @Published private(set) var availableSigningIdentities: [CodeSigningIdentityRecord] = []
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
@@ -207,6 +210,7 @@ final class LabAppModel: ObservableObject {
             platformEngineering = localState.platformEngineering
             labExpansion = localState.labExpansion
             productionDepth = localState.productionDepth
+            releaseCompletion = localState.releaseCompletion
             do {
                 let store = try ScalableEventStore(
                     url: paths.stateRoot.appendingPathComponent("lab-events.sqlite3")
@@ -607,6 +611,7 @@ final class LabAppModel: ObservableObject {
         )
         labExpansion.maturity = CapabilityMaturityEvaluator.evaluate(evidence)
         persistLabExpansion()
+        refreshReleaseCompletionAssessment()
     }
 
     func publishApprovedCompatibility(to url: URL) {
@@ -1299,6 +1304,176 @@ final class LabAppModel: ObservableObject {
         persistProductionDepth()
         appendLog(succeeded ? .success : .warning, scope: "companion", message)
         persistLogs()
+    }
+
+    // MARK: - v1 release completion
+
+    func updateSupportContract(_ contract: V1SupportContract) {
+        releaseCompletion.supportContract = SupportContractValidator.candidate(contract)
+        refreshReleaseCompletionAssessment()
+        appendLog(
+            releaseCompletion.supportContract.status == .candidate ? .success : .warning,
+            scope: "release-completion",
+            "Support contract saved as \(releaseCompletion.supportContract.status.rawValue)."
+        )
+        persistLogs()
+    }
+
+    func approveSupportContract(reviewer: String) {
+        let name = reviewer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            alertMessage = "A named reviewer is required to approve the v1 support contract."
+            return
+        }
+        refreshReleaseCompletionAssessment()
+        guard releaseCompletion.supportContract.status == .candidate,
+              releaseCompletion.report.gates.allSatisfy(\.passed) else {
+            alertMessage = "The support contract can be approved only after all ten completion gates pass."
+            return
+        }
+        releaseCompletion.supportContract.status = .approved
+        releaseCompletion.supportContract.approvedBy = name
+        releaseCompletion.supportContract.approvedAt = .now
+        releaseCompletion.supportContract.updatedAt = .now
+        refreshReleaseCompletionAssessment()
+        appendLog(.success, scope: "release-completion", "Approved the v1 support contract after all evidence gates passed.")
+        persistLogs()
+    }
+
+    func auditGuestCompanionSource(repositoryRoot: URL) async {
+        busyKeys.insert("completion-companion-audit")
+        let report = await Task.detached(priority: .userInitiated) {
+            GuestCompanionSourceAuditor.inspect(repositoryRoot: repositoryRoot)
+        }.value
+        releaseCompletion.companionSource = report
+        busyKeys.remove("completion-companion-audit")
+        refreshReleaseCompletionAssessment()
+        appendLog(report.passed ? .success : .warning, scope: "release-completion", report.message)
+        persistLogs()
+    }
+
+    func importUIAutomationEvidence(_ url: URL) {
+        do {
+            let report = try UIAutomationEvidenceImporter.load(url)
+            releaseCompletion.uiAutomation.removeAll { $0.id == report.id }
+            releaseCompletion.uiAutomation.insert(report, at: 0)
+            releaseCompletion.uiAutomation = Array(releaseCompletion.uiAutomation.prefix(100))
+            refreshReleaseCompletionAssessment()
+            appendLog(.success, scope: "release-completion", "Imported verified desktop UI automation evidence.")
+            persistLogs()
+        } catch { present(error, context: "Importing UI automation evidence") }
+    }
+
+    func recoverLatestFaults() async {
+        guard let device = selectedDevice, device.isRunning else {
+            alertMessage = "Select and start a virtual device before clearing guest faults."
+            return
+        }
+        let scenarioID = productionDepth.faultResults.first(where: { $0.succeeded })?.scenarioID
+        busyKeys.insert("fault-recovery")
+        let receipt = await backend.recoverFaults(scenarioID: scenarioID, on: device)
+        busyKeys.remove("fault-recovery")
+        releaseCompletion.faultRecoveries.insert(receipt, at: 0)
+        releaseCompletion.faultRecoveries = Array(releaseCompletion.faultRecoveries.prefix(1_000))
+        refreshReleaseCompletionAssessment()
+        appendLog(receipt.recovered ? .success : .error, scope: "fault-recovery", receipt.message)
+        persistLogs()
+    }
+
+    func updateFleetAccessPolicy(_ policy: FleetAccessPolicy) {
+        var bounded = policy
+        bounded.principals = Array(policy.principals.prefix(100))
+        bounded.updatedAt = .now
+        releaseCompletion.fleetAccessPolicy = bounded
+        refreshReleaseCompletionAssessment()
+    }
+
+    func importFleetQualificationExercise(_ url: URL) {
+        do {
+            let exercise = try FleetQualificationImporter.load(url)
+            releaseCompletion.fleetExercises.removeAll { $0.id == exercise.id }
+            releaseCompletion.fleetExercises.insert(exercise, at: 0)
+            releaseCompletion.fleetExercises = Array(releaseCompletion.fleetExercises.prefix(100))
+            refreshReleaseCompletionAssessment()
+            appendLog(.success, scope: "release-completion", "Imported passing two-host fleet qualification evidence.")
+            persistLogs()
+        } catch { present(error, context: "Importing fleet qualification evidence") }
+    }
+
+    func exportReliabilityCampaignPlan(to url: URL) {
+        do {
+            try ReliabilityCampaignManager.exportPlan(to: url)
+            appendLog(.success, scope: "release-completion", "Exported the v1 reliability campaign plan.")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Exporting reliability campaign plan") }
+    }
+
+    func importReliabilityCampaign(_ url: URL) {
+        do {
+            let report = try ReliabilityCampaignManager.loadEvidence(url)
+            releaseCompletion.reliabilityCampaigns.removeAll { $0.id == report.id }
+            releaseCompletion.reliabilityCampaigns.insert(report, at: 0)
+            releaseCompletion.reliabilityCampaigns = Array(releaseCompletion.reliabilityCampaigns.prefix(100))
+            refreshReleaseCompletionAssessment()
+            appendLog(.success, scope: "release-completion", "Imported passing reliability and recovery evidence.")
+            persistLogs()
+        } catch { present(error, context: "Importing reliability campaign evidence") }
+    }
+
+    func advanceCoverageRatchet() {
+        do {
+            releaseCompletion.coverageRatchet = try CoverageRatchet.advance(
+                releaseCompletion.coverageRatchet,
+                coverage: labExpansion.coverageReports.sorted { $0.importedAt > $1.importedAt }.first,
+                uiEvidence: releaseCompletion.uiAutomation.first
+            )
+            refreshReleaseCompletionAssessment()
+            appendLog(.success, scope: "release-completion", "Advanced the measured source-coverage floor.")
+            persistLogs()
+        } catch { present(error, context: "Advancing the coverage ratchet") }
+    }
+
+    func exportReleaseCompletionReport(to url: URL) {
+        do {
+            refreshReleaseCompletionAssessment()
+            try HardeningJSON.save(releaseCompletion.report, to: url)
+            appendLog(.success, scope: "release-completion", "Exported the v1 release completion report.")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Exporting release completion report") }
+    }
+
+    func refreshReleaseCompletionAssessment() {
+        let acceptanceHandshake = acceptanceReport.deviceName.flatMap { guestProtocolHandshakes[$0] }
+        let liveCapabilities: Set<GuestCapability> = {
+            guard let handshake = acceptanceHandshake,
+                  handshake.status == .compatible,
+                  handshake.authenticated,
+                  handshake.replayProtected else { return [] }
+            return handshake.capabilities
+        }()
+        releaseCompletion.report = ReleaseCompletionEvaluator.evaluate(
+            state: releaseCompletion,
+            context: ReleaseCompletionContext(
+                liveGuestCapabilities: liveCapabilities,
+                acceptance: acceptanceReport,
+                qualificationMatrix: labExpansion.qualificationMatrix,
+                successfulFaultScenarioIDs: Set(
+                    productionDepth.faultResults.filter(\.succeeded).map(\.scenarioID)
+                ),
+                coverage: labExpansion.coverageReports.sorted { $0.importedAt > $1.importedAt }.first,
+                publicBeta: publicBetaReadiness,
+                stagedUpdate: stagedUpdate,
+                secondVolumeRestoreRecorded: betaVerification.secondVolumeRestoreRecorded
+            )
+        )
+        persistReleaseCompletion()
+    }
+
+    private func persistReleaseCompletion() {
+        do { try ReleaseCompletionStore.save(releaseCompletion, paths: paths) }
+        catch { present(error, context: "Saving v1 release completion state") }
     }
 
     private func persistProductionDepth() {

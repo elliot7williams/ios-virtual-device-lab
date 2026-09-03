@@ -19,6 +19,9 @@ struct LabRootView: View {
                         Label(section.rawValue, systemImage: section.systemImage)
                             .tag(section)
                             .accessibilityIdentifier("lab.section.\(section.rawValue.lowercased().replacingOccurrences(of: " ", with: "-"))")
+                            .accessibilityAction(.default) {
+                                model.selectedSection = section
+                            }
                     }
                 }
 
@@ -122,6 +125,8 @@ struct LabRootView: View {
             LabExpansionView()
         case .productionDepth:
             ProductionDepthView()
+        case .releaseCompletion:
+            ReleaseCompletionView()
         case .productionReadiness:
             ProductionReadinessView()
         case .developerTools:

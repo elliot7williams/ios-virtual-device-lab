@@ -31,7 +31,7 @@ struct AdapterConformanceReport: Codable, Hashable, Sendable {
 
 enum BackendAdapterConformance {
     static let protocolVersion = 3
-    static let labVersion = "0.12.0"
+    static let labVersion = "0.13.0"
     static let capabilities = Set([
         "lifecycle", "pause", "screenshots", "automation", "guestLogs", "networking",
         "audio", "performanceMetrics", "crashExport", "xcodeDeployment", "snapshotRestore",

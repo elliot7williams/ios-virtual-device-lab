@@ -21,7 +21,11 @@ The host-control socket and per-VM key are owner-only (`0600`). Protocol v3 requ
 
 Guest companion packages are copied only after safe-path, non-symlink, size, backend, protocol range, semantic version, and SHA-256 checks. Rollback re-verifies the installed payload. Fault injection and companion deployment require authenticated, replay-protected protocol v3 plus separate advertised capabilities; a stored policy is never treated as execution evidence.
 
+Deterministic reset rejects system bundle identifiers. App-data deletion resolves and confines the target to the selected user application's data container; permission and keychain resets use prepared, application-scoped database operations. The implemented network-offline fault records original guest interface flags and restores them on explicit clear, timeout, or companion update. Unsupported fault types fail closed.
+
 Network fleet transport uses credential-free HTTPS URLs, Keychain-resident client identities, normal platform server trust, and an explicit SHA-256 leaf-certificate pin. Persisted state contains identity labels and public fingerprints only. Replacing an enrollment revokes its predecessor, explicit revocation removes the active configuration, and the client bounds request and response bodies to 1 MiB.
+
+The optional `vdl-fleetd` coordinator also requires mutual TLS. Its server identity stays in Keychain; each enabled subject is bound to a unique pinned client certificate and viewer/operator/administrator role. Requests are capped at 1 MiB, job paths are server-generated UUIDs under a dedicated owner-only root, and every authorization result is appended to an owner-only JSONL audit.
 
 The SQLite event store uses owner-only files, WAL journaling, full synchronous writes, transactions, payload hashes, bounded queries, and `integrity_check`. Full-lab backup checkpoints WAL first; pre-migration backup also includes any outstanding WAL. Compatibility certificates fail closed unless an unexpired certificate matches the exact runtime tuple and derives from a passed qualification with an approved evidence seal.
 

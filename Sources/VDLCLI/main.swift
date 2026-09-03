@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-private let cliVersion = "0.12.0"
+private let cliVersion = "0.13.0"
 
 enum CLIFileLock {
     static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
@@ -1564,6 +1564,71 @@ enum CLIProductionDepthInspector {
     }
 }
 
+struct CLIReleaseCompletionStatus: Codable {
+    let schemaVersion: Int?
+    let stateFile: String
+    let supportContractStatus: String?
+    let passedGates: Int
+    let totalGates: Int
+    let releaseAuthorized: Bool
+    let companionSourcePassed: Bool
+    let uiReports: Int
+    let recoveredFaults: Int
+    let fleetExercises: Int
+    let reliabilityCampaigns: Int
+    let currentCoverageFloor: Double?
+    let releaseCoverageTarget: Double?
+    let summary: String
+}
+
+enum CLIReleaseCompletionInspector {
+    static func inspect() throws -> CLIReleaseCompletionStatus {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".vphone/VirtualDeviceLab/release-completion.json")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return CLIReleaseCompletionStatus(
+                schemaVersion: nil, stateFile: url.path, supportContractStatus: nil,
+                passedGates: 0, totalGates: 0, releaseAuthorized: false,
+                companionSourcePassed: false, uiReports: 0, recoveredFaults: 0,
+                fleetExercises: 0, reliabilityCampaigns: 0,
+                currentCoverageFloor: nil, releaseCoverageTarget: nil,
+                summary: "The v1 completion state has not been initialized."
+            )
+        }
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size > 0, size <= 32 * 1_024 * 1_024,
+              let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+            throw CLIError.message("v1 completion state is not a JSON object")
+        }
+        let contract = root["supportContract"] as? [String: Any] ?? [:]
+        let companion = root["companionSource"] as? [String: Any] ?? [:]
+        let report = root["report"] as? [String: Any] ?? [:]
+        let gates = report["gates"] as? [[String: Any]] ?? []
+        let ratchet = root["coverageRatchet"] as? [String: Any] ?? [:]
+        func records(_ key: String) -> [[String: Any]] { root[key] as? [[String: Any]] ?? [] }
+        return CLIReleaseCompletionStatus(
+            schemaVersion: root["schemaVersion"] as? Int, stateFile: url.path,
+            supportContractStatus: contract["status"] as? String,
+            passedGates: gates.filter { $0["state"] as? String == "passed" }.count,
+            totalGates: gates.count,
+            releaseAuthorized: report["releaseAuthorized"] as? Bool ?? false,
+            companionSourcePassed: companion["passed"] as? Bool ?? false,
+            uiReports: records("uiAutomation").count,
+            recoveredFaults: records("faultRecoveries").filter {
+                $0["clearAcknowledged"] as? Bool == true
+                    && $0["statusVerified"] as? Bool == true
+                    && (($0["remainingFaults"] as? [Any])?.isEmpty == true)
+            }.count,
+            fleetExercises: records("fleetExercises").filter { $0["passed"] as? Bool == true }.count,
+            reliabilityCampaigns: records("reliabilityCampaigns").filter { $0["passed"] as? Bool == true }.count,
+            currentCoverageFloor: ratchet["currentOverallFloor"] as? Double,
+            releaseCoverageTarget: ratchet["releaseOverallTarget"] as? Double,
+            summary: report["summary"] as? String ?? "The v1 completion report has not been evaluated."
+        )
+    }
+}
+
 struct CLIExecutionTarget: Codable {
     let id: String
     let kind: String
@@ -1737,6 +1802,7 @@ func usage() {
       vdlctl platform status [--json]
       vdlctl expansion status [--json]
       vdlctl depth status [--json]
+      vdlctl completion status [--json]
       vdlctl targets list [--json]
       vdlctl targets route [--capability <name> ...] [--ios-major <n>] [--prefer-physical] [--json]
       vdlctl agent-init [--queue <directory>] [--token-file <path>]
@@ -1883,6 +1949,20 @@ enum VDLCLI {
                     print("Visual \(status.passingVisualRegressions) passing • faults \(status.successfulFaultInjections) successful • mTLS probes \(status.authenticatedMTLSProbes)")
                     print("SQLite \(status.sqliteIntegrityPassed ? "PASS" : "NOT READY") (\(status.sqliteEventRows) events) • upgrade \(status.upgradeAllowed ? "ALLOWED" : "HOLD")")
                     print("CI lifecycle \(status.ciMaintenancePassed ? "PASS" : "NOT AUDITED") • runbook drills \(status.passingRunbookDrills) passing")
+                }
+            case "completion":
+                guard arguments.indices.contains(1), arguments[1] == "status" else {
+                    throw CLIError.message("Use `vdlctl completion status [--json]`")
+                }
+                let status = try CLIReleaseCompletionInspector.inspect()
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(status), as: UTF8.self))
+                } else {
+                    print("v1 completion schema: \(status.schemaVersion.map(String.init) ?? "not initialized")")
+                    print("Support contract: \(status.supportContractStatus ?? "missing") • gates \(status.passedGates)/\(status.totalGates) • release \(status.releaseAuthorized ? "AUTHORIZED" : "HOLD")")
+                    print("Companion \(status.companionSourcePassed ? "PASS" : "INCOMPLETE") • UI reports \(status.uiReports) • recovered faults \(status.recoveredFaults)")
+                    print("Fleet exercises \(status.fleetExercises) • reliability campaigns \(status.reliabilityCampaigns) • coverage floor \(status.currentCoverageFloor.map { String(format: "%.1f%%", $0) } ?? "unset") / target \(status.releaseCoverageTarget.map { String(format: "%.1f%%", $0) } ?? "unset")")
+                    print(status.summary)
                 }
             case "targets":
                 guard arguments.indices.contains(1), ["list", "route"].contains(arguments[1]) else {
