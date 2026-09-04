@@ -39,6 +39,10 @@ jobs:
           test -f "$app/Contents/Resources/backend-catalog.json"
           test -f "$app/Contents/Resources/third-party-catalog.json"
           test -f "$app/Contents/Resources/fleet-server-policy.example.json"
+          test -f "$app/Contents/Resources/fleet-worker-evidence.example.json"
+          test -f "$app/Contents/Resources/fleet-worker.example.json"
+          test -f "$app/Contents/Resources/supply-chain-policy.json"
+          test -f "$app/Contents/Resources/supply-chain-evidence.example.json"
           test -f "$app/Contents/Resources/supply-chain-manifest.json"
           test -f "$app/Contents/Resources/sbom.cdx.json"
           test -f "$app/Contents/Resources/build-provenance.json"
@@ -47,11 +51,16 @@ jobs:
           test -x "$app/Contents/MacOS/vdlctl"
           test -x "$app/Contents/MacOS/vdl-ui-smoke"
           test -x "$app/Contents/MacOS/vdl-fleetd"
+          test -x "$app/Contents/MacOS/vdl-fleetworker"
           "$app/Contents/MacOS/vdlctl" version
           "$app/Contents/MacOS/vdlctl" depth status --json
           "$app/Contents/MacOS/vdlctl" completion status --json
+          "$app/Contents/MacOS/vdlctl" operations status --json
           "$app/Contents/MacOS/vdl-ui-smoke" --help
           "$app/Contents/MacOS/vdl-fleetd" --help
+          "$app/Contents/MacOS/vdl-fleetd" --protocol-json > .build/fleet-protocol.json
+          swift scripts/check_fleet_protocol.swift .build/fleet-protocol.json
+          "$app/Contents/MacOS/vdl-fleetworker" --help
           "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
           test -f .build/vdl-dry-run/junit.xml
           queue='.build/agent-smoke/Queue'

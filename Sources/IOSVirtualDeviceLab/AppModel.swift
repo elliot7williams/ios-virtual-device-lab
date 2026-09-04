@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 import SwiftUI
 
 private struct LocalBootstrapState: Sendable {
@@ -21,6 +22,7 @@ private struct LocalBootstrapState: Sendable {
     let labExpansion: LabExpansionState
     let productionDepth: ProductionDepthState
     let releaseCompletion: ReleaseCompletionState
+    let operationsHardening: OperationsHardeningState
 
     static func load(paths: LabPaths, safeMode: Bool = false) throws -> LocalBootstrapState {
         if !safeMode { try PluginRegistry.prepare(paths: paths) }
@@ -50,7 +52,8 @@ private struct LocalBootstrapState: Sendable {
             platformEngineering: PlatformEngineeringStore.load(paths: paths),
             labExpansion: LabExpansionStore.load(paths: paths),
             productionDepth: ProductionDepthStore.load(paths: paths),
-            releaseCompletion: ReleaseCompletionStore.load(paths: paths)
+            releaseCompletion: ReleaseCompletionStore.load(paths: paths),
+            operationsHardening: OperationsHardeningStore.load(paths: paths)
         )
     }
 }
@@ -137,6 +140,8 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var labExpansion: LabExpansionState = .empty
     @Published private(set) var productionDepth: ProductionDepthState = .empty
     @Published private(set) var releaseCompletion: ReleaseCompletionState = .empty
+    @Published private(set) var operationsHardening: OperationsHardeningState = .empty
+    @Published private(set) var macOSInstallations: [MacOSInstallation] = []
     @Published private(set) var availableSigningIdentities: [CodeSigningIdentityRecord] = []
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
@@ -211,6 +216,7 @@ final class LabAppModel: ObservableObject {
             labExpansion = localState.labExpansion
             productionDepth = localState.productionDepth
             releaseCompletion = localState.releaseCompletion
+            operationsHardening = localState.operationsHardening
             do {
                 let store = try ScalableEventStore(
                     url: paths.stateRoot.appendingPathComponent("lab-events.sqlite3")
@@ -247,6 +253,7 @@ final class LabAppModel: ObservableObject {
                     binary: readiness.binaryPath.map { URL(fileURLWithPath: $0) }
                 )
                 setupAssistantReport = SetupAssistant.inspect(paths: paths, host: readiness)
+                await refreshOperationsHardening()
                 appendLog(.warning, scope: "lifecycle", "Safe mode skipped VM, firmware, plugin, agent, and updater discovery")
             } else {
                 await refreshAll()
@@ -276,6 +283,7 @@ final class LabAppModel: ObservableObject {
         normalizeSelection()
         busyKeys.remove("refresh")
         await refreshOperationalReadiness()
+        await refreshOperationsHardening()
 
         switch readiness.state {
         case .ready:
@@ -1304,6 +1312,271 @@ final class LabAppModel: ObservableObject {
         persistProductionDepth()
         appendLog(succeeded ? .success : .warning, scope: "companion", message)
         persistLogs()
+    }
+
+    // MARK: - v1.1 operations and hardening
+
+    func refreshOperationsHardening() async {
+        busyKeys.insert("operations-inspection")
+        let labPaths = paths
+        let setup = operationsHardening.hostSetup
+        let fleetEnabled = remoteAgentConfiguration?.enabled == true || !releaseCompletion.fleetAccessPolicy.principals.isEmpty
+        let journal = operationJournalEntries
+        let pendingUpdate = stagedUpdate
+        let fleetLeases = labExpansion.fleetLeases
+        let physicalLeases = productionDepth.physicalLeases
+        let faultResults = productionDepth.faultResults
+        let faultRecoveries = releaseCompletion.faultRecoveries
+        let lifecyclePolicy = operationsHardening.lifecyclePolicy
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? BackendAdapterConformance.labVersion
+        let backendVersion = backendDescriptor.version
+        let backendExecutable = readiness.binaryPath.map { URL(fileURLWithPath: $0) }
+        let guestIdentity = productionDepth.companions.first(where: \.active).map {
+            "\($0.version):\($0.payloadSHA256)"
+        }
+        let inspection = await Task.detached(priority: .userInitiated) {
+            let bootID = HostSetupCoordinator.bootSessionID()
+            return (
+                setup: HostSetupCoordinator.reconcile(setup, currentBootSessionID: bootID),
+                permissions: PermissionOnboardingInspector.inspect(paths: labPaths, fleetEnabled: fleetEnabled),
+                encryption: StorageEncryptionInspector.inspect(path: labPaths.dataRoot),
+                reconciliation: StartupReconciler.inspect(
+                    paths: labPaths, journal: journal, stagedUpdate: pendingUpdate,
+                    fleetLeases: fleetLeases, physicalLeases: physicalLeases,
+                    faultResults: faultResults, faultRecoveries: faultRecoveries
+                ),
+                lifecycle: SupportLifecycleEvaluator.evaluate(lifecyclePolicy),
+                dependencies: EvidenceInvalidationEngine.capture(
+                    paths: labPaths, appVersion: appVersion,
+                    backendVersion: backendVersion, backendExecutable: backendExecutable,
+                    guestIdentity: guestIdentity
+                )
+            )
+        }.value
+        operationsHardening.hostSetup = inspection.setup
+        operationsHardening.permissions = inspection.permissions
+        operationsHardening.storageEncryption = inspection.encryption
+        operationsHardening.reconciliation = inspection.reconciliation
+        operationsHardening.lifecycleAssessment = inspection.lifecycle
+        let current = inspection.dependencies
+        operationsHardening.evidenceCurrent = current
+        if let baseline = operationsHardening.evidenceBaseline,
+           let invalidation = EvidenceInvalidationEngine.compare(baseline, current),
+           !operationsHardening.evidenceInvalidations.contains(where: {
+               !$0.resolved && Set($0.changedRoots) == Set(invalidation.changedRoots)
+           }) {
+            operationsHardening.evidenceInvalidations.insert(invalidation, at: 0)
+        }
+        operationsHardening.evidenceInvalidations = Array(operationsHardening.evidenceInvalidations.prefix(500))
+        operationsHardening.report = OperationsHardeningEvaluator.evaluate(operationsHardening)
+        persistOperationsHardening()
+        busyKeys.remove("operations-inspection")
+    }
+
+    func discoverHostInstallations() async {
+        busyKeys.insert("operations-host-discovery")
+        macOSInstallations = await Task.detached(priority: .userInitiated) {
+            HostSetupCoordinator.discoverInstallations()
+        }.value
+        busyKeys.remove("operations-host-discovery")
+        if macOSInstallations.isEmpty {
+            alertMessage = "No APFS macOS System volumes were discovered. You can still use `diskutil apfs list` to identify the intended installation."
+        }
+    }
+
+    func beginHostSetup(for installation: MacOSInstallation) {
+        operationsHardening.hostSetup = HostSetupCoordinator.begin(for: installation)
+        evaluateAndPersistOperations(message: "Prepared a volume-specific Recovery continuation record.")
+    }
+
+    func acknowledgeRecoveryStep() {
+        operationsHardening.hostSetup = HostSetupCoordinator.markRecoveryApplied(operationsHardening.hostSetup)
+        evaluateAndPersistOperations(message: "Recorded the Recovery step; restart is now required.")
+    }
+
+    func verifyHostSetup() {
+        operationsHardening.hostSetup = HostSetupCoordinator.verify(
+            operationsHardening.hostSetup, hostReady: readiness.isReady
+        )
+        evaluateAndPersistOperations(message: operationsHardening.hostSetup.note)
+    }
+
+    func openPermissionSettings(_ check: PermissionCheck) {
+        guard let value = check.settingsURL, let url = URL(string: value) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func importFleetWorkerEvidence(_ url: URL) {
+        do {
+            operationsHardening.fleetProtocol = try decodeOperationsEvidence(FleetWorkerProtocolEvidence.self, from: url)
+            let issues = FleetWorkerProtocolEvaluator.validate(operationsHardening.fleetProtocol)
+            evaluateAndPersistOperations(
+                message: issues.isEmpty ? "Imported complete fleet worker qualification." : issues.joined(separator: " ")
+            )
+        } catch { present(error, context: "Importing fleet worker evidence") }
+    }
+
+    func verifyFleetAudit(ledger: URL, certificate: URL) {
+        do {
+            let certificateData = try Data(contentsOf: certificate)
+            guard let reference = SecCertificateCreateWithData(nil, certificateData as CFData) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            operationsHardening.fleetAudit = try FleetAuditVerifier.verify(url: ledger, certificate: reference)
+            evaluateAndPersistOperations(message: operationsHardening.fleetAudit.passed
+                ? "Verified the signed fleet audit chain."
+                : operationsHardening.fleetAudit.issues.joined(separator: " "))
+        } catch { present(error, context: "Verifying the fleet audit ledger") }
+    }
+
+    func captureEvidenceDependencyBaseline() {
+        guard let current = operationsHardening.evidenceCurrent else {
+            alertMessage = "Run Inspect All before capturing the dependency baseline."
+            return
+        }
+        operationsHardening.evidenceBaseline = current
+        operationsHardening.evidenceInvalidations.removeAll()
+        evaluateAndPersistOperations(message: "Captured the current dependency graph as the evidence baseline.")
+    }
+
+    func acknowledgeEvidenceReplacement() {
+        operationsHardening.evidenceInvalidations = operationsHardening.evidenceInvalidations.map { record in
+            EvidenceInvalidationRecord(
+                id: record.id, detectedAt: record.detectedAt,
+                changedRoots: record.changedRoots, invalidatedEvidence: record.invalidatedEvidence,
+                acknowledgedAt: record.acknowledgedAt ?? .now
+            )
+        }
+        operationsHardening.evidenceBaseline = operationsHardening.evidenceCurrent
+        evaluateAndPersistOperations(message: "Marked invalidated evidence as replaced and advanced the dependency baseline.")
+    }
+
+    func repairSafeStartupFindings() {
+        operationsHardening.reconciliation = StartupReconciler.repairSafeFindings(
+            operationsHardening.reconciliation, paths: paths
+        )
+        evaluateAndPersistOperations(message: "Applied only startup repairs explicitly classified as safe.")
+    }
+
+    func stageComponentUpgrade(
+        sources: [(component: String, url: URL)],
+        managerVersion: String, backendVersion: String, guestVersion: String
+    ) {
+        do {
+            let currentGuest = productionDepth.companions.first(where: \.active)?.version ?? "unavailable"
+            let current = ComponentVersionSet(
+                manager: BackendAdapterConformance.labVersion,
+                backend: backendDescriptor.version ?? "unavailable", guestCompanion: currentGuest,
+                protocolVersion: BackendAdapterConformance.protocolVersion,
+                schemaVersion: LabMigrationManager.currentSchemaVersion
+            )
+            let target = ComponentVersionSet(
+                manager: managerVersion, backend: backendVersion, guestCompanion: guestVersion,
+                protocolVersion: BackendAdapterConformance.protocolVersion,
+                schemaVersion: LabMigrationManager.currentSchemaVersion
+            )
+            operationsHardening.componentUpgrade = try ComponentUpgradeCoordinator.stage(
+                sources: sources, from: current, to: target, paths: paths
+            )
+            evaluateAndPersistOperations(message: operationsHardening.componentUpgrade.message)
+        } catch { present(error, context: "Staging the atomic component upgrade") }
+    }
+
+    func approveComponentUpgrade() {
+        operationsHardening.componentUpgrade = ComponentUpgradeCoordinator.approve(operationsHardening.componentUpgrade)
+        evaluateAndPersistOperations(message: operationsHardening.componentUpgrade.message)
+    }
+
+    func commitComponentUpgrade() {
+        do {
+            operationsHardening.componentUpgrade = try ComponentUpgradeCoordinator.commit(
+                operationsHardening.componentUpgrade,
+                healthChecks: ["managerLaunch": true, "backendContract": readiness.isReady, "stateRead": true],
+                paths: paths
+            )
+            evaluateAndPersistOperations(message: operationsHardening.componentUpgrade.message)
+        } catch { present(error, context: "Committing the atomic component upgrade") }
+    }
+
+    func rollbackComponentUpgrade() {
+        do {
+            operationsHardening.componentUpgrade = try ComponentUpgradeCoordinator.rollback(
+                operationsHardening.componentUpgrade, paths: paths
+            )
+            evaluateAndPersistOperations(message: operationsHardening.componentUpgrade.message)
+        } catch { present(error, context: "Rolling back the component upgrade") }
+    }
+
+    func importSupplyChainPolicyEvidence(_ url: URL) {
+        do {
+            operationsHardening.supplyChainEvidence = try SupplyChainEvidenceImporter.load(
+                url, policy: operationsHardening.supplyChainPolicy
+            )
+            evaluateAndPersistOperations(message: operationsHardening.supplyChainEvidence.passed
+                ? "Supply-chain policy passed."
+                : operationsHardening.supplyChainEvidence.issues.joined(separator: " "))
+        } catch { present(error, context: "Importing supply-chain policy evidence") }
+    }
+
+    func updateLifecyclePolicy(_ policy: SupportLifecyclePolicy) {
+        var bounded = policy
+        bounded.entries = Array(policy.entries.prefix(1_000))
+        bounded.updatedAt = .now
+        operationsHardening.lifecyclePolicy = bounded
+        operationsHardening.lifecycleAssessment = SupportLifecycleEvaluator.evaluate(bounded)
+        evaluateAndPersistOperations(message: operationsHardening.lifecycleAssessment.passed
+            ? "Support lifecycle policy passed."
+            : operationsHardening.lifecycleAssessment.issues.joined(separator: " "))
+    }
+
+    func importLifecyclePolicy(_ url: URL) {
+        do {
+            let policy = try decodeOperationsEvidence(SupportLifecyclePolicy.self, from: url)
+            updateLifecyclePolicy(policy)
+        } catch { present(error, context: "Importing support lifecycle policy") }
+    }
+
+    func exportLifecyclePolicy(to url: URL) {
+        do {
+            try HardeningJSON.save(operationsHardening.lifecyclePolicy, to: url)
+            appendLog(.success, scope: "operations-hardening", "Exported support lifecycle policy.")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Exporting support lifecycle policy") }
+    }
+
+    func exportOperationsHardeningReport(to url: URL) {
+        do {
+            operationsHardening.report = OperationsHardeningEvaluator.evaluate(operationsHardening)
+            try HardeningJSON.save(operationsHardening.report, to: url)
+            appendLog(.success, scope: "operations-hardening", "Exported the v1.1 hardening report.")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Exporting the v1.1 hardening report") }
+    }
+
+    private func decodeOperationsEvidence<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size > 0, size <= 32 * 1_024 * 1_024 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(type, from: Data(contentsOf: url))
+    }
+
+    private func evaluateAndPersistOperations(message: String) {
+        operationsHardening.report = OperationsHardeningEvaluator.evaluate(operationsHardening)
+        persistOperationsHardening()
+        appendLog(operationsHardening.report.releaseReady ? .success : .warning, scope: "operations-hardening", message)
+        persistLogs()
+    }
+
+    private func persistOperationsHardening() {
+        do { try OperationsHardeningStore.save(operationsHardening, paths: paths) }
+        catch { present(error, context: "Saving v1.1 operations-hardening state") }
     }
 
     // MARK: - v1 release completion

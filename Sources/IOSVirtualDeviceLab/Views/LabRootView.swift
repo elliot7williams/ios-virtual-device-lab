@@ -127,6 +127,8 @@ struct LabRootView: View {
             ProductionDepthView()
         case .releaseCompletion:
             ReleaseCompletionView()
+        case .operationsHardening:
+            OperationsHardeningView()
         case .productionReadiness:
             ProductionReadinessView()
         case .developerTools:

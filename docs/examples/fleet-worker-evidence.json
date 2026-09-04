@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "1970-01-01T00:00:00Z",
+  "serverVersion": "1.1.0",
+  "controllerHostID": "replace-controller-host",
+  "workerHostIDs": [
+    "replace-worker-host"
+  ],
+  "capabilities": [
+    "enroll",
+    "heartbeat",
+    "submit",
+    "claim",
+    "progress",
+    "result",
+    "query",
+    "cancel"
+  ],
+  "mutuallyAuthenticated": false,
+  "idempotencyVerified": false,
+  "cancellationVerified": false,
+  "boundedPayloadsVerified": false,
+  "passed": false,
+  "sourceSHA256": null
+}

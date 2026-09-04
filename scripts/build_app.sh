@@ -23,6 +23,7 @@ cp "$BIN_DIR/IOSVirtualDeviceLab" "$CONTENTS/MacOS/IOSVirtualDeviceLab"
 cp "$BIN_DIR/vdlctl" "$CONTENTS/MacOS/vdlctl"
 cp "$BIN_DIR/vdl-ui-smoke" "$CONTENTS/MacOS/vdl-ui-smoke"
 cp "$BIN_DIR/vdl-fleetd" "$CONTENTS/MacOS/vdl-fleetd"
+cp "$BIN_DIR/vdl-fleetworker" "$CONTENTS/MacOS/vdl-fleetworker"
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 cp "$ROOT/Resources/compatibility-manifest.json" "$CONTENTS/Resources/compatibility-manifest.json"
@@ -30,7 +31,11 @@ cp "$ROOT/Resources/hardware-profiles.json" "$CONTENTS/Resources/hardware-profil
 cp "$ROOT/Resources/host-compatibility.json" "$CONTENTS/Resources/host-compatibility.json"
 cp "$ROOT/Resources/backend-catalog.json" "$CONTENTS/Resources/backend-catalog.json"
 cp "$ROOT/Resources/third-party-catalog.json" "$CONTENTS/Resources/third-party-catalog.json"
+cp "$ROOT/Resources/supply-chain-policy.json" "$CONTENTS/Resources/supply-chain-policy.json"
 cp "$ROOT/docs/examples/fleet-server-policy.json" "$CONTENTS/Resources/fleet-server-policy.example.json"
+cp "$ROOT/docs/examples/fleet-worker-evidence.json" "$CONTENTS/Resources/fleet-worker-evidence.example.json"
+cp "$ROOT/docs/examples/fleet-worker.json" "$CONTENTS/Resources/fleet-worker.example.json"
+cp "$ROOT/docs/examples/supply-chain-evidence.json" "$CONTENTS/Resources/supply-chain-evidence.example.json"
 mkdir -p "$CONTENTS/Resources/Runbooks"
 cp "$ROOT"/docs/runbooks/*.md "$CONTENTS/Resources/Runbooks/"
 for localization in "$ROOT"/Resources/*.lproj; do
@@ -51,6 +56,10 @@ fi
 PACKAGE_VERSION="$(plutil -extract CFBundleShortVersionString raw "$CONTENTS/Info.plist")"
 SOURCE_REVISION="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 swift "$ROOT/scripts/generate_supply_chain.swift" "$APP" "$PACKAGE_VERSION" "$SOURCE_REVISION"
+swift "$ROOT/scripts/check_supply_chain_policy.swift" \
+    "$CONTENTS/Resources/supply-chain-policy.json" \
+    "$CONTENTS/Resources/sbom.cdx.json" \
+    "$CONTENTS/Resources/build-provenance.json"
 
 echo "=== Signing app bundle ==="
 SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"

@@ -278,7 +278,7 @@ struct LabMigrationReport: Codable, Hashable, Sendable {
 }
 
 enum LabMigrationManager {
-    static let currentSchemaVersion = 9
+    static let currentSchemaVersion = 10
     private static let managedFiles = [
         "activity.json", "automation-workflows.json", "compatibility-manifest.json",
         "diagnostic-privacy.json", "environment-assignments.json", "environment-profiles.json",
@@ -292,7 +292,8 @@ enum LabMigrationManager {
         "operational-objective-policy.json", "beta-verification.json",
         "platform-engineering.json",
         "lab-expansion.json",
-        "production-depth.json", "release-completion.json",
+        "production-depth.json", "release-completion.json", "operations-hardening.json",
+        "active-component-set.json",
         "lab-events.sqlite3", "lab-events.sqlite3-wal",
     ]
 
@@ -329,8 +330,10 @@ enum LabMigrationManager {
                 summary = "Added capability maturity, real-VM qualification publication, runtime adapter hosting, authenticated guest automation, replay execution, crash symbolication, fleet leases, monotonic timelines, coverage import, and hybrid physical-device routing."
             case 8:
                 summary = "Added guest companion lifecycle, signing and provisioning management, physical-device leasing, visual regression, fault injection, mTLS fleet transport, SQLite event storage, upgrade certification, CI lifecycle enforcement, and operator runbook drills."
-            default:
+            case 9:
                 summary = "Added the v1 support contract, real companion conformance, UI automation evidence, verified fault cleanup, fleet RBAC and coordinator qualification, reliability campaigns, coverage ratcheting, and release exit gates."
+            default:
+                summary = "Added guided host continuation, permission onboarding, the complete fleet worker protocol, signed audit chains, transitive evidence invalidation, live-storage encryption, startup reconciliation, atomic component activation, supply-chain policy, and support lifecycle gates."
             }
             let record = LabMigrationRecord(
                 id: UUID(),

@@ -81,6 +81,7 @@
 | Dependency lifecycle | Immutable GitHub Action revisions, checkout v6/Node 24, upload-artifact v7/Node 24, CodeQL v4, and a CI-enforced maintenance audit |
 | Operator drills | Bundled recovery, credential, compromised-host, evidence, failed-update, and device-loss runbooks with non-destructive prerequisite drills |
 | v1 completion control | Versioned support contract, concrete companion audit, real-acceptance/matrix aggregation, macOS UI harness, fault receipts, mTLS/RBAC fleet server, reliability evidence, coverage ratchet, and signed release exit report |
+| v1.1 operations hardening | Restart-safe host setup, permission onboarding, complete fleet worker lifecycle, signed audit chain, transitive evidence invalidation, live-storage encryption, startup reconciliation, atomic component activation, supply-chain enforcement, and support lifecycle policy |
 
 ## Next engineering milestones
 
@@ -92,7 +93,7 @@
 6. Run the packaged macOS UI harness and qualify full guest element-level automation/replay after a stable real-VM fixture exists; the current guest provider exposes application-root fidelity only.
 7. Research audio interruption/background-media and proxy/capture extensions without presenting unsupported simulation as available.
 8. Exercise disaster-recovery staging on a second APFS volume and document operator recovery time.
-9. Deploy the packaged mTLS/RBAC fleet coordinator and exercise heartbeats, expiring leases, cancellation, dispatch audit, and request correlation across two enrolled Macs.
+9. Deploy the packaged mTLS/RBAC fleet coordinator and exercise all eight worker lifecycle operations plus signed audit verification across two enrolled Macs; import the resulting v1.1 evidence.
 10. Prototype a QEMU adapter only after choosing a pinned research implementation, completing component-level licensing review, and recording a reproducible iOS boot experiment.
 
 ## Older-iOS compatibility research

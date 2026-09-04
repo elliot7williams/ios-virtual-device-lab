@@ -19,15 +19,17 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>0.13.0</string>
+	<string>0.14.0</string>
     <key>CFBundleVersion</key>
-	<string>13</string>
+	<string>14</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSRemovableVolumesUsageDescription</key>
     <string>iOS Virtual Device Lab accesses the external volume selected for virtual machines, firmware, snapshots, test evidence, and lab state.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>iOS Virtual Device Lab uses the local network only when you enable multi-Mac fleet workers.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Built for local iOS virtualization research and testing.</string>
     <key>NSPrincipalClass</key>

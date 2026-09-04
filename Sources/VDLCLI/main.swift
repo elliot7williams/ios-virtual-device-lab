@@ -2,7 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 
-private let cliVersion = "0.13.0"
+private let cliVersion = "0.14.0"
 
 enum CLIFileLock {
     static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
@@ -1629,6 +1629,62 @@ enum CLIReleaseCompletionInspector {
     }
 }
 
+struct CLIOperationsGateStatus: Codable {
+    let kind: String
+    let state: String
+    let evidence: String
+    let requiredAction: String
+}
+
+struct CLIOperationsHardeningStatus: Codable {
+    let schemaVersion: Int?
+    let stateFile: String
+    let passedGates: Int
+    let totalGates: Int
+    let releaseReady: Bool
+    let gates: [CLIOperationsGateStatus]
+    let summary: String
+}
+
+enum CLIOperationsHardeningInspector {
+    static func inspect() throws -> CLIOperationsHardeningStatus {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".vphone/VirtualDeviceLab/operations-hardening.json")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return CLIOperationsHardeningStatus(
+                schemaVersion: nil, stateFile: url.path, passedGates: 0, totalGates: 10,
+                releaseReady: false, gates: [],
+                summary: "The v1.1 operations-hardening state has not been initialized."
+            )
+        }
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size > 0, size <= 32 * 1_024 * 1_024,
+              let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+            throw CLIError.message("v1.1 operations-hardening state is not a bounded JSON object")
+        }
+        let report = root["report"] as? [String: Any] ?? [:]
+        let records = report["gates"] as? [[String: Any]] ?? []
+        let gates = records.map {
+            CLIOperationsGateStatus(
+                kind: $0["kind"] as? String ?? "unknown",
+                state: $0["state"] as? String ?? "blocked",
+                evidence: $0["evidence"] as? String ?? "No evidence",
+                requiredAction: $0["requiredAction"] as? String ?? "Inspect in the desktop app."
+            )
+        }
+        let passed = gates.filter { $0.state == "passed" }.count
+        let ready = gates.count == 10 && passed == gates.count
+        return CLIOperationsHardeningStatus(
+            schemaVersion: report["schemaVersion"] as? Int,
+            stateFile: url.path, passedGates: passed, totalGates: gates.count,
+            releaseReady: ready, gates: gates,
+            summary: ready ? "Every v1.1 operations-hardening gate passes."
+                : "Release is held until all ten v1.1 operations-hardening gates pass."
+        )
+    }
+}
+
 struct CLIExecutionTarget: Codable {
     let id: String
     let kind: String
@@ -1803,6 +1859,7 @@ func usage() {
       vdlctl expansion status [--json]
       vdlctl depth status [--json]
       vdlctl completion status [--json]
+      vdlctl operations status [--json]
       vdlctl targets list [--json]
       vdlctl targets route [--capability <name> ...] [--ios-major <n>] [--prefer-physical] [--json]
       vdlctl agent-init [--queue <directory>] [--token-file <path>]
@@ -1962,6 +2019,20 @@ enum VDLCLI {
                     print("Support contract: \(status.supportContractStatus ?? "missing") • gates \(status.passedGates)/\(status.totalGates) • release \(status.releaseAuthorized ? "AUTHORIZED" : "HOLD")")
                     print("Companion \(status.companionSourcePassed ? "PASS" : "INCOMPLETE") • UI reports \(status.uiReports) • recovered faults \(status.recoveredFaults)")
                     print("Fleet exercises \(status.fleetExercises) • reliability campaigns \(status.reliabilityCampaigns) • coverage floor \(status.currentCoverageFloor.map { String(format: "%.1f%%", $0) } ?? "unset") / target \(status.releaseCoverageTarget.map { String(format: "%.1f%%", $0) } ?? "unset")")
+                    print(status.summary)
+                }
+            case "operations", "hardening":
+                guard arguments.indices.contains(1), arguments[1] == "status" else {
+                    throw CLIError.message("Use `vdlctl operations status [--json]`")
+                }
+                let status = try CLIOperationsHardeningInspector.inspect()
+                if arguments.contains("--json") {
+                    print(String(decoding: try JSONEncoder.lab.encode(status), as: UTF8.self))
+                } else {
+                    print("v1.1 operations hardening: \(status.releaseReady ? "READY" : "HOLD") • gates \(status.passedGates)/\(status.totalGates)")
+                    for gate in status.gates {
+                        print("- \(gate.state == "passed" ? "PASS" : "HOLD") \(gate.kind): \(gate.evidence)")
+                    }
                     print(status.summary)
                 }
             case "targets":

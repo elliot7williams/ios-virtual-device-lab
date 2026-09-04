@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.0
+
+- Added the v1.1 Operations & Hardening workspace, persisted report, schema migration 10, and `vdlctl operations status`, with ten fail-closed controls spanning host setup, permissions, fleet execution, auditing, evidence freshness, storage, recovery, upgrades, supply chain, and lifecycle policy.
+- Added volume-UUID and boot-session-aware Recovery continuation, macOS permission inspection/deep links, mounted-volume FileVault/APFS inspection, interrupted journal/lease/fault/socket reconciliation, and explicit safe-only repair.
+- Expanded `vdl-fleetd` and added `vdl-fleetworker` for a complete mTLS/RBAC worker protocol covering enrollment, heartbeat, oldest-job claim, idempotent submission/claim/result, monotonic progress, status, controller cancellation, real `vdlctl` execution, and a machine-readable protocol contract.
+- Replaced plain fleet audit events with monotonic SHA-256 envelopes signed by the configured Keychain server identity and added desktop certificate/signature/chain verification.
+- Added dependency-graph evidence invalidation, checksum-pinned atomic component-set activation/rollback, license and vulnerability policy enforcement, support/deprecation notice validation, examples, operations documentation, and 22 focused tests (128 total).
+
 ## 0.13.0
 
 - Added the v1 Completion workspace and report, with ten fail-closed gates spanning support scope, guest/runtime conformance, real VM and compatibility evidence, desktop UI automation, fault recovery, fleet operation, reliability, coverage, and release exit.

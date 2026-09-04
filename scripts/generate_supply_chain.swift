@@ -85,6 +85,7 @@ let sbom: [String: Any] = [
             "name": "iOS Virtual Device Lab",
             "version": version,
             "purl": "pkg:github/elliot7williams/ios-virtual-device-lab@\(version)",
+            "licenses": [["license": ["id": "MIT"]]],
         ],
         "tools": [["vendor": "Apple", "name": "Swift Package Manager"]],
     ],
@@ -93,7 +94,9 @@ let sbom: [String: Any] = [
         "name": "vphone-cli backend adapter",
         "scope": "excluded",
         "description": "Optional external backend; not distributed in this app bundle.",
+        "licenses": [["license": ["id": "MIT"]]],
     ]],
+    "vulnerabilities": [],
 ]
 try JSONSerialization.data(withJSONObject: sbom, options: [.prettyPrinted, .sortedKeys])
     .write(to: resources.appendingPathComponent("sbom.cdx.json"), options: .atomic)

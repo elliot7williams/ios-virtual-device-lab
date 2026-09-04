@@ -5,7 +5,7 @@ Every push and pull request runs the Swift tests, packages the application, veri
 ## Local ad-hoc release
 
 ```sh
-./scripts/release_app.sh 0.13.0
+./scripts/release_app.sh 0.14.0
 ```
 
 ## Developer ID release
@@ -14,7 +14,7 @@ Import a valid Developer ID Application certificate into the active keychain, th
 
 ```sh
 CODE_SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
-./scripts/release_app.sh 0.13.0
+./scripts/release_app.sh 0.14.0
 ```
 
 ## Notarized release
@@ -24,7 +24,7 @@ Store credentials with `xcrun notarytool store-credentials`, then supply the key
 ```sh
 CODE_SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
 NOTARYTOOL_PROFILE="ios-virtual-device-lab" \
-./scripts/release_app.sh 0.13.0
+./scripts/release_app.sh 0.14.0
 ```
 
 The script submits the ZIP, waits for notarization, staples the ticket, rebuilds the ZIP, emits SHA-256, and verifies the final app. Apple credentials are intentionally not stored in the repository.
