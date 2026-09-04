@@ -20,6 +20,22 @@ struct ActivityView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if let progress = model.progressEvents.last,
+               ![LabOperationPhase.completed, .failed, .cancelled].contains(progress.phase) {
+                HStack(spacing: 12) {
+                    ProgressView(value: progress.fractionCompleted ?? 0)
+                        .frame(width: 180)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(progress.phase.rawValue.capitalized).fontWeight(.medium)
+                        Text(progress.message).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer()
+                    Text(progress.kind.rawValue.capitalized).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+                Divider()
+            }
             if model.logs.isEmpty {
                 LabEmptyState(
                     icon: "text.alignleft",

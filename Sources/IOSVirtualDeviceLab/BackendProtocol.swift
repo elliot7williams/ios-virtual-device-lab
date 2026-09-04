@@ -1,6 +1,7 @@
 import Foundation
 
 protocol LabBackend: Sendable {
+    var descriptor: BackendDescriptor { get async }
     var capabilities: BackendCapabilities { get async }
 
     func prepareStorage() async throws
@@ -10,11 +11,8 @@ protocol LabBackend: Sendable {
     func loadFirmware() async -> [FirmwareImage]
 
     func createVM(
-        name: String,
-        variant: FirmwareVariant,
-        diskSizeGB: Int,
-        iphoneIPSW: URL?,
-        cloudOSIPSW: URL?,
+        request: VMCreationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult
     func launch(
@@ -44,10 +42,8 @@ protocol LabBackend: Sendable {
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult
     func updateConfiguration(
-        _ device: VirtualDevice,
-        cpu: Int,
-        memoryMB: Int,
-        network: String,
+        request: VMConfigurationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult
 
@@ -75,14 +71,38 @@ protocol LabBackend: Sendable {
     func storageCheck(requiredBytes: Int64) async -> StorageCheck
     func captureScreenshot(_ device: VirtualDevice, destination: URL) async -> ControlResponse
     func sendHardwareKey(_ device: VirtualDevice, name: String) async -> ControlResponse
+    func guestProtocolHandshake(for device: VirtualDevice) async -> GuestProtocolHandshake
+    func performGuestAutomation(
+        _ request: GuestAutomationRequest,
+        on device: VirtualDevice
+    ) async -> GuestAutomationResult
+    func deployGuestCompanion(
+        _ request: GuestCompanionDeploymentRequest,
+        on device: VirtualDevice
+    ) async -> GuestCompanionDeploymentResult
+    func injectFault(
+        _ scenario: FaultInjectionScenario,
+        on device: VirtualDevice
+    ) async -> FaultInjectionResult
+    func recoverFaults(
+        scenarioID: UUID?,
+        on device: VirtualDevice
+    ) async -> FaultRecoveryReceipt
     func createDiagnosticBundle(
         for device: VirtualDevice,
         activityLog: String
     ) async throws -> DiagnosticBundle
+    func performanceSample(for device: VirtualDevice) async -> PerformanceSample
+    func exportGuestDiagnostics(
+        for device: VirtualDevice,
+        categories: [DiagnosticCategory],
+        destination: URL
+    ) async -> DiagnosticExportResult
     func cancelAllOperations() async
 }
 
 actor MockLabBackend: LabBackend {
+    let descriptor = BackendDescriptor(id: "mock", name: "Mock Lab Backend", version: "1", engine: "In-memory")
     let capabilities = BackendCapabilities.vphone
     private var devices: [VirtualDevice]
     private var firmware: [FirmwareImage]
@@ -124,14 +144,18 @@ actor MockLabBackend: LabBackend {
     }
 
     func createVM(
-        name: String,
-        variant: FirmwareVariant,
-        diskSizeGB: Int,
-        iphoneIPSW: URL?,
-        cloudOSIPSW: URL?,
+        request: VMCreationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) -> CommandResult {
-        success(["vm", "create", name], line: "created \(name)", onLine: onLine)
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .create,
+            phase: .completed,
+            fractionCompleted: 1,
+            message: "Mock VM created"
+        ))
+        return success(["vm", "create", request.name], line: "created \(request.name)", onLine: onLine)
     }
 
     func launch(
@@ -167,13 +191,22 @@ actor MockLabBackend: LabBackend {
     }
 
     func updateConfiguration(
-        _ device: VirtualDevice,
-        cpu: Int,
-        memoryMB: Int,
-        network: String,
+        request: VMConfigurationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) -> CommandResult {
-        success(["vm", "config", device.name], line: "configured \(device.name)", onLine: onLine)
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .configure,
+            phase: .completed,
+            fractionCompleted: 1,
+            message: "Mock configuration applied"
+        ))
+        return success(
+            ["vm", "config", request.device.name],
+            line: "configured \(request.device.name)",
+            onLine: onLine
+        )
     }
 
     func createSnapshot(
@@ -264,8 +297,90 @@ actor MockLabBackend: LabBackend {
         ControlResponse(succeeded: true, path: nil, error: nil, imageData: nil)
     }
 
+    func guestProtocolHandshake(for device: VirtualDevice) -> GuestProtocolHandshake {
+        GuestProtocolHandshake(
+            status: .compatible,
+            negotiatedVersion: 3,
+            minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3,
+            capabilities: [.screenshots, .hardwareKeys, .guestFiles, .audioOutput, .networking, .accessibilityTree, .deterministicReset, .companionLifecycle, .faultInjection],
+            maximumMessageBytes: 1_048_576,
+            authenticated: true,
+            replayProtected: true,
+            authenticationClockSkewSeconds: 30,
+            transport: "Mock in-memory transport",
+            message: "Mock authenticated guest protocol v3"
+        )
+    }
+
+    func performGuestAutomation(
+        _ request: GuestAutomationRequest,
+        on device: VirtualDevice
+    ) -> GuestAutomationResult {
+        GuestAutomationResult(
+            id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
+            startedAt: .now, completedAt: .now, succeeded: true,
+            message: "Mock guest automation completed.", accessibilityRoot: nil
+        )
+    }
+
+    func deployGuestCompanion(
+        _ request: GuestCompanionDeploymentRequest,
+        on device: VirtualDevice
+    ) -> GuestCompanionDeploymentResult {
+        GuestCompanionDeploymentResult(
+            requestID: request.id, deviceName: device.name, succeeded: true,
+            installedVersion: request.version, message: "Mock companion deployment completed."
+        )
+    }
+
+    func injectFault(
+        _ scenario: FaultInjectionScenario,
+        on device: VirtualDevice
+    ) -> FaultInjectionResult {
+        FaultInjectionResult(
+            id: UUID(), scenarioID: scenario.id, deviceName: device.name,
+            startedAt: .now, completedAt: .now, succeeded: true,
+            message: "Mock fault injection completed."
+        )
+    }
+
+    func recoverFaults(scenarioID: UUID?, on device: VirtualDevice) -> FaultRecoveryReceipt {
+        FaultRecoveryReceipt(
+            id: UUID(), scenarioID: scenarioID, deviceName: device.name,
+            requestedAt: .now, completedAt: .now,
+            clearAcknowledged: true, statusVerified: true, remainingFaults: [],
+            message: "Mock guest acknowledged fault cleanup and reported no active faults."
+        )
+    }
+
     func createDiagnosticBundle(for device: VirtualDevice, activityLog: String) -> DiagnosticBundle {
         DiagnosticBundle(id: UUID(), deviceName: device.name, url: URL(fileURLWithPath: "/mock/diagnostics"), createdAt: .now)
+    }
+
+    func performanceSample(for device: VirtualDevice) -> PerformanceSample {
+        PerformanceSample(
+            deviceName: device.name,
+            cpuPercent: device.isRunning ? 12 : 0,
+            residentMemoryBytes: device.isRunning ? 512 * 1_048_576 : 0,
+            gpuPercent: nil,
+            framesPerSecond: nil,
+            audioSampleRateHz: device.audioConfiguration?.sampleRateHz,
+            source: "Mock backend"
+        )
+    }
+
+    func exportGuestDiagnostics(
+        for device: VirtualDevice,
+        categories: [DiagnosticCategory],
+        destination: URL
+    ) -> DiagnosticExportResult {
+        DiagnosticExportResult(
+            supported: false,
+            categories: categories,
+            outputURL: nil,
+            message: "Mock guest diagnostics are not configured"
+        )
     }
 
     func cancelAllOperations() {}

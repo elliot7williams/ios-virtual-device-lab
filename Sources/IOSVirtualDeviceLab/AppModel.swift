@@ -1,6 +1,62 @@
 import AppKit
 import Foundation
+import Security
 import SwiftUI
+
+private struct LocalBootstrapState: Sendable {
+    let compatibility: CompatibilityManifest
+    let hardwareProfiles: HardwareProfileCatalog
+    let backendCatalog: BackendCatalog
+    let attributionCatalog: AttributionCatalog
+    let testRuns: [TestRunRecord]
+    let workflows: [AutomationWorkflow]
+    let plugins: [PluginDescriptor]
+    let appArtifacts: [AppArtifact]
+    let snapshotRetention: SnapshotRetentionPolicy
+    let resourcePolicy: LabResourcePolicy
+    let diagnosticPrivacy: DiagnosticPrivacyPolicy
+    let xcodeIntegration: XcodeIntegrationStatus
+    let logs: [LogEntry]
+    let hardening: ProductionHardeningState
+    let platformEngineering: PlatformEngineeringState
+    let labExpansion: LabExpansionState
+    let productionDepth: ProductionDepthState
+    let releaseCompletion: ReleaseCompletionState
+    let operationsHardening: OperationsHardeningState
+
+    static func load(paths: LabPaths, safeMode: Bool = false) throws -> LocalBootstrapState {
+        if !safeMode { try PluginRegistry.prepare(paths: paths) }
+
+        let activityURL = paths.stateRoot.appendingPathComponent("activity.json")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let persistedLogs = (try? Data(contentsOf: activityURL))
+            .flatMap { try? decoder.decode([LogEntry].self, from: $0) }
+        let hardening = try ProductionHardeningState.load(paths: paths)
+
+        return LocalBootstrapState(
+            compatibility: CompatibilityCatalog.load(paths: paths),
+            hardwareProfiles: HardwareProfilesCatalog.load(paths: paths),
+            backendCatalog: ProjectCatalogLoader.loadBackends(paths: paths),
+            attributionCatalog: ProjectCatalogLoader.loadAttribution(paths: paths),
+            testRuns: TestRunStore.load(paths: paths),
+            workflows: WorkflowStore.load(paths: paths),
+            plugins: safeMode ? [] : PluginRegistry.loadPlugins(paths: paths),
+            appArtifacts: AppArtifactStore.load(paths: paths),
+            snapshotRetention: SnapshotRetentionStore.load(paths: paths),
+            resourcePolicy: ResourcePolicyStore.load(paths: paths),
+            diagnosticPrivacy: DiagnosticPrivacyStore.load(paths: paths),
+            xcodeIntegration: DeveloperTools.inspect(paths: paths),
+            logs: Array((persistedLogs ?? []).suffix(2_000)),
+            hardening: hardening,
+            platformEngineering: PlatformEngineeringStore.load(paths: paths),
+            labExpansion: LabExpansionStore.load(paths: paths),
+            productionDepth: ProductionDepthStore.load(paths: paths),
+            releaseCompletion: ReleaseCompletionStore.load(paths: paths),
+            operationsHardening: OperationsHardeningStore.load(paths: paths)
+        )
+    }
+}
 
 @MainActor
 final class LabAppModel: ObservableObject {
@@ -8,15 +64,85 @@ final class LabAppModel: ObservableObject {
     @Published var selectedDeviceID: String?
     @Published private(set) var devices: [VirtualDevice] = []
     @Published private(set) var firmware: [FirmwareImage] = []
+    @Published private(set) var hardwareProfiles: HardwareProfileCatalog = .empty
+    @Published private(set) var backendCatalog: BackendCatalog = .empty
+    @Published private(set) var attributionCatalog: AttributionCatalog = .empty
     @Published private(set) var snapshots: [SnapshotRecord] = []
     @Published private(set) var compatibility: CompatibilityManifest = .empty
     @Published private(set) var testRuns: [TestRunRecord] = []
     @Published private(set) var workflows: [AutomationWorkflow] = []
     @Published private(set) var plugins: [PluginDescriptor] = []
+    @Published private(set) var appArtifacts: [AppArtifact] = []
     @Published private(set) var diagnosticBundles: [DiagnosticBundle] = []
+    @Published private(set) var diagnosticAnalysisReports: [DiagnosticAnalysisReport] = []
+    @Published private(set) var diagnosticPrivacy: DiagnosticPrivacyPolicy = .standard
+    @Published private(set) var latestDiagnosticPreview: DiagnosticPrivacyPreview?
+    @Published private(set) var performanceSamples: [String: PerformanceSample] = [:]
+    @Published private(set) var progressEvents: [LabProgressEvent] = []
+    @Published private(set) var snapshotRetention: SnapshotRetentionPolicy = .standard
+    @Published private(set) var resourcePolicy: LabResourcePolicy = .standard
+    @Published private(set) var backendDescriptor: BackendDescriptor = .vphone
+    @Published private(set) var xcodeIntegration = XcodeIntegrationStatus(
+        xcodePath: nil,
+        xcodebuildVersion: nil,
+        commandLineToolsReady: false,
+        helperScriptURL: nil
+    )
     @Published private(set) var backendCapabilities: BackendCapabilities = .vphone
+    @Published private(set) var updateState: UpdateState = .idle
     @Published private(set) var logs: [LogEntry] = []
     @Published private(set) var readiness: HostReadiness = .checking
+    @Published private(set) var acceptanceReport: AcceptanceReport = .empty
+    @Published private(set) var hostCompatibilityAssessment: HostCompatibilityAssessment = .unverified
+    @Published private(set) var hostCompatibilityCatalog: HostCompatibilityCatalog = .empty
+    @Published private(set) var migrationReport: LabMigrationReport = .none
+    @Published private(set) var operationJournalEntries: [OperationJournalEntry] = []
+    @Published private(set) var environmentProfiles: [EnvironmentProfile] = []
+    @Published private(set) var environmentAssignments: [String: UUID] = [:]
+    @Published private(set) var guestProtocolHandshakes: [String: GuestProtocolHandshake] = [:]
+    @Published private(set) var storagePolicy: LabStoragePolicy = .standard
+    @Published private(set) var storageInventory: LabStorageInventory = .empty
+    @Published private(set) var pluginAuditRecords: [PluginAuditRecord] = []
+    @Published private(set) var remoteAgentConfiguration: RemoteLabAgentConfiguration?
+    @Published private(set) var remoteAgentHealth: RemoteAgentHealthSnapshot?
+    @Published private(set) var qualificationCampaigns: [QualificationCampaign] = []
+    @Published private(set) var setupAssistantReport: SetupAssistantReport = .empty
+    @Published private(set) var guestTrustPolicy: GuestTrustPolicy = .strict
+    @Published private(set) var guestTrustAssessments: [String: GuestTrustAssessment] = [:]
+    @Published private(set) var evidenceSeals: [EvidenceSeal] = []
+    @Published private(set) var evidenceVerificationIssues: [String] = []
+    @Published private(set) var backupPolicy: LabBackupPolicy = .standard
+    @Published private(set) var latestBackupVerification: BackupVerification?
+    @Published private(set) var latestRestorePlan: LabRestorePlan?
+    @Published private(set) var latestRestoreCommand: URL?
+    @Published private(set) var updateLifecyclePolicy: UpdateLifecyclePolicy = .standard
+    @Published private(set) var stagedUpdate: StagedUpdateRecord?
+    @Published private(set) var supplyChainAssessment: SupplyChainAssessment = .unavailable
+    @Published private(set) var resilienceReport: ResilienceReport?
+    @Published private(set) var companionAssessment: CompanionBackendAssessment = .unavailable
+    @Published private(set) var storageLocationStatus: StorageLocationStatus = .unknown
+    @Published private(set) var recoveryCenter: RecoveryCenterSnapshot = .empty
+    @Published private(set) var canonicalFixtures: [CanonicalVMFixture] = []
+    @Published private(set) var canonicalFixtureAssessment: CanonicalFixtureAssessment = .unavailable
+    @Published private(set) var activeLabfile: LabfileDocument?
+    @Published private(set) var labfilePlan: LabfilePlan = .empty
+    @Published private(set) var evidenceLifecyclePolicy: EvidenceLifecyclePolicy = .standard
+    @Published private(set) var evidenceFreshnessReport: EvidenceFreshnessReport = .empty
+    @Published private(set) var hostCapacityCalibration: HostCapacityCalibration = .unavailable
+    @Published private(set) var hostileInputReport: HostileInputReport = .empty
+    @Published private(set) var unifiedRetentionPolicy: UnifiedRetentionPolicy = .standard
+    @Published private(set) var retentionPreview: RetentionPreview = .empty
+    @Published private(set) var operationalObjectivePolicy: OperationalObjectivePolicy = .standard
+    @Published private(set) var operationalObjectiveReport: OperationalObjectiveReport = .empty
+    @Published private(set) var betaVerification: BetaVerificationRecord = .empty
+    @Published private(set) var publicBetaReadiness: PublicBetaReadinessReport = .empty
+    @Published private(set) var platformEngineering: PlatformEngineeringState = .empty
+    @Published private(set) var labExpansion: LabExpansionState = .empty
+    @Published private(set) var productionDepth: ProductionDepthState = .empty
+    @Published private(set) var releaseCompletion: ReleaseCompletionState = .empty
+    @Published private(set) var operationsHardening: OperationsHardeningState = .empty
+    @Published private(set) var macOSInstallations: [MacOSInstallation] = []
+    @Published private(set) var availableSigningIdentities: [CodeSigningIdentityRecord] = []
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
 
@@ -24,6 +150,8 @@ final class LabAppModel: ObservableObject {
     private let backend: any LabBackend
     private var didBootstrap = false
     private var orchestrationFlags: [UUID: OperationCancellationFlag] = [:]
+    private let updateService = UpdateService()
+    private var scalableEventStore: ScalableEventStore?
 
     init(paths: LabPaths = .default, backend: (any LabBackend)? = nil) {
         self.paths = paths
@@ -38,20 +166,100 @@ final class LabAppModel: ObservableObject {
 
     func isBusy(_ key: String) -> Bool { busyKeys.contains(key) }
 
-    func bootstrap() async {
+    func bootstrap(safeMode: Bool = false) async {
         guard !didBootstrap else { return }
         didBootstrap = true
+        storageLocationStatus = ExternalStorageManager.inspect(paths: paths)
+        guard !storageLocationStatus.requiresRelink, storageLocationStatus.state != .readOnly else {
+            alertMessage = storageLocationStatus.message
+            appendLog(.error, scope: "storage", storageLocationStatus.message)
+            return
+        }
         do {
             try await backend.prepareStorage()
-            try PluginRegistry.prepare(paths: paths)
-            compatibility = CompatibilityCatalog.load(paths: paths)
-            testRuns = TestRunStore.load(paths: paths)
-            workflows = WorkflowStore.load(paths: paths)
-            plugins = PluginRegistry.loadPlugins(paths: paths)
+            storageLocationStatus = ExternalStorageManager.inspect(paths: paths)
+            let labPaths = paths
+            let localState = try await Task.detached(priority: .userInitiated) {
+                try LocalBootstrapState.load(paths: labPaths, safeMode: safeMode)
+            }.value
+            compatibility = localState.compatibility
+            hardwareProfiles = localState.hardwareProfiles
+            backendCatalog = localState.backendCatalog
+            attributionCatalog = localState.attributionCatalog
+            testRuns = localState.testRuns
+            workflows = localState.workflows
+            plugins = localState.plugins
+            appArtifacts = localState.appArtifacts
+            snapshotRetention = localState.snapshotRetention
+            resourcePolicy = localState.resourcePolicy
+            diagnosticPrivacy = localState.diagnosticPrivacy
+            xcodeIntegration = localState.xcodeIntegration
+            logs = localState.logs
+            migrationReport = localState.hardening.migrationReport
+            operationJournalEntries = localState.hardening.journalEntries
+            hostCompatibilityCatalog = localState.hardening.hostCatalog
+            environmentProfiles = localState.hardening.environmentProfiles
+            environmentAssignments = localState.hardening.environmentAssignments
+            storagePolicy = localState.hardening.storagePolicy
+            pluginAuditRecords = localState.hardening.pluginAudits
+            remoteAgentConfiguration = localState.hardening.remoteAgent
+            qualificationCampaigns = localState.hardening.qualificationCampaigns
+            setupAssistantReport = localState.hardening.setupReport
+            guestTrustPolicy = localState.hardening.guestTrustPolicy
+            evidenceSeals = localState.hardening.evidenceSeals
+            backupPolicy = localState.hardening.backupPolicy
+            updateLifecyclePolicy = localState.hardening.updateLifecyclePolicy
+            stagedUpdate = localState.hardening.stagedUpdate
+            supplyChainAssessment = localState.hardening.supplyChain
+            resilienceReport = localState.hardening.resilienceReport
+            platformEngineering = localState.platformEngineering
+            labExpansion = localState.labExpansion
+            productionDepth = localState.productionDepth
+            releaseCompletion = localState.releaseCompletion
+            operationsHardening = localState.operationsHardening
+            do {
+                let store = try ScalableEventStore(
+                    url: paths.stateRoot.appendingPathComponent("lab-events.sqlite3")
+                )
+                scalableEventStore = store
+                productionDepth.eventStore = try store.status(
+                    lastMigratedAt: productionDepth.eventStore.lastMigratedAt
+                )
+                persistProductionDepth()
+            } catch {
+                productionDepth.eventStore = ScalableEventStoreStatus(
+                    databasePath: paths.stateRoot.appendingPathComponent("lab-events.sqlite3").path,
+                    schemaVersion: ScalableEventStore.schemaVersion, journalMode: "unavailable",
+                    integrityPassed: false, rowCount: 0,
+                    lastMigratedAt: productionDepth.eventStore.lastMigratedAt,
+                    message: error.localizedDescription
+                )
+            }
+            recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
+            canonicalFixtures = CanonicalFixtureStore.load(paths: paths)
+            evidenceLifecyclePolicy = EvidenceLifecycleManager.loadPolicy(paths: paths)
+            hostCapacityCalibration = HostCapacityCalibrator.load(paths: paths)
+            hostileInputReport = HostileInputValidator.load(paths: paths)
+            unifiedRetentionPolicy = UnifiedDataLifecycleManager.load(paths: paths)
+            operationalObjectivePolicy = OperationalObjectiveEvaluator.loadPolicy(paths: paths)
+            betaVerification = PublicBetaReadinessManager.load(paths: paths)
+            evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
+            backendDescriptor = await backend.descriptor
             backendCapabilities = await backend.capabilities
-            loadPersistedLogs()
             appendLog(.info, scope: "lab", "Storage: \(paths.dataRoot.path)")
-            await refreshAll()
+            if safeMode {
+                readiness = await backend.checkHost()
+                companionAssessment = CompanionBackendInspector.inspect(
+                    binary: readiness.binaryPath.map { URL(fileURLWithPath: $0) }
+                )
+                setupAssistantReport = SetupAssistant.inspect(paths: paths, host: readiness)
+                await refreshOperationsHardening()
+                appendLog(.warning, scope: "lifecycle", "Safe mode skipped VM, firmware, plugin, agent, and updater discovery")
+            } else {
+                await refreshAll()
+                if remoteAgentConfiguration != nil { await refreshRemoteAgentHealth() }
+                Task { await checkForUpdates(automatic: true) }
+            }
         } catch {
             present(error, context: "Preparing lab storage")
         }
@@ -60,11 +268,22 @@ final class LabAppModel: ObservableObject {
     func refreshAll() async {
         busyKeys.insert("refresh")
         readiness = await backend.checkHost()
+        companionAssessment = CompanionBackendInspector.inspect(
+            binary: readiness.binaryPath.map { URL(fileURLWithPath: $0) }
+        )
         devices = await backend.listDevices()
+        let restoredCredentialMarker = paths.stateRoot.appendingPathComponent("rotate-restored-credentials")
+        if FileManager.default.fileExists(atPath: restoredCredentialMarker.path) {
+            for device in devices { _ = try? GuestCredentialVault.rotate(for: device) }
+            try? FileManager.default.removeItem(at: restoredCredentialMarker)
+            appendLog(.success, scope: "guest-trust", "Regenerated credentials for restored virtual devices")
+        }
         snapshots = await backend.loadSnapshots()
         firmware = await backend.loadFirmware()
         normalizeSelection()
         busyKeys.remove("refresh")
+        await refreshOperationalReadiness()
+        await refreshOperationsHardening()
 
         switch readiness.state {
         case .ready:
@@ -78,6 +297,2094 @@ final class LabAppModel: ObservableObject {
         persistLogs()
     }
 
+    // MARK: - Operational readiness
+
+    func refreshOperationalReadiness() async {
+        let device = selectedDevice ?? devices.first
+        if let device, device.isRunning {
+            guestProtocolHandshakes[device.id] = await backend.guestProtocolHandshake(for: device)
+        }
+        let handshake = device.flatMap { guestProtocolHandshakes[$0.id] }
+        acceptanceReport = AcceptanceEvaluator.evaluate(
+            host: readiness,
+            device: device,
+            testRuns: testRuns,
+            capabilities: backendCapabilities,
+            handshake: handshake
+        )
+        hostCompatibilityAssessment = HostCompatibilityDatabase.assess(
+            catalog: hostCompatibilityCatalog,
+            host: readiness,
+            backendVersion: backendDescriptor.version,
+            device: device
+        )
+
+        let labPaths = paths
+        let currentDevices = devices
+        let currentFirmware = firmware
+        let currentSnapshots = snapshots
+        let policy = storagePolicy
+        storageInventory = await Task.detached(priority: .utility) {
+            StorageLifecycleManager.scan(
+                paths: labPaths,
+                devices: currentDevices,
+                firmware: currentFirmware,
+                snapshots: currentSnapshots,
+                policy: policy
+            )
+        }.value
+        pluginAuditRecords = await Task.detached(priority: .utility) {
+            PluginAuditStore.load(paths: labPaths)
+        }.value
+        setupAssistantReport = SetupAssistant.inspect(paths: paths, host: readiness)
+        guestTrustAssessments = guestProtocolHandshakes.mapValues {
+            GuestTrustEvaluator.evaluate($0, policy: guestTrustPolicy)
+        }
+        refreshContinuityAssessments()
+    }
+
+    // MARK: - Continuity, reproducibility, and public beta
+
+    func refreshContinuityAssessments() {
+        storageLocationStatus = ExternalStorageManager.inspect(paths: paths)
+        recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
+
+        let fixtureDevice = selectedDevice ?? devices.first
+        let fixtureFirmware = matchingFirmware(for: fixtureDevice)
+        let fixtureSnapshot = fixtureDevice.flatMap { device in
+            snapshots.filter { $0.sourceVM == device.name }.sorted { $0.createdAt > $1.createdAt }.first
+        }
+        canonicalFixtureAssessment = CanonicalFixtureStore.assess(
+            device: fixtureDevice, firmware: fixtureFirmware,
+            snapshot: fixtureSnapshot, acceptance: acceptanceReport
+        )
+        let hashes = Set(firmware.compactMap(\.sha256).map { $0.lowercased() })
+        evidenceFreshnessReport = EvidenceLifecycleManager.evaluate(
+            campaigns: qualificationCampaigns, policy: evidenceLifecyclePolicy,
+            host: readiness, backend: backendDescriptor, currentFirmwareHashes: hashes,
+            seals: evidenceSeals
+        )
+        retentionPreview = UnifiedDataLifecycleManager.preview(paths: paths, policy: unifiedRetentionPolicy)
+        operationalObjectiveReport = OperationalObjectiveEvaluator.evaluate(
+            policy: operationalObjectivePolicy, testRuns: testRuns,
+            acceptance: acceptanceReport, resilience: resilienceReport,
+            secondVolumeRestoreRecorded: betaVerification.secondVolumeRestoreRecorded
+        )
+        publicBetaReadiness = PublicBetaReadinessManager.evaluate(
+            record: betaVerification, localizationCount: packagedLocalizationCount()
+        )
+        refreshPlatformEngineeringAssessments()
+    }
+
+    // MARK: - Platform engineering and beta operations
+
+    func refreshPlatformEngineeringAssessments() {
+        platformEngineering.trends = RunTrendAnalyzer.evaluate(
+            runs: testRuns, policy: platformEngineering.retryPolicy
+        )
+        platformEngineering.security = SecurityPostureEvaluator.evaluate(
+            paths: paths, devices: devices, remoteAgentConfigured: remoteAgentConfiguration != nil
+        )
+        platformEngineering.betaOperations = BetaOperationsEvaluator.evaluate(
+            policy: platformEngineering.betaPolicy, runs: testRuns,
+            publicBeta: publicBetaReadiness, quality: platformEngineering.quality,
+            security: platformEngineering.security
+        )
+        persistPlatformEngineering()
+        refreshLabExpansionAssessments()
+    }
+
+    func importAdapterManifest(_ url: URL) {
+        do {
+            let manifest = try BackendAdapterConformance.load(url)
+            let report = BackendAdapterConformance.evaluate(manifest)
+            platformEngineering.adapterManifests.removeAll { $0.id == manifest.id }
+            platformEngineering.adapterManifests.insert(manifest, at: 0)
+            platformEngineering.adapterConformance = report
+            try PlatformEngineeringStore.save(platformEngineering, paths: paths)
+            appendLog(report.passed ? .success : .warning, scope: "adapters", "Conformance \(report.passed ? "passed" : "failed") for \(manifest.name)")
+            persistLogs()
+        } catch { present(error, context: "Importing backend adapter manifest") }
+    }
+
+    func runAdapterConformance(_ manifest: BackendAdapterManifest? = nil) {
+        guard let manifest = manifest ?? platformEngineering.adapterManifests.first else {
+            alertMessage = "Import an adapter manifest before running conformance."
+            return
+        }
+        platformEngineering.adapterConformance = BackendAdapterConformance.evaluate(manifest)
+        persistPlatformEngineering()
+    }
+
+    func exportAdapterSDK(to directory: URL) {
+        do {
+            let result = try BackendAdapterConformance.exportSDK(to: directory)
+            appendLog(.success, scope: "adapters", "Exported adapter SDK to \(result.path)")
+            persistLogs()
+            reveal(result)
+        } catch { present(error, context: "Exporting backend adapter SDK") }
+    }
+
+    func updateResetPolicy(_ policy: DeterministicResetPolicy) {
+        platformEngineering.resetPolicy = policy
+        planDeterministicReset()
+    }
+
+    func planDeterministicReset() {
+        let device = selectedDevice ?? devices.first
+        let fixture = device.flatMap { selected in canonicalFixtures.first { $0.deviceName == selected.name } }
+        platformEngineering.resetPlan = DeterministicResetPlanner.plan(
+            device: device, fixture: fixture, policy: platformEngineering.resetPolicy,
+            backendCapabilities: platformBackendCapabilityNames()
+        )
+        persistPlatformEngineering()
+    }
+
+    func exportDeterministicResetPlan(to url: URL) {
+        do {
+            try HardeningJSON.save(platformEngineering.resetPlan, to: url)
+            appendLog(.success, scope: "reset", "Exported deterministic reset plan")
+            persistLogs()
+        } catch { present(error, context: "Exporting deterministic reset plan") }
+    }
+
+    func indexBuildIdentity(_ artifact: AppArtifact, sourceRevision: String = "", dSYM: URL? = nil) {
+        let record = BuildIdentityCatalog.index(artifact: artifact, sourceRevision: sourceRevision, dSYM: dSYM)
+        platformEngineering.builds.removeAll { $0.artifactID == artifact.id }
+        platformEngineering.builds.insert(record, at: 0)
+        platformEngineering.builds = Array(platformEngineering.builds.prefix(250))
+        persistPlatformEngineering()
+        appendLog(record.warnings.isEmpty ? .success : .warning, scope: "builds", "Indexed build identity for \(artifact.name)")
+        persistLogs()
+    }
+
+    func createFailureReplayBundle(for run: TestRunRecord) {
+        do {
+            let bundle = try FailureReplayBundler.create(
+                run: run, labfile: activeLabfile, assignments: environmentAssignments,
+                fixtures: canonicalFixtures, paths: paths
+            )
+            platformEngineering.replayBundles.insert(bundle, at: 0)
+            platformEngineering.replayBundles = Array(platformEngineering.replayBundles.prefix(100))
+            try PlatformEngineeringStore.save(platformEngineering, paths: paths)
+            appendLog(.success, scope: "replay", "Created sanitized failure replay bundle for \(run.name)")
+            persistLogs()
+            reveal(URL(fileURLWithPath: bundle.path))
+        } catch { present(error, context: "Creating failure replay bundle") }
+    }
+
+    func updateRetryAndRegressionPolicy(_ policy: RetryAndRegressionPolicy) {
+        platformEngineering.retryPolicy = policy
+        platformEngineering.trends = RunTrendAnalyzer.evaluate(runs: testRuns, policy: policy)
+        persistPlatformEngineering()
+    }
+
+    func registerLocalFleetHost() {
+        let host = FleetScheduler.localHost(
+            capabilities: Array(platformBackendCapabilityNames()),
+            maximumConcurrentVMs: resourcePolicy.maximumConcurrentVMs
+        )
+        platformEngineering.fleetHosts.removeAll { $0.id == host.id }
+        platformEngineering.fleetHosts.insert(host, at: 0)
+        persistPlatformEngineering()
+        previewFleetPlacement()
+    }
+
+    func previewFleetPlacement() {
+        let request = FleetJobRequest(
+            name: "\((selectedDevice ?? devices.first)?.name ?? "Next virtual-device job")",
+            requiredCapabilities: ["lifecycle", "automation"],
+            requiredMemoryMB: (selectedDevice ?? devices.first)?.memoryMB ?? 4_096
+        )
+        platformEngineering.placement = FleetScheduler.place(request, on: platformEngineering.fleetHosts)
+        persistPlatformEngineering()
+    }
+
+    func setFleetHostDrained(_ host: FleetHostRecord, drained: Bool) {
+        guard let index = platformEngineering.fleetHosts.firstIndex(where: { $0.id == host.id }) else { return }
+        platformEngineering.fleetHosts[index].drained = drained
+        platformEngineering.fleetHosts[index].lastSeen = .now
+        persistPlatformEngineering()
+        previewFleetPlacement()
+    }
+
+    func captureUnifiedTimeline(for run: TestRunRecord) {
+        do {
+            let timeline = UnifiedTimelineBuilder.build(
+                run: run, logs: logs, performance: performanceSamples,
+                videoSupported: platformBackendCapabilityNames().contains("timelineVideo")
+            )
+            let saved = try UnifiedTimelineBuilder.save(timeline, paths: paths)
+            platformEngineering.timelines.insert(saved, at: 0)
+            platformEngineering.timelines = Array(platformEngineering.timelines.prefix(100))
+            try PlatformEngineeringStore.save(platformEngineering, paths: paths)
+            appendLog(.success, scope: "timeline", "Captured \(saved.events.count) correlated events for \(run.name)")
+            persistLogs()
+        } catch { present(error, context: "Capturing unified timeline") }
+    }
+
+    func updateQualityPolicy(_ policy: FuzzAndCoveragePolicy) {
+        platformEngineering.qualityPolicy = policy
+        persistPlatformEngineering()
+    }
+
+    func runEngineeringQualitySuite() async {
+        busyKeys.insert("platform-quality")
+        let policy = platformEngineering.qualityPolicy
+        let result = await Task.detached(priority: .userInitiated) {
+            EngineeringQualityEvaluator.run(policy: policy)
+        }.value
+        platformEngineering.quality = result
+        platformEngineering.betaOperations = BetaOperationsEvaluator.evaluate(
+            policy: platformEngineering.betaPolicy, runs: testRuns,
+            publicBeta: publicBetaReadiness, quality: result,
+            security: platformEngineering.security
+        )
+        persistPlatformEngineering()
+        busyKeys.remove("platform-quality")
+        appendLog(result.fuzzGatePassed ? .success : .error, scope: "quality", "Deterministic fuzz campaign completed \(result.totalCases) cases with \(result.failedCases) mismatch(es)")
+        persistLogs()
+    }
+
+    func updateBetaOperationsPolicy(_ policy: BetaOperationsPolicy) {
+        platformEngineering.betaPolicy = policy
+        platformEngineering.betaOperations = BetaOperationsEvaluator.evaluate(
+            policy: policy, runs: testRuns, publicBeta: publicBetaReadiness,
+            quality: platformEngineering.quality, security: platformEngineering.security
+        )
+        persistPlatformEngineering()
+    }
+
+    func createFeedbackPackage() {
+        do {
+            let url = try BetaOperationsEvaluator.createFeedbackPackage(
+                report: platformEngineering.betaOperations, quality: platformEngineering.quality,
+                security: platformEngineering.security, paths: paths
+            )
+            platformEngineering.latestFeedbackPackagePath = url.path
+            try PlatformEngineeringStore.save(platformEngineering, paths: paths)
+            appendLog(.success, scope: "feedback", "Created privacy-safe feedback package")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Creating feedback package") }
+    }
+
+    private func platformBackendCapabilityNames() -> Set<String> {
+        var result: Set<String> = ["lifecycle", "snapshotRestore"]
+        if backendCapabilities.pause { result.insert("pause") }
+        if backendCapabilities.screenshots { result.insert("screenshots") }
+        if backendCapabilities.automation { result.insert("automation") }
+        if backendCapabilities.guestLogs { result.insert("guestLogs") }
+        if backendCapabilities.networking { result.insert("networking") }
+        if backendCapabilities.audio { result.insert("audio") }
+        if backendCapabilities.performanceMetrics { result.insert("performanceMetrics") }
+        if backendCapabilities.crashExport { result.insert("crashExport") }
+        if backendCapabilities.xcodeDeployment { result.insert("xcodeDeployment") }
+        return result
+    }
+
+    private func persistPlatformEngineering() {
+        do { try PlatformEngineeringStore.save(platformEngineering, paths: paths) }
+        catch { present(error, context: "Saving platform engineering state") }
+    }
+
+    // MARK: - Qualification and scale expansion
+
+    func refreshLabExpansionAssessments() {
+        labExpansion.fleetLeases = FleetControlPlane.expire(labExpansion.fleetLeases)
+        labExpansion.qualificationMatrix = QualificationMatrixEvaluator.evaluate(
+            devices: devices, campaigns: qualificationCampaigns, seals: evidenceSeals
+        )
+        let guestAutomationAvailable = guestProtocolHandshakes.values.contains { handshake in
+            handshake.status == .compatible && handshake.authenticated && handshake.replayProtected
+                && (handshake.capabilities.contains(.deterministicReset)
+                    || handshake.capabilities.contains(.accessibilityTree))
+        }
+        let evidence = CapabilityMaturityEvaluator.Evidence(
+            adapterInstalled: labExpansion.installedAdapters.contains { $0.active },
+            adapterInvocationSucceeded: labExpansion.installedAdapters.contains { adapter in
+                adapter.active && labExpansion.adapterInvocations.contains { $0.adapterID == adapter.adapterID && $0.succeeded }
+            },
+            guestAutomationAvailable: guestAutomationAvailable,
+            replayValidated: labExpansion.replayExecutions.contains { $0.validation.passed },
+            symbolicationSucceeded: labExpansion.symbolicationReports.contains { $0.succeeded },
+            fleetLeaseActive: labExpansion.fleetLeases.contains { lease in
+                lease.state == .active && lease.expiresAt > .now
+                    && labExpansion.fleetDispatches.contains { $0.leaseID == lease.id && $0.authenticated }
+            },
+            timelineCaptured: !labExpansion.highFidelityTimelines.isEmpty,
+            coverageImported: !labExpansion.coverageReports.isEmpty,
+            physicalTargetDiscovered: labExpansion.physicalDeployments.contains { $0.installed && $0.launched },
+            approvedQualificationCount: labExpansion.qualificationMatrix.filter { $0.state == .approved }.count
+        )
+        labExpansion.maturity = CapabilityMaturityEvaluator.evaluate(evidence)
+        persistLabExpansion()
+        refreshReleaseCompletionAssessment()
+    }
+
+    func publishApprovedCompatibility(to url: URL) {
+        do {
+            _ = try QualificationMatrixEvaluator.publishApproved(
+                labExpansion.qualificationMatrix, seals: evidenceSeals, to: url
+            )
+            appendLog(.success, scope: "qualification", "Published approved compatibility evidence")
+            persistLogs()
+            reveal(url)
+        } catch {
+            present(error, context: "Publishing approved compatibility evidence")
+        }
+    }
+
+    func installRuntimeAdapter(_ manifest: BackendAdapterManifest? = nil) {
+        guard let manifest = manifest ?? platformEngineering.adapterManifests.first else {
+            alertMessage = "Import a conformant adapter manifest with an executablePath before installation."
+            return
+        }
+        do {
+            var installed = try RuntimeAdapterInstaller.install(
+                manifest: manifest, paths: paths, existing: labExpansion.installedAdapters
+            )
+            for index in labExpansion.installedAdapters.indices where labExpansion.installedAdapters[index].adapterID == installed.adapterID {
+                labExpansion.installedAdapters[index].active = false
+            }
+            installed.active = true
+            labExpansion.installedAdapters.insert(installed, at: 0)
+            refreshLabExpansionAssessments()
+            appendLog(.success, scope: "adapters", "Installed checksum-pinned adapter \(installed.id)")
+            persistLogs()
+        } catch { present(error, context: "Installing runtime adapter") }
+    }
+
+    func rollbackRuntimeAdapter(_ adapter: InstalledAdapterRecord) {
+        guard let previousVersion = adapter.replacedVersion,
+              let previous = labExpansion.installedAdapters.first(where: {
+                  $0.adapterID == adapter.adapterID && $0.version == previousVersion
+              }) else {
+            alertMessage = "No previously installed version is available for rollback."
+            return
+        }
+        for index in labExpansion.installedAdapters.indices where labExpansion.installedAdapters[index].adapterID == adapter.adapterID {
+            labExpansion.installedAdapters[index].active = labExpansion.installedAdapters[index].id == previous.id
+        }
+        refreshLabExpansionAssessments()
+        appendLog(.warning, scope: "adapters", "Rolled back \(adapter.adapterID) to \(previous.version)")
+        persistLogs()
+    }
+
+    func probeRuntimeAdapter(_ adapter: InstalledAdapterRecord) async {
+        guard let operation = adapter.capabilities.first else {
+            alertMessage = "The adapter declares no operations to probe."
+            return
+        }
+        busyKeys.insert("adapter-probe")
+        let request = AdapterRuntimeRequest(
+            schemaVersion: 1, requestID: UUID(), operation: operation,
+            deviceName: selectedDevice?.name, arguments: ["probe": "true"]
+        )
+        let labPaths = paths
+        let result = await Task.detached {
+            RuntimeAdapterHost.invoke(adapter: adapter, request: request, paths: labPaths)
+        }.value
+        labExpansion.adapterInvocations.insert(result.1, at: 0)
+        labExpansion.adapterInvocations = Array(labExpansion.adapterInvocations.prefix(1_000))
+        busyKeys.remove("adapter-probe")
+        persistLabExpansion()
+        appendLog(result.1.succeeded ? .success : .error, scope: "adapters", result.1.message)
+        persistLogs()
+    }
+
+    func performGuestAutomation(
+        _ action: GuestAutomationAction,
+        bundleIdentifier: String? = nil,
+        selector: String? = nil,
+        value: String? = nil
+    ) async {
+        guard let device = selectedDevice ?? devices.first else {
+            alertMessage = "Select a virtual device before running guest automation."
+            return
+        }
+        let request = GuestAutomationRequest(
+            id: UUID(), action: action,
+            bundleIdentifier: bundleIdentifier.flatMap { $0.isEmpty ? nil : $0 },
+            selector: selector.flatMap { $0.isEmpty ? nil : $0 },
+            value: value.flatMap { $0.isEmpty ? nil : $0 }, timeoutSeconds: 30
+        )
+        let blockers = GuestAutomationGate.validate(
+            request: request, handshake: guestProtocolHandshakes[device.id], policy: guestTrustPolicy
+        )
+        guard blockers.isEmpty else {
+            alertMessage = blockers.joined(separator: " ")
+            return
+        }
+        busyKeys.insert("guest-automation")
+        let result = await backend.performGuestAutomation(request, on: device)
+        labExpansion.guestAutomationResults.insert(result, at: 0)
+        labExpansion.guestAutomationResults = Array(labExpansion.guestAutomationResults.prefix(1_000))
+        busyKeys.remove("guest-automation")
+        refreshLabExpansionAssessments()
+        appendLog(result.succeeded ? .success : .error, scope: "guest-automation", result.message)
+        persistLogs()
+    }
+
+    func validateReplay(_ bundle: FailureReplayBundleRecord) -> ReplayValidationReport {
+        let (_, report) = ReplayValidator.validate(
+            record: bundle, devices: devices, artifacts: appArtifacts,
+            fixtures: canonicalFixtures, environments: environmentProfiles,
+            backend: backendDescriptor
+        )
+        if let manifestID = report.manifestID {
+            labExpansion.replayExecutions.insert(ReplayExecutionRecord(
+                id: UUID(), manifestID: manifestID, validation: report,
+                startedAt: .now, completedAt: .now, runID: nil,
+                state: report.passed ? .queued : .failed,
+                message: report.passed ? "Replay is validated and ready to execute." : "Replay validation failed."
+            ), at: 0)
+            persistLabExpansion()
+        }
+        refreshLabExpansionAssessments()
+        return report
+    }
+
+    func executeReplay(_ bundle: FailureReplayBundleRecord) async {
+        let (manifest, report) = ReplayValidator.validate(
+            record: bundle, devices: devices, artifacts: appArtifacts,
+            fixtures: canonicalFixtures, environments: environmentProfiles,
+            backend: backendDescriptor
+        )
+        guard report.passed, let manifest else {
+            _ = validateReplay(bundle)
+            alertMessage = "Replay validation failed; review the failed checks before execution."
+            return
+        }
+        var execution = ReplayExecutionRecord(
+            id: UUID(), manifestID: manifest.id, validation: report,
+            startedAt: .now, completedAt: nil, runID: nil,
+            state: .running, message: "Validated replay is executing."
+        )
+        labExpansion.replayExecutions.insert(execution, at: 0)
+        persistLabExpansion()
+        let prior = Set(testRuns.map(\.id))
+        if let artifactID = manifest.appArtifactID,
+           let artifact = appArtifacts.first(where: { $0.id == artifactID }) {
+            await startDeploymentTest(
+                name: "Replay — \(manifest.runName)",
+                deviceIDs: Set(manifest.deviceNames), packageURL: artifact.url
+            )
+        } else if let device = devices.first(where: { manifest.deviceNames.contains($0.name) }) {
+            await runBaselineAcceptance(on: device, packageURL: nil)
+        }
+        let run = testRuns.first { !prior.contains($0.id) }
+        execution.runID = run?.id
+        execution.completedAt = .now
+        execution.state = run?.state ?? .failed
+        execution.message = run.map { "Replay completed with run state \($0.state.rawValue)." } ?? "No test run was created."
+        if let index = labExpansion.replayExecutions.firstIndex(where: { $0.id == execution.id }) {
+            labExpansion.replayExecutions[index] = execution
+        }
+        refreshLabExpansionAssessments()
+    }
+
+    func symbolicateCrash(_ crash: URL, dSYM: URL) async {
+        busyKeys.insert("symbolication")
+        let builds = platformEngineering.builds
+        let report = await Task.detached {
+            CrashSymbolicator.symbolicate(crash: crash, dSYM: dSYM, builds: builds)
+        }.value
+        labExpansion.symbolicationReports.insert(report, at: 0)
+        labExpansion.symbolicationReports = Array(labExpansion.symbolicationReports.prefix(500))
+        busyKeys.remove("symbolication")
+        refreshLabExpansionAssessments()
+        appendLog(report.succeeded ? .success : .error, scope: "symbolication",
+                  report.succeeded ? "Symbolicated \(report.frames.count) crash frame(s)." : report.blockers.joined(separator: " "))
+        persistLogs()
+    }
+
+    func acquireFleetLease() {
+        let request = FleetJobRequest(
+            name: selectedDevice?.name ?? "Next hybrid lab job",
+            requiredCapabilities: ["lifecycle", "automation"],
+            requiredMemoryMB: selectedDevice?.memoryMB ?? 4_096
+        )
+        let result = FleetControlPlane.acquire(
+            request: request, hosts: platformEngineering.fleetHosts,
+            leases: labExpansion.fleetLeases
+        )
+        platformEngineering.placement = result.0
+        if let lease = result.1 { labExpansion.fleetLeases.insert(lease, at: 0) }
+        refreshLabExpansionAssessments()
+    }
+
+    func releaseFleetLease(_ lease: FleetLease) {
+        guard let index = labExpansion.fleetLeases.firstIndex(where: { $0.id == lease.id }) else { return }
+        labExpansion.fleetLeases[index].state = .released
+        refreshLabExpansionAssessments()
+    }
+
+    func dispatchFleetLease(_ lease: FleetLease) async {
+        guard lease.state == .active, lease.expiresAt > .now else {
+            alertMessage = "Only an active, unexpired fleet lease can be dispatched."
+            return
+        }
+        let device = selectedDevice?.name ?? lease.jobName
+        guard let result = await runRemoteAgentCommand([
+            "agent-submit", "--workflow", "boot-smoke", "--device", device,
+        ]) else { return }
+        let jobID = result.output
+            .split(whereSeparator: { $0.isWhitespace || $0 == ":" })
+            .compactMap { UUID(uuidString: String($0)) }.first
+        let dispatch = FleetDispatchRecord(
+            id: UUID(), leaseID: lease.id, hostID: lease.hostID, submittedAt: .now,
+            authenticated: result.succeeded && jobID != nil,
+            queuePath: remoteAgentConfiguration?.queuePath, jobID: jobID,
+            message: cleanAgentOutput(result.output).isEmpty ? "Agent submission returned no output." : cleanAgentOutput(result.output)
+        )
+        labExpansion.fleetDispatches.insert(dispatch, at: 0)
+        labExpansion.fleetDispatches = Array(labExpansion.fleetDispatches.prefix(1_000))
+        persistLabExpansion()
+        appendLog(dispatch.authenticated ? .success : .error, scope: "fleet", dispatch.message)
+        persistLogs()
+        await refreshRemoteAgentHealth()
+    }
+
+    func recordFleetHeartbeat(_ host: FleetHostRecord) {
+        labExpansion.fleetHeartbeats.insert(
+            FleetControlPlane.heartbeat(host: host, activeKeyID: remoteAgentConfiguration?.activeKeyID), at: 0
+        )
+        labExpansion.fleetHeartbeats = Array(labExpansion.fleetHeartbeats.prefix(1_000))
+        persistLabExpansion()
+    }
+
+    func captureHighFidelityTimeline(_ run: TestRunRecord) {
+        do {
+            var available: Set<HighFidelitySource> = [.hostLogs, .screenshots, .performance]
+            if backendCapabilities.guestLogs { available.insert(.guestLogs) }
+            if backendCapabilities.audio { available.insert(.audio) }
+            if backendCapabilities.networking { available.insert(.network) }
+            if platformBackendCapabilityNames().contains("timelineVideo") { available.insert(.video) }
+            let session = try HighFidelityTimelineBuilder.capture(
+                run: run, logs: logs, performance: performanceSamples,
+                availableSources: available, paths: paths
+            )
+            labExpansion.highFidelityTimelines.insert(session, at: 0)
+            refreshLabExpansionAssessments()
+            appendLog(.success, scope: "timeline", "Captured monotonic timeline with \(session.events.count) event(s)")
+            persistLogs()
+        } catch { present(error, context: "Capturing high-fidelity timeline") }
+    }
+
+    func importSourceCoverage(_ url: URL, sourceRevision: String = "") {
+        do {
+            let coverage = try SourceCoverageImporter.importReport(url, sourceRevision: sourceRevision)
+            labExpansion.coverageReports.insert(coverage, at: 0)
+            platformEngineering.qualityPolicy.measuredSourceCoveragePercent = coverage.linePercent
+            platformEngineering.quality = EngineeringQualityEvaluator.run(policy: platformEngineering.qualityPolicy)
+            persistPlatformEngineering()
+            refreshLabExpansionAssessments()
+            appendLog(.success, scope: "quality", String(format: "Imported %.1f%% source coverage from %@", coverage.linePercent, coverage.producer))
+            persistLogs()
+        } catch { present(error, context: "Importing source coverage") }
+    }
+
+    func discoverPhysicalDevices() async {
+        busyKeys.insert("physical-discovery")
+        labExpansion.physicalDevices = await Task.detached { PhysicalDeviceDiscovery.discover() }.value
+        busyKeys.remove("physical-discovery")
+        refreshLabExpansionAssessments()
+        appendLog(.info, scope: "hybrid-lab", "CoreDevice discovered \(labExpansion.physicalDevices.count) physical target(s)")
+        persistLogs()
+    }
+
+    func routeHybridTarget(preferPhysical: Bool, requiredCapabilities: [String] = ["networking", "audio"]) {
+        let virtual = HybridTargetRouter.virtualTargets(devices, backendCapabilities: platformBackendCapabilityNames())
+        let requestedMajor: Int?
+        if let version = selectedDevice?.restoreInfo?.ios.version {
+            requestedMajor = Int(version.split(separator: ".").first ?? "")
+        } else {
+            requestedMajor = nil
+        }
+        labExpansion.hybridRoute = HybridTargetRouter.route(
+            HybridRouteRequest(
+                iosMajor: requestedMajor,
+                requiredCapabilities: Array(Set(requiredCapabilities.filter { !$0.isEmpty })).sorted(),
+                preferPhysical: preferPhysical
+            ),
+            targets: virtual + labExpansion.physicalDevices
+        )
+        persistLabExpansion()
+    }
+
+    func deployToPhysicalTarget(app: URL, target: ExecutionTargetRecord) async {
+        busyKeys.insert("physical-deployment")
+        let deployment = await Task.detached {
+            PhysicalDeviceService.installAndLaunch(app: app, on: target)
+        }.value
+        labExpansion.physicalDeployments.insert(deployment, at: 0)
+        labExpansion.physicalDeployments = Array(labExpansion.physicalDeployments.prefix(250))
+        busyKeys.remove("physical-deployment")
+        refreshLabExpansionAssessments()
+        appendLog(deployment.launched ? .success : .error, scope: "hybrid-lab", deployment.message)
+        persistLogs()
+    }
+
+    // MARK: - Production depth
+
+    func buildGuestCompanionPackage(
+        payload: URL, identifier: String, version: String, destination: URL
+    ) {
+        do {
+            let package = try GuestCompanionLifecycleManager.buildPackage(
+                payload: payload, identifier: identifier, version: version,
+                supportedBackendIDs: [backendDescriptor.id], outputRoot: destination
+            )
+            appendLog(.success, scope: "guest-companion", "Built verified companion package at \(package.path)")
+            persistLogs()
+            installGuestCompanionPackage(package)
+            reveal(package)
+        } catch { present(error, context: "Building guest companion package") }
+    }
+
+    func installGuestCompanionPackage(_ url: URL) {
+        do {
+            let package = try GuestCompanionLifecycleManager.install(
+                package: url, backendID: backendDescriptor.id,
+                existing: productionDepth.companions, paths: paths
+            )
+            productionDepth.companions.removeAll {
+                $0.identifier == package.identifier && $0.version == package.version
+            }
+            productionDepth.companions.append(package)
+            productionDepth.companions = GuestCompanionLifecycleManager.activate(
+                package, in: productionDepth.companions
+            )
+            recordCompanionLifecycle(
+                action: .imported, package: package, deviceName: nil,
+                succeeded: true, message: "Imported, hash-verified, and activated companion \(package.identifier) \(package.version)."
+            )
+        } catch {
+            let fallback = ManagedGuestCompanion(
+                id: UUID(), identifier: "rejected-package", version: "0.0.0",
+                protocolMinimum: 0, protocolMaximum: 0, payloadPath: url.path,
+                payloadSHA256: "", installedAt: .now, active: false, replacedVersion: nil
+            )
+            recordCompanionLifecycle(
+                action: .rejected, package: fallback, deviceName: nil,
+                succeeded: false, message: error.localizedDescription
+            )
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func rollbackGuestCompanion(_ package: ManagedGuestCompanion) {
+        do {
+            productionDepth.companions = try GuestCompanionLifecycleManager.rollback(
+                package, in: productionDepth.companions
+            )
+            let active = productionDepth.companions.first {
+                $0.identifier == package.identifier && $0.active
+            } ?? package
+            recordCompanionLifecycle(
+                action: .rolledBack, package: active, deviceName: nil,
+                succeeded: true, message: "Rolled back to checksum-valid companion \(active.version)."
+            )
+        } catch { present(error, context: "Rolling back guest companion") }
+    }
+
+    func deployGuestCompanion(_ package: ManagedGuestCompanion) async {
+        guard let device = selectedDevice, device.isRunning else {
+            alertMessage = "Select and start a virtual device before deploying a guest companion."
+            return
+        }
+        busyKeys.insert("companion-deploy")
+        let result = await backend.deployGuestCompanion(
+            GuestCompanionDeploymentRequest(
+                id: UUID(), identifier: package.identifier, version: package.version,
+                payloadPath: package.payloadPath, payloadSHA256: package.payloadSHA256
+            ),
+            on: device
+        )
+        busyKeys.remove("companion-deploy")
+        recordCompanionLifecycle(
+            action: result.succeeded ? .deployed : .rejected,
+            package: package, deviceName: device.name,
+            succeeded: result.succeeded, message: result.message
+        )
+    }
+
+    func refreshSigningIdentities() async {
+        busyKeys.insert("signing-identities")
+        availableSigningIdentities = await Task.detached {
+            SigningProvisioningManager.identities()
+        }.value
+        busyKeys.remove("signing-identities")
+        appendLog(.info, scope: "signing", "Found \(availableSigningIdentities.count) valid code-signing identity record(s)")
+        persistLogs()
+    }
+
+    func inspectSigningAndProvisioning(_ app: URL) async {
+        busyKeys.insert("signing-inspect")
+        let assessment = await Task.detached {
+            SigningProvisioningManager.inspect(app: app)
+        }.value
+        busyKeys.remove("signing-inspect")
+        productionDepth.signingAssessments.insert(assessment, at: 0)
+        productionDepth.signingAssessments = Array(productionDepth.signingAssessments.prefix(250))
+        persistProductionDepth()
+        appendLog(assessment.passed ? .success : .warning, scope: "signing", assessment.passed ? "Signing and provisioning checks passed" : "Signing or provisioning checks remain blocked")
+        persistLogs()
+    }
+
+    func stageAndSign(_ app: URL, identity: CodeSigningIdentityRecord) async {
+        busyKeys.insert("signing-stage")
+        do {
+            let labPaths = paths
+            let assessment = try await Task.detached {
+                try SigningProvisioningManager.stageAndSign(app: app, identity: identity, paths: labPaths)
+            }.value
+            productionDepth.signingAssessments.insert(assessment, at: 0)
+            productionDepth.signingAssessments = Array(productionDepth.signingAssessments.prefix(250))
+            persistProductionDepth()
+            appendLog(assessment.passed ? .success : .warning, scope: "signing", "Created staged signed build at \(assessment.stagedSignedAppPath ?? "unknown")")
+            persistLogs()
+        } catch { present(error, context: "Staging and signing app") }
+        busyKeys.remove("signing-stage")
+    }
+
+    func inspectPhysicalDevice(_ target: ExecutionTargetRecord, autoMountDDI: Bool = true) async {
+        busyKeys.insert("physical-lifecycle")
+        let detail = await Task.detached {
+            PhysicalDeviceLifecycleService.inspect(target: target, autoMountDDI: autoMountDDI)
+        }.value
+        busyKeys.remove("physical-lifecycle")
+        productionDepth.physicalDetails.removeAll { $0.targetID == detail.targetID }
+        productionDepth.physicalDetails.insert(detail, at: 0)
+        productionDepth.physicalDetails = Array(productionDepth.physicalDetails.prefix(250))
+        persistProductionDepth()
+        appendLog(detail.ready ? .success : .warning, scope: "physical-lifecycle", detail.ready ? "Physical target \(detail.name) is paired, connected, in Developer Mode, and DDI-ready" : "Physical target \(detail.name) is not lifecycle-ready")
+        persistLogs()
+    }
+
+    func pairPhysicalDevice(_ target: ExecutionTargetRecord) async {
+        busyKeys.insert("physical-pair")
+        let result = await Task.detached {
+            PhysicalDeviceLifecycleService.pair(targetID: target.id)
+        }.value
+        busyKeys.remove("physical-pair")
+        appendLog(result.passed ? .success : .error, scope: "physical-lifecycle", result.evidence)
+        persistLogs()
+        await inspectPhysicalDevice(target)
+    }
+
+    func acquirePhysicalDeviceLease(_ target: ExecutionTargetRecord, owner: String, minutes: Int) {
+        do {
+            productionDepth.physicalLeases = PhysicalDeviceLifecycleService.normalize(productionDepth.physicalLeases)
+            let lease = try PhysicalDeviceLifecycleService.acquireLease(
+                targetID: target.id, owner: owner,
+                duration: TimeInterval(minutes * 60), existing: productionDepth.physicalLeases
+            )
+            productionDepth.physicalLeases.insert(lease, at: 0)
+            productionDepth.physicalLeases = Array(productionDepth.physicalLeases.prefix(1_000))
+            persistProductionDepth()
+            try? scalableEventStore?.append(category: "physical-lease", entityID: lease.id.uuidString, occurredAt: lease.acquiredAt, value: lease)
+            appendLog(.success, scope: "physical-lifecycle", "Acquired exclusive lease for \(target.name)")
+            persistLogs()
+        } catch { present(error, context: "Acquiring physical-device lease") }
+    }
+
+    func releasePhysicalDeviceLease(_ lease: PhysicalDeviceLease) {
+        guard let index = productionDepth.physicalLeases.firstIndex(where: { $0.id == lease.id }) else { return }
+        productionDepth.physicalLeases[index].state = .released
+        persistProductionDepth()
+    }
+
+    func compareVisualBaseline(
+        baseline: URL,
+        candidate: URL,
+        masks: [VisualMaskRect] = [],
+        threshold: Int = 8,
+        maximumChangedPercent: Double = 0.5
+    ) async {
+        busyKeys.insert("visual-regression")
+        do {
+            let output = paths.stateRoot.appendingPathComponent("Visual Regression", isDirectory: true)
+            let report = try await Task.detached {
+                try VisualRegressionEngine.compare(
+                    baseline: baseline, candidate: candidate, masks: masks,
+                    perChannelThreshold: threshold,
+                    maximumChangedPercent: maximumChangedPercent, outputRoot: output
+                )
+            }.value
+            productionDepth.visualRegressions.insert(report, at: 0)
+            productionDepth.visualRegressions = Array(productionDepth.visualRegressions.prefix(250))
+            persistProductionDepth()
+            appendLog(report.passed ? .success : .warning, scope: "visual-regression", String(format: "Visual difference %.3f%%", report.changedPercent))
+            persistLogs()
+        } catch { present(error, context: "Comparing visual baseline") }
+        busyKeys.remove("visual-regression")
+    }
+
+    func compareLatestAccessibilitySnapshots() {
+        let roots = labExpansion.guestAutomationResults.compactMap(\.accessibilityRoot)
+        guard roots.count >= 2 else {
+            alertMessage = "Capture at least two guest accessibility trees before comparing them."
+            return
+        }
+        let report = VisualRegressionEngine.compareAccessibility(roots[1], roots[0])
+        productionDepth.accessibilityRegressions.insert(report, at: 0)
+        productionDepth.accessibilityRegressions = Array(productionDepth.accessibilityRegressions.prefix(250))
+        persistProductionDepth()
+    }
+
+    func injectFaultScenario(_ scenario: FaultInjectionScenario) async {
+        guard let device = selectedDevice, device.isRunning else {
+            alertMessage = "Select and start a virtual device before injecting a fault."
+            return
+        }
+        busyKeys.insert("fault-injection")
+        let result = await backend.injectFault(scenario, on: device)
+        busyKeys.remove("fault-injection")
+        productionDepth.faultResults.insert(result, at: 0)
+        productionDepth.faultResults = Array(productionDepth.faultResults.prefix(1_000))
+        persistProductionDepth()
+        appendLog(result.succeeded ? .success : .warning, scope: "fault-injection", result.message)
+        persistLogs()
+    }
+
+    func saveMTLSEnrollment(_ configuration: MTLSEnrollmentConfiguration) {
+        let blockers = MTLSEnrollmentValidator.validate(configuration)
+        guard blockers.isEmpty else {
+            alertMessage = blockers.joined(separator: " ")
+            return
+        }
+        let record = MTLSEnrollmentRecord(
+            id: UUID(), enrolledAt: .now, agentID: configuration.agentID,
+            endpoint: configuration.endpoint, clientIdentityLabel: configuration.clientIdentityLabel,
+            serverCertificateSHA256Pins: configuration.serverCertificateSHA256Pins,
+            certificateExpiresAt: nil, revokedAt: nil, replacedBy: nil
+        )
+        for index in productionDepth.mtlsEnrollments.indices where productionDepth.mtlsEnrollments[index].revokedAt == nil {
+            productionDepth.mtlsEnrollments[index].revokedAt = .now
+            productionDepth.mtlsEnrollments[index].replacedBy = record.id
+        }
+        productionDepth.mtlsConfiguration = configuration
+        productionDepth.mtlsEnrollments.insert(record, at: 0)
+        productionDepth.mtlsEnrollments = Array(productionDepth.mtlsEnrollments.prefix(100))
+        persistProductionDepth()
+    }
+
+    func revokeActiveMTLSEnrollment() {
+        let now = Date()
+        var revoked = false
+        for index in productionDepth.mtlsEnrollments.indices
+            where productionDepth.mtlsEnrollments[index].revokedAt == nil {
+            productionDepth.mtlsEnrollments[index].revokedAt = now
+            revoked = true
+        }
+        productionDepth.mtlsConfiguration = nil
+        persistProductionDepth()
+        appendLog(
+            revoked ? .success : .warning, scope: "fleet-mtls",
+            revoked ? "Revoked the active mTLS enrollment; fleet submissions now fail closed" : "No active mTLS enrollment was available to revoke"
+        )
+        persistLogs()
+    }
+
+    func probeMTLSFleet() async {
+        guard let configuration = productionDepth.mtlsConfiguration else {
+            alertMessage = "Save a valid mTLS fleet enrollment first."
+            return
+        }
+        busyKeys.insert("mtls-probe")
+        let probe = await MTLSFleetTransport.probe(configuration)
+        busyKeys.remove("mtls-probe")
+        productionDepth.mtlsProbes.insert(probe, at: 0)
+        productionDepth.mtlsProbes = Array(productionDepth.mtlsProbes.prefix(250))
+        persistProductionDepth()
+        appendLog(probe.authenticated ? .success : .warning, scope: "fleet-mtls", probe.message)
+        persistLogs()
+    }
+
+    func migrateHighVolumeStateToSQLite() async {
+        busyKeys.insert("event-store-migration")
+        do {
+            let store: ScalableEventStore
+            if let scalableEventStore { store = scalableEventStore }
+            else {
+                store = try ScalableEventStore(url: paths.stateRoot.appendingPathComponent("lab-events.sqlite3"))
+                scalableEventStore = store
+            }
+            let currentLogs = logs
+            let currentRuns = testRuns
+            let fleet = labExpansion.fleetLeases
+            let physical = productionDepth.physicalLeases
+            let status = try await Task.detached {
+                try store.migrate(logs: currentLogs, testRuns: currentRuns, fleetLeases: fleet, physicalLeases: physical)
+            }.value
+            productionDepth.eventStore = status
+            persistProductionDepth()
+            appendLog(.success, scope: "event-store", status.message)
+            persistLogs()
+        } catch { present(error, context: "Migrating high-volume state to SQLite") }
+        busyKeys.remove("event-store-migration")
+    }
+
+    func issueCurrentCompatibilityCertificate(suiteURL: URL) {
+        do {
+            let tuple = currentRuntimeCompatibilityTuple()
+            guard let campaign = qualificationCampaigns.first(where: { $0.state == .passed && $0.evidenceSealID != nil }),
+                  let sealID = campaign.evidenceSealID,
+                  let seal = evidenceSeals.first(where: { $0.id == sealID }) else {
+                throw ProductionDepthError.invalid("A passing campaign linked to an approved evidence seal is required.")
+            }
+            let data = try Data(contentsOf: suiteURL)
+            let certificate = try RuntimeCompatibilityCertificationEngine.issue(
+                tuple: tuple, campaign: campaign, seal: seal, suiteData: data
+            )
+            productionDepth.compatibilityCertificates.insert(certificate, at: 0)
+            productionDepth.compatibilityCertificates = Array(productionDepth.compatibilityCertificates.prefix(500))
+            productionDepth.upgradeDecision = RuntimeCompatibilityCertificationEngine.evaluate(
+                candidate: tuple, certificates: productionDepth.compatibilityCertificates
+            )
+            persistProductionDepth()
+        } catch { present(error, context: "Issuing runtime compatibility certificate") }
+    }
+
+    func evaluateCurrentRuntimeUpgrade() {
+        productionDepth.upgradeDecision = RuntimeCompatibilityCertificationEngine.evaluate(
+            candidate: currentRuntimeCompatibilityTuple(),
+            certificates: productionDepth.compatibilityCertificates
+        )
+        persistProductionDepth()
+    }
+
+    func auditCIMaintenance(repositoryRoot: URL? = nil) {
+        let candidate = repositoryRoot ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        productionDepth.ciMaintenance = CIMaintenanceAuditor.inspect(repositoryRoot: candidate)
+        persistProductionDepth()
+        appendLog(productionDepth.ciMaintenance.passed ? .success : .warning, scope: "ci-maintenance", productionDepth.ciMaintenance.message)
+        persistLogs()
+    }
+
+    func runOperatorDrill(_ runbook: OperatorRunbook) {
+        let context = OperatorRunbookContext(
+            migrationBackupAvailable: migrationReport.latestBackupPath != nil,
+            remoteAgentKeyringAvailable: remoteAgentConfiguration?.activeKeyID != nil,
+            fleetDrainControlAvailable: !platformEngineering.fleetHosts.isEmpty,
+            evidenceLedgerValid: evidenceVerificationIssues.isEmpty && !evidenceSeals.isEmpty,
+            updateRollbackAvailable: stagedUpdate?.rollbackScriptPath != nil,
+            physicalLeaseControlAvailable: true
+        )
+        let drill = OperatorRunbookCatalog.drill(runbook, context: context)
+        productionDepth.runbookDrills.insert(drill, at: 0)
+        productionDepth.runbookDrills = Array(productionDepth.runbookDrills.prefix(1_000))
+        persistProductionDepth()
+        appendLog(drill.passed ? .success : .warning, scope: "runbook", "\(runbook.title): \(drill.message)")
+        persistLogs()
+    }
+
+    private func currentRuntimeCompatibilityTuple() -> RuntimeCompatibilityTuple {
+        let companion = productionDepth.companions.first(where: \.active)
+        let adapter = labExpansion.installedAdapters.first(where: \.active)
+        return RuntimeCompatibilityTuple(
+            hostModel: readiness.model, macOSVersion: readiness.macOSVersion,
+            backendID: backendDescriptor.id, backendVersion: backendDescriptor.version,
+            guestCompanionID: companion?.identifier, guestCompanionVersion: companion?.version,
+            adapterID: adapter?.adapterID, adapterVersion: adapter?.version,
+            labSchemaVersion: LabMigrationManager.currentSchemaVersion
+        )
+    }
+
+    private func recordCompanionLifecycle(
+        action: GuestCompanionLifecycleAction,
+        package: ManagedGuestCompanion,
+        deviceName: String?,
+        succeeded: Bool,
+        message: String
+    ) {
+        productionDepth.companionLifecycle.insert(
+            GuestCompanionLifecycleRecord(
+                id: UUID(), occurredAt: .now, action: action,
+                identifier: package.identifier, version: package.version,
+                deviceName: deviceName, succeeded: succeeded, message: message
+            ),
+            at: 0
+        )
+        productionDepth.companionLifecycle = Array(productionDepth.companionLifecycle.prefix(1_000))
+        persistProductionDepth()
+        appendLog(succeeded ? .success : .warning, scope: "companion", message)
+        persistLogs()
+    }
+
+    // MARK: - v1.1 operations and hardening
+
+    func refreshOperationsHardening() async {
+        busyKeys.insert("operations-inspection")
+        let labPaths = paths
+        let setup = operationsHardening.hostSetup
+        let fleetEnabled = remoteAgentConfiguration?.enabled == true || !releaseCompletion.fleetAccessPolicy.principals.isEmpty
+        let journal = operationJournalEntries
+        let pendingUpdate = stagedUpdate
+        let fleetLeases = labExpansion.fleetLeases
+        let physicalLeases = productionDepth.physicalLeases
+        let faultResults = productionDepth.faultResults
+        let faultRecoveries = releaseCompletion.faultRecoveries
+        let lifecyclePolicy = operationsHardening.lifecyclePolicy
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? BackendAdapterConformance.labVersion
+        let backendVersion = backendDescriptor.version
+        let backendExecutable = readiness.binaryPath.map { URL(fileURLWithPath: $0) }
+        let guestIdentity = productionDepth.companions.first(where: \.active).map {
+            "\($0.version):\($0.payloadSHA256)"
+        }
+        let inspection = await Task.detached(priority: .userInitiated) {
+            let bootID = HostSetupCoordinator.bootSessionID()
+            return (
+                setup: HostSetupCoordinator.reconcile(setup, currentBootSessionID: bootID),
+                permissions: PermissionOnboardingInspector.inspect(paths: labPaths, fleetEnabled: fleetEnabled),
+                encryption: StorageEncryptionInspector.inspect(path: labPaths.dataRoot),
+                reconciliation: StartupReconciler.inspect(
+                    paths: labPaths, journal: journal, stagedUpdate: pendingUpdate,
+                    fleetLeases: fleetLeases, physicalLeases: physicalLeases,
+                    faultResults: faultResults, faultRecoveries: faultRecoveries
+                ),
+                lifecycle: SupportLifecycleEvaluator.evaluate(lifecyclePolicy),
+                dependencies: EvidenceInvalidationEngine.capture(
+                    paths: labPaths, appVersion: appVersion,
+                    backendVersion: backendVersion, backendExecutable: backendExecutable,
+                    guestIdentity: guestIdentity
+                )
+            )
+        }.value
+        operationsHardening.hostSetup = inspection.setup
+        operationsHardening.permissions = inspection.permissions
+        operationsHardening.storageEncryption = inspection.encryption
+        operationsHardening.reconciliation = inspection.reconciliation
+        operationsHardening.lifecycleAssessment = inspection.lifecycle
+        let current = inspection.dependencies
+        operationsHardening.evidenceCurrent = current
+        if let baseline = operationsHardening.evidenceBaseline,
+           let invalidation = EvidenceInvalidationEngine.compare(baseline, current),
+           !operationsHardening.evidenceInvalidations.contains(where: {
+               !$0.resolved && Set($0.changedRoots) == Set(invalidation.changedRoots)
+           }) {
+            operationsHardening.evidenceInvalidations.insert(invalidation, at: 0)
+        }
+        operationsHardening.evidenceInvalidations = Array(operationsHardening.evidenceInvalidations.prefix(500))
+        operationsHardening.report = OperationsHardeningEvaluator.evaluate(operationsHardening)
+        persistOperationsHardening()
+        busyKeys.remove("operations-inspection")
+    }
+
+    func discoverHostInstallations() async {
+        busyKeys.insert("operations-host-discovery")
+        macOSInstallations = await Task.detached(priority: .userInitiated) {
+            HostSetupCoordinator.discoverInstallations()
+        }.value
+        busyKeys.remove("operations-host-discovery")
+        if macOSInstallations.isEmpty {
+            alertMessage = "No APFS macOS System volumes were discovered. You can still use `diskutil apfs list` to identify the intended installation."
+        }
+    }
+
+    func beginHostSetup(for installation: MacOSInstallation) {
+        operationsHardening.hostSetup = HostSetupCoordinator.begin(for: installation)
+        evaluateAndPersistOperations(message: "Prepared a volume-specific Recovery continuation record.")
+    }
+
+    func acknowledgeRecoveryStep() {
+        operationsHardening.hostSetup = HostSetupCoordinator.markRecoveryApplied(operationsHardening.hostSetup)
+        evaluateAndPersistOperations(message: "Recorded the Recovery step; restart is now required.")
+    }
+
+    func verifyHostSetup() {
+        operationsHardening.hostSetup = HostSetupCoordinator.verify(
+            operationsHardening.hostSetup, hostReady: readiness.isReady
+        )
+        evaluateAndPersistOperations(message: operationsHardening.hostSetup.note)
+    }
+
+    func openPermissionSettings(_ check: PermissionCheck) {
+        guard let value = check.settingsURL, let url = URL(string: value) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func importFleetWorkerEvidence(_ url: URL) {
+        do {
+            operationsHardening.fleetProtocol = try decodeOperationsEvidence(FleetWorkerProtocolEvidence.self, from: url)
+            let issues = FleetWorkerProtocolEvaluator.validate(operationsHardening.fleetProtocol)
+            evaluateAndPersistOperations(
+                message: issues.isEmpty ? "Imported complete fleet worker qualification." : issues.joined(separator: " ")
+            )
+        } catch { present(error, context: "Importing fleet worker evidence") }
+    }
+
+    func verifyFleetAudit(ledger: URL, certificate: URL) {
+        do {
+            let certificateData = try Data(contentsOf: certificate)
+            guard let reference = SecCertificateCreateWithData(nil, certificateData as CFData) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            operationsHardening.fleetAudit = try FleetAuditVerifier.verify(url: ledger, certificate: reference)
+            evaluateAndPersistOperations(message: operationsHardening.fleetAudit.passed
+                ? "Verified the signed fleet audit chain."
+                : operationsHardening.fleetAudit.issues.joined(separator: " "))
+        } catch { present(error, context: "Verifying the fleet audit ledger") }
+    }
+
+    func captureEvidenceDependencyBaseline() {
+        guard let current = operationsHardening.evidenceCurrent else {
+            alertMessage = "Run Inspect All before capturing the dependency baseline."
+            return
+        }
+        operationsHardening.evidenceBaseline = current
+        operationsHardening.evidenceInvalidations.removeAll()
+        evaluateAndPersistOperations(message: "Captured the current dependency graph as the evidence baseline.")
+    }
+
+    func acknowledgeEvidenceReplacement() {
+        operationsHardening.evidenceInvalidations = operationsHardening.evidenceInvalidations.map { record in
+            EvidenceInvalidationRecord(
+                id: record.id, detectedAt: record.detectedAt,
+                changedRoots: record.changedRoots, invalidatedEvidence: record.invalidatedEvidence,
+                acknowledgedAt: record.acknowledgedAt ?? .now
+            )
+        }
+        operationsHardening.evidenceBaseline = operationsHardening.evidenceCurrent
+        evaluateAndPersistOperations(message: "Marked invalidated evidence as replaced and advanced the dependency baseline.")
+    }
+
+    func repairSafeStartupFindings() {
+        operationsHardening.reconciliation = StartupReconciler.repairSafeFindings(
+            operationsHardening.reconciliation, paths: paths
+        )
+        evaluateAndPersistOperations(message: "Applied only startup repairs explicitly classified as safe.")
+    }
+
+    func stageComponentUpgrade(
+        sources: [(component: String, url: URL)],
+        managerVersion: String, backendVersion: String, guestVersion: String
+    ) {
+        do {
+            let currentGuest = productionDepth.companions.first(where: \.active)?.version ?? "unavailable"
+            let current = ComponentVersionSet(
+                manager: BackendAdapterConformance.labVersion,
+                backend: backendDescriptor.version ?? "unavailable", guestCompanion: currentGuest,
+                protocolVersion: BackendAdapterConformance.protocolVersion,
+                schemaVersion: LabMigrationManager.currentSchemaVersion
+            )
+            let target = ComponentVersionSet(
+                manager: managerVersion, backend: backendVersion, guestCompanion: guestVersion,
+                protocolVersion: BackendAdapterConformance.protocolVersion,
+                schemaVersion: LabMigrationManager.currentSchemaVersion
+            )
+            operationsHardening.componentUpgrade = try ComponentUpgradeCoordinator.stage(
+                sources: sources, from: current, to: target, paths: paths
+            )
+            evaluateAndPersistOperations(message: operationsHardening.componentUpgrade.message)
+        } catch { present(error, context: "Staging the atomic component upgrade") }
+    }
+
+    func approveComponentUpgrade() {
+        operationsHardening.componentUpgrade = ComponentUpgradeCoordinator.approve(operationsHardening.componentUpgrade)
+        evaluateAndPersistOperations(message: operationsHardening.componentUpgrade.message)
+    }
+
+    func commitComponentUpgrade() {
+        do {
+            operationsHardening.componentUpgrade = try ComponentUpgradeCoordinator.commit(
+                operationsHardening.componentUpgrade,
+                healthChecks: ["managerLaunch": true, "backendContract": readiness.isReady, "stateRead": true],
+                paths: paths
+            )
+            evaluateAndPersistOperations(message: operationsHardening.componentUpgrade.message)
+        } catch { present(error, context: "Committing the atomic component upgrade") }
+    }
+
+    func rollbackComponentUpgrade() {
+        do {
+            operationsHardening.componentUpgrade = try ComponentUpgradeCoordinator.rollback(
+                operationsHardening.componentUpgrade, paths: paths
+            )
+            evaluateAndPersistOperations(message: operationsHardening.componentUpgrade.message)
+        } catch { present(error, context: "Rolling back the component upgrade") }
+    }
+
+    func importSupplyChainPolicyEvidence(_ url: URL) {
+        do {
+            operationsHardening.supplyChainEvidence = try SupplyChainEvidenceImporter.load(
+                url, policy: operationsHardening.supplyChainPolicy
+            )
+            evaluateAndPersistOperations(message: operationsHardening.supplyChainEvidence.passed
+                ? "Supply-chain policy passed."
+                : operationsHardening.supplyChainEvidence.issues.joined(separator: " "))
+        } catch { present(error, context: "Importing supply-chain policy evidence") }
+    }
+
+    func updateLifecyclePolicy(_ policy: SupportLifecyclePolicy) {
+        var bounded = policy
+        bounded.entries = Array(policy.entries.prefix(1_000))
+        bounded.updatedAt = .now
+        operationsHardening.lifecyclePolicy = bounded
+        operationsHardening.lifecycleAssessment = SupportLifecycleEvaluator.evaluate(bounded)
+        evaluateAndPersistOperations(message: operationsHardening.lifecycleAssessment.passed
+            ? "Support lifecycle policy passed."
+            : operationsHardening.lifecycleAssessment.issues.joined(separator: " "))
+    }
+
+    func importLifecyclePolicy(_ url: URL) {
+        do {
+            let policy = try decodeOperationsEvidence(SupportLifecyclePolicy.self, from: url)
+            updateLifecyclePolicy(policy)
+        } catch { present(error, context: "Importing support lifecycle policy") }
+    }
+
+    func exportLifecyclePolicy(to url: URL) {
+        do {
+            try HardeningJSON.save(operationsHardening.lifecyclePolicy, to: url)
+            appendLog(.success, scope: "operations-hardening", "Exported support lifecycle policy.")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Exporting support lifecycle policy") }
+    }
+
+    func exportOperationsHardeningReport(to url: URL) {
+        do {
+            operationsHardening.report = OperationsHardeningEvaluator.evaluate(operationsHardening)
+            try HardeningJSON.save(operationsHardening.report, to: url)
+            appendLog(.success, scope: "operations-hardening", "Exported the v1.1 hardening report.")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Exporting the v1.1 hardening report") }
+    }
+
+    private func decodeOperationsEvidence<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size > 0, size <= 32 * 1_024 * 1_024 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(type, from: Data(contentsOf: url))
+    }
+
+    private func evaluateAndPersistOperations(message: String) {
+        operationsHardening.report = OperationsHardeningEvaluator.evaluate(operationsHardening)
+        persistOperationsHardening()
+        appendLog(operationsHardening.report.releaseReady ? .success : .warning, scope: "operations-hardening", message)
+        persistLogs()
+    }
+
+    private func persistOperationsHardening() {
+        do { try OperationsHardeningStore.save(operationsHardening, paths: paths) }
+        catch { present(error, context: "Saving v1.1 operations-hardening state") }
+    }
+
+    // MARK: - v1 release completion
+
+    func updateSupportContract(_ contract: V1SupportContract) {
+        releaseCompletion.supportContract = SupportContractValidator.candidate(contract)
+        refreshReleaseCompletionAssessment()
+        appendLog(
+            releaseCompletion.supportContract.status == .candidate ? .success : .warning,
+            scope: "release-completion",
+            "Support contract saved as \(releaseCompletion.supportContract.status.rawValue)."
+        )
+        persistLogs()
+    }
+
+    func approveSupportContract(reviewer: String) {
+        let name = reviewer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            alertMessage = "A named reviewer is required to approve the v1 support contract."
+            return
+        }
+        refreshReleaseCompletionAssessment()
+        guard releaseCompletion.supportContract.status == .candidate,
+              releaseCompletion.report.gates.allSatisfy(\.passed) else {
+            alertMessage = "The support contract can be approved only after all ten completion gates pass."
+            return
+        }
+        releaseCompletion.supportContract.status = .approved
+        releaseCompletion.supportContract.approvedBy = name
+        releaseCompletion.supportContract.approvedAt = .now
+        releaseCompletion.supportContract.updatedAt = .now
+        refreshReleaseCompletionAssessment()
+        appendLog(.success, scope: "release-completion", "Approved the v1 support contract after all evidence gates passed.")
+        persistLogs()
+    }
+
+    func auditGuestCompanionSource(repositoryRoot: URL) async {
+        busyKeys.insert("completion-companion-audit")
+        let report = await Task.detached(priority: .userInitiated) {
+            GuestCompanionSourceAuditor.inspect(repositoryRoot: repositoryRoot)
+        }.value
+        releaseCompletion.companionSource = report
+        busyKeys.remove("completion-companion-audit")
+        refreshReleaseCompletionAssessment()
+        appendLog(report.passed ? .success : .warning, scope: "release-completion", report.message)
+        persistLogs()
+    }
+
+    func importUIAutomationEvidence(_ url: URL) {
+        do {
+            let report = try UIAutomationEvidenceImporter.load(url)
+            releaseCompletion.uiAutomation.removeAll { $0.id == report.id }
+            releaseCompletion.uiAutomation.insert(report, at: 0)
+            releaseCompletion.uiAutomation = Array(releaseCompletion.uiAutomation.prefix(100))
+            refreshReleaseCompletionAssessment()
+            appendLog(.success, scope: "release-completion", "Imported verified desktop UI automation evidence.")
+            persistLogs()
+        } catch { present(error, context: "Importing UI automation evidence") }
+    }
+
+    func recoverLatestFaults() async {
+        guard let device = selectedDevice, device.isRunning else {
+            alertMessage = "Select and start a virtual device before clearing guest faults."
+            return
+        }
+        let scenarioID = productionDepth.faultResults.first(where: { $0.succeeded })?.scenarioID
+        busyKeys.insert("fault-recovery")
+        let receipt = await backend.recoverFaults(scenarioID: scenarioID, on: device)
+        busyKeys.remove("fault-recovery")
+        releaseCompletion.faultRecoveries.insert(receipt, at: 0)
+        releaseCompletion.faultRecoveries = Array(releaseCompletion.faultRecoveries.prefix(1_000))
+        refreshReleaseCompletionAssessment()
+        appendLog(receipt.recovered ? .success : .error, scope: "fault-recovery", receipt.message)
+        persistLogs()
+    }
+
+    func updateFleetAccessPolicy(_ policy: FleetAccessPolicy) {
+        var bounded = policy
+        bounded.principals = Array(policy.principals.prefix(100))
+        bounded.updatedAt = .now
+        releaseCompletion.fleetAccessPolicy = bounded
+        refreshReleaseCompletionAssessment()
+    }
+
+    func importFleetQualificationExercise(_ url: URL) {
+        do {
+            let exercise = try FleetQualificationImporter.load(url)
+            releaseCompletion.fleetExercises.removeAll { $0.id == exercise.id }
+            releaseCompletion.fleetExercises.insert(exercise, at: 0)
+            releaseCompletion.fleetExercises = Array(releaseCompletion.fleetExercises.prefix(100))
+            refreshReleaseCompletionAssessment()
+            appendLog(.success, scope: "release-completion", "Imported passing two-host fleet qualification evidence.")
+            persistLogs()
+        } catch { present(error, context: "Importing fleet qualification evidence") }
+    }
+
+    func exportReliabilityCampaignPlan(to url: URL) {
+        do {
+            try ReliabilityCampaignManager.exportPlan(to: url)
+            appendLog(.success, scope: "release-completion", "Exported the v1 reliability campaign plan.")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Exporting reliability campaign plan") }
+    }
+
+    func importReliabilityCampaign(_ url: URL) {
+        do {
+            let report = try ReliabilityCampaignManager.loadEvidence(url)
+            releaseCompletion.reliabilityCampaigns.removeAll { $0.id == report.id }
+            releaseCompletion.reliabilityCampaigns.insert(report, at: 0)
+            releaseCompletion.reliabilityCampaigns = Array(releaseCompletion.reliabilityCampaigns.prefix(100))
+            refreshReleaseCompletionAssessment()
+            appendLog(.success, scope: "release-completion", "Imported passing reliability and recovery evidence.")
+            persistLogs()
+        } catch { present(error, context: "Importing reliability campaign evidence") }
+    }
+
+    func advanceCoverageRatchet() {
+        do {
+            releaseCompletion.coverageRatchet = try CoverageRatchet.advance(
+                releaseCompletion.coverageRatchet,
+                coverage: labExpansion.coverageReports.sorted { $0.importedAt > $1.importedAt }.first,
+                uiEvidence: releaseCompletion.uiAutomation.first
+            )
+            refreshReleaseCompletionAssessment()
+            appendLog(.success, scope: "release-completion", "Advanced the measured source-coverage floor.")
+            persistLogs()
+        } catch { present(error, context: "Advancing the coverage ratchet") }
+    }
+
+    func exportReleaseCompletionReport(to url: URL) {
+        do {
+            refreshReleaseCompletionAssessment()
+            try HardeningJSON.save(releaseCompletion.report, to: url)
+            appendLog(.success, scope: "release-completion", "Exported the v1 release completion report.")
+            persistLogs()
+            reveal(url)
+        } catch { present(error, context: "Exporting release completion report") }
+    }
+
+    func refreshReleaseCompletionAssessment() {
+        let acceptanceHandshake = acceptanceReport.deviceName.flatMap { guestProtocolHandshakes[$0] }
+        let liveCapabilities: Set<GuestCapability> = {
+            guard let handshake = acceptanceHandshake,
+                  handshake.status == .compatible,
+                  handshake.authenticated,
+                  handshake.replayProtected else { return [] }
+            return handshake.capabilities
+        }()
+        releaseCompletion.report = ReleaseCompletionEvaluator.evaluate(
+            state: releaseCompletion,
+            context: ReleaseCompletionContext(
+                liveGuestCapabilities: liveCapabilities,
+                acceptance: acceptanceReport,
+                qualificationMatrix: labExpansion.qualificationMatrix,
+                successfulFaultScenarioIDs: Set(
+                    productionDepth.faultResults.filter(\.succeeded).map(\.scenarioID)
+                ),
+                coverage: labExpansion.coverageReports.sorted { $0.importedAt > $1.importedAt }.first,
+                publicBeta: publicBetaReadiness,
+                stagedUpdate: stagedUpdate,
+                secondVolumeRestoreRecorded: betaVerification.secondVolumeRestoreRecorded
+            )
+        )
+        persistReleaseCompletion()
+    }
+
+    private func persistReleaseCompletion() {
+        do { try ReleaseCompletionStore.save(releaseCompletion, paths: paths) }
+        catch { present(error, context: "Saving v1 release completion state") }
+    }
+
+    private func persistProductionDepth() {
+        do { try ProductionDepthStore.save(productionDepth, paths: paths) }
+        catch { present(error, context: "Saving production-depth state") }
+    }
+
+    private func persistLabExpansion() {
+        do { try LabExpansionStore.save(labExpansion, paths: paths) }
+        catch { present(error, context: "Saving qualification and scale state") }
+    }
+
+    func relinkExternalStorage(to destination: URL) async {
+        guard devices.allSatisfy({ !$0.isRunning }) else {
+            alertMessage = "Stop every virtual device before relinking lab storage."
+            return
+        }
+        do {
+            storageLocationStatus = try ExternalStorageManager.relink(root: paths.dataRoot, to: destination)
+            appendLog(.success, scope: "storage", "Atomically relinked lab storage to \(destination.path)")
+            persistLogs()
+            didBootstrap = false
+            await bootstrap()
+        } catch { present(error, context: "Relinking external storage") }
+    }
+
+    func decideRecovery(_ entry: OperationJournalEntry, action: RecoveryAction) {
+        do {
+            let decision = try RecoveryCenterStore.decide(
+                entry: entry, action: action, entries: &operationJournalEntries, paths: paths
+            )
+            recoveryCenter = RecoveryCenterStore.load(paths: paths, entries: operationJournalEntries)
+            appendLog(.warning, scope: "recovery", "\(action.rawValue) selected for \(entry.target)")
+            persistLogs()
+            if decision.requiresManualAction { alertMessage = decision.guidance }
+        } catch { present(error, context: "Recording recovery decision") }
+    }
+
+    func recordCanonicalFixture(name: String) {
+        guard let device = selectedDevice ?? devices.first,
+              let firmware = matchingFirmware(for: device),
+              let snapshot = snapshots.filter({ $0.sourceVM == device.name }).sorted(by: { $0.createdAt > $1.createdAt }).first
+        else {
+            alertMessage = canonicalFixtureAssessment.blockers.joined(separator: "\n")
+            return
+        }
+        let cloud = self.firmware.first { image in
+            image.kind == .cloudOS && image.build == device.restoreInfo?.cloudOS.build
+        }
+        do {
+            _ = try CanonicalFixtureStore.create(
+                name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Golden \(device.name)" : name,
+                device: device, firmware: firmware, cloudOS: cloud, snapshot: snapshot,
+                smokeApp: appArtifacts.first, backend: backendDescriptor,
+                handshake: guestProtocolHandshakes[device.id], acceptance: acceptanceReport, paths: paths
+            )
+            canonicalFixtures = CanonicalFixtureStore.load(paths: paths)
+            appendLog(.success, scope: "fixture", "Recorded canonical real-VM fixture for \(device.name)")
+            persistLogs()
+        } catch {
+            alertMessage = canonicalFixtureAssessment.blockers.joined(separator: "\n")
+            if canonicalFixtureAssessment.blockers.isEmpty { present(error, context: "Recording canonical fixture") }
+        }
+    }
+
+    func exportCurrentLabfile(to url: URL) {
+        var blockers: [String] = []
+        let desired = devices.compactMap { device -> LabfileDevice? in
+            guard let profile = device.hardwareProfileID else {
+                blockers.append("\(device.name) has no hardware profile assignment.")
+                return nil
+            }
+            guard let hash = matchingFirmware(for: device)?.sha256 else {
+                blockers.append("\(device.name) has no matching firmware SHA-256 in the catalog.")
+                return nil
+            }
+            return LabfileDevice(
+                name: device.name, hardwareProfileID: profile, firmwareSHA256: hash,
+                cloudOSFirmwareSHA256: firmware.first {
+                    $0.kind == .cloudOS && $0.build == device.restoreInfo?.cloudOS.build
+                }?.sha256,
+                cpuCount: device.cpuCount, memoryMB: device.memoryMB,
+                diskSizeGB: max(1, Int(device.diskSizeBytes / 1_073_741_824)),
+                networkMode: device.networkConfiguration?.mode.rawValue ?? device.network.mode,
+                environmentProfileID: environmentAssignments[device.id], workflowNames: []
+            )
+        }
+        guard blockers.isEmpty else { alertMessage = blockers.joined(separator: "\n"); return }
+        let document = LabfileDocument(
+            schemaVersion: 1, name: "iOS Virtual Device Lab",
+            backendID: backendDescriptor.id, devices: desired
+        )
+        do {
+            try LabfilePlanner.save(document, to: url)
+            activeLabfile = document
+            labfilePlan = LabfilePlanner.plan(
+                document, devices: devices, firmware: firmware,
+                profiles: hardwareProfiles, backend: backendDescriptor
+            )
+            reveal(url)
+        } catch { present(error, context: "Exporting Labfile") }
+    }
+
+    func importLabfile(_ url: URL) {
+        do {
+            let document = try LabfilePlanner.load(url)
+            activeLabfile = document
+            labfilePlan = LabfilePlanner.plan(
+                document, devices: devices, firmware: firmware,
+                profiles: hardwareProfiles, backend: backendDescriptor
+            )
+            appendLog(
+                labfilePlan.canApply ? .success : .warning,
+                scope: "labfile",
+                "Planned \(labfilePlan.changes.count) declarative device change(s)"
+            )
+            persistLogs()
+            refreshLabExpansionAssessments()
+        } catch { present(error, context: "Importing Labfile") }
+    }
+
+    func applyActiveLabfile() async {
+        guard let document = activeLabfile else { alertMessage = "Import a Labfile first."; return }
+        let plan = LabfilePlanner.plan(
+            document, devices: devices, firmware: firmware,
+            profiles: hardwareProfiles, backend: backendDescriptor
+        )
+        labfilePlan = plan
+        guard plan.canApply else {
+            let blockedChanges = plan.changes
+                .filter { $0.kind == .blocked }
+                .map { "\($0.deviceName): \($0.summary)" }
+            alertMessage = (plan.blockers + blockedChanges).joined(separator: "\n")
+            return
+        }
+        guard requireReady(for: "Apply Labfile") else { return }
+        for desired in document.devices {
+            let networkMode = NetworkMode(rawValue: desired.networkMode) ?? .nat
+            let network = NetworkConfiguration(
+                mode: networkMode, proxyURL: nil, captureTraffic: false, allowHostAccess: false
+            )
+            if let current = devices.first(where: { $0.name.caseInsensitiveCompare(desired.name) == .orderedSame }) {
+                guard !current.isRunning else {
+                    alertMessage = "Stop \(current.name) before applying its declarative configuration."
+                    return
+                }
+                await updateConfiguration(
+                    current, cpu: desired.cpuCount, memoryMB: desired.memoryMB,
+                    network: networkMode.backendValue, hardwareProfileID: desired.hardwareProfileID,
+                    networkConfiguration: network
+                )
+            } else {
+                guard let iphone = firmware.first(where: {
+                    $0.sha256?.caseInsensitiveCompare(desired.firmwareSHA256) == .orderedSame
+                }) else { continue }
+                let cloud = desired.cloudOSFirmwareSHA256.flatMap { hash in
+                    firmware.first { $0.sha256?.caseInsensitiveCompare(hash) == .orderedSame }
+                }
+                await createVM(
+                    name: desired.name, variant: .regular, diskSizeGB: desired.diskSizeGB,
+                    iphoneIPSW: iphone.url, cloudOSIPSW: cloud?.url,
+                    hardwareProfileID: desired.hardwareProfileID, network: network
+                )
+            }
+            if let profileID = desired.environmentProfileID,
+               let profile = environmentProfiles.first(where: { $0.id == profileID }),
+               let device = devices.first(where: { $0.name.caseInsensitiveCompare(desired.name) == .orderedSame }) {
+                await applyEnvironmentProfile(profile, to: device)
+            }
+        }
+        await refreshAll()
+        labfilePlan = LabfilePlanner.plan(
+            document, devices: devices, firmware: firmware,
+            profiles: hardwareProfiles, backend: backendDescriptor
+        )
+    }
+
+    func updateEvidenceLifecyclePolicy(_ policy: EvidenceLifecyclePolicy) {
+        do {
+            try EvidenceLifecycleManager.savePolicy(policy, paths: paths)
+            evidenceLifecyclePolicy = policy
+            refreshContinuityAssessments()
+        } catch { present(error, context: "Saving evidence lifecycle policy") }
+    }
+
+    func calibrateHostCapacity() async {
+        let labPaths = paths
+        hostCapacityCalibration = await Task.detached(priority: .utility) {
+            HostCapacityCalibrator.run(paths: labPaths)
+        }.value
+        refreshContinuityAssessments()
+    }
+
+    func applyCapacityRecommendation() async {
+        let calibration = hostCapacityCalibration
+        guard calibration.measuredAt != .distantPast else { alertMessage = "Calibrate host capacity first."; return }
+        var policy = resourcePolicy
+        policy.maximumConcurrentVMs = calibration.recommendedConcurrentVMs
+        policy.maximumAggregateMemoryMB = calibration.recommendedAggregateMemoryMB
+        policy.reservedHostMemoryMB = calibration.reservedHostMemoryMB
+        updateResourcePolicy(policy)
+    }
+
+    func runHostileInputSuite() async {
+        let labPaths = paths
+        hostileInputReport = await Task.detached(priority: .utility) {
+            HostileInputValidator.run(paths: labPaths)
+        }.value
+        appendLog(
+            hostileInputReport.passed ? .success : .error, scope: "security",
+            "Hostile-input suite: \(hostileInputReport.results.filter(\.passed).count)/\(hostileInputReport.results.count) passed"
+        )
+        persistLogs()
+    }
+
+    func updateUnifiedRetentionPolicy(_ policy: UnifiedRetentionPolicy) {
+        do {
+            try UnifiedDataLifecycleManager.save(policy, paths: paths)
+            unifiedRetentionPolicy = policy
+            retentionPreview = UnifiedDataLifecycleManager.preview(paths: paths, policy: policy)
+        } catch { present(error, context: "Saving unified retention policy") }
+    }
+
+    func refreshRetentionPreview() {
+        retentionPreview = UnifiedDataLifecycleManager.preview(paths: paths, policy: unifiedRetentionPolicy)
+    }
+
+    func quarantineExpiredArtifacts() {
+        do {
+            if let output = try UnifiedDataLifecycleManager.quarantine(retentionPreview, paths: paths) {
+                appendLog(.success, scope: "retention", "Moved expired artifacts to recoverable quarantine")
+                persistLogs()
+                reveal(output)
+            }
+            refreshRetentionPreview()
+        } catch { present(error, context: "Quarantining expired artifacts") }
+    }
+
+    func updateOperationalObjectivePolicy(_ policy: OperationalObjectivePolicy) {
+        do {
+            try OperationalObjectiveEvaluator.savePolicy(policy, paths: paths)
+            operationalObjectivePolicy = policy
+            refreshContinuityAssessments()
+        } catch { present(error, context: "Saving operational objectives") }
+    }
+
+    func updateBetaVerification(_ record: BetaVerificationRecord) {
+        do {
+            try PublicBetaReadinessManager.save(record, paths: paths)
+            betaVerification = PublicBetaReadinessManager.load(paths: paths)
+            refreshContinuityAssessments()
+        } catch { present(error, context: "Saving beta verification") }
+    }
+
+    func exportSupportReport() {
+        do {
+            let output = try PublicBetaReadinessManager.createSupportBundle(
+                paths: paths, storage: storageLocationStatus,
+                capacity: hostCapacityCalibration, objectives: operationalObjectiveReport,
+                beta: publicBetaReadiness
+            )
+            reveal(output)
+        } catch { present(error, context: "Creating privacy-safe support report") }
+    }
+
+    private func matchingFirmware(for device: VirtualDevice?) -> FirmwareImage? {
+        guard let device else { return nil }
+        return firmware.first { image in
+            guard image.kind == .iPhone, image.validation?.state == .valid else { return false }
+            let restore = device.restoreInfo
+            return image.version == restore?.ios.version
+                && image.build == restore?.ios.build
+                && (image.device == nil || image.device == restore?.device)
+        }
+    }
+
+    private func packagedLocalizationCount() -> Int {
+        let bundled = Bundle.main.resourceURL.flatMap {
+            try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil)
+        }?.filter { $0.pathExtension == "lproj" }.count ?? 0
+        if bundled > 0 { return bundled }
+        let source = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
+        return (try? FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "lproj" }.count ?? 0
+    }
+
+    // MARK: - Production qualification and recovery
+
+    func createQualificationCampaign() {
+        let device = selectedDevice ?? devices.first
+        let firmwareFixture = firmware.first { image in
+            guard image.kind == .iPhone, image.validation?.state == .valid else { return false }
+            if let version = device?.restoreInfo?.ios.version, image.version != nil {
+                return image.version == version && (image.device == nil || image.device == device?.restoreInfo?.device)
+            }
+            return image.sha256 != nil
+        }
+        let campaign = QualificationCampaignStore.create(
+            host: readiness,
+            backend: backendDescriptor,
+            device: device,
+            firmware: firmwareFixture,
+            acceptance: acceptanceReport
+        )
+        qualificationCampaigns.insert(campaign, at: 0)
+        do {
+            try QualificationCampaignStore.save(qualificationCampaigns, paths: paths)
+            appendLog(
+                campaign.state == .passed ? .success : .warning,
+                scope: "qualification",
+                campaign.state == .passed ? "Recorded a passing real-VM qualification campaign" : "Created a gated qualification campaign with \(campaign.blockers.count) blocker(s)"
+            )
+            persistLogs()
+            refreshLabExpansionAssessments()
+        } catch { present(error, context: "Saving qualification campaign") }
+    }
+
+    func repairSafeSetup() {
+        do {
+            try SetupAssistant.repairSafeDirectories(paths: paths)
+            setupAssistantReport = SetupAssistant.inspect(paths: paths, host: readiness)
+            appendLog(.success, scope: "setup", "Created and verified safe lab support directories; host security settings were unchanged")
+            persistLogs()
+        } catch { present(error, context: "Repairing safe setup items") }
+    }
+
+    func updateGuestTrustPolicy(_ policy: GuestTrustPolicy) {
+        guestTrustPolicy = policy
+        do {
+            try HardeningJSON.save(policy, to: paths.stateRoot.appendingPathComponent("guest-trust-policy.json"))
+            guestTrustAssessments = guestProtocolHandshakes.mapValues { GuestTrustEvaluator.evaluate($0, policy: policy) }
+        } catch { present(error, context: "Saving guest trust policy") }
+    }
+
+    func sealCurrentAcceptanceEvidence(reviewer: String) {
+        let reviewer = reviewer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reviewer.isEmpty else {
+            alertMessage = "Enter the identity of the person requesting this evidence seal."
+            return
+        }
+        guard acceptanceReport.isPassed else {
+            alertMessage = "Evidence cannot be sealed until every real-VM acceptance gate has passed."
+            return
+        }
+        let fingerprint = "\(readiness.model)|\(readiness.macOSVersion)|\(readiness.architecture)"
+        guard let campaignIndex = qualificationCampaigns.lastIndex(where: {
+            $0.state == .passed
+                && $0.deviceName == acceptanceReport.deviceName
+                && $0.hostFingerprint == fingerprint
+                && $0.backendID == backendDescriptor.id
+                && $0.acceptance == acceptanceReport
+                && $0.evidenceSealID == nil
+        }) else {
+            alertMessage = "Record a passing qualification campaign for this exact host, backend, device, and acceptance report before sealing evidence."
+            return
+        }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        do {
+            struct CampaignEvidencePayload: Encodable {
+                let campaign: QualificationCampaign
+                let sealingReviewer: String
+            }
+            let campaign = qualificationCampaigns[campaignIndex]
+            let seal = try EvidenceLedger.seal(
+                CampaignEvidencePayload(campaign: campaign, sealingReviewer: reviewer),
+                subject: "Qualification campaign \(campaign.id.uuidString) for \(acceptanceReport.deviceName ?? "unselected device")",
+                host: readiness,
+                appVersion: version,
+                backend: backendDescriptor,
+                paths: paths
+            )
+            qualificationCampaigns[campaignIndex].evidenceSealID = seal.id
+            try QualificationCampaignStore.save(qualificationCampaigns, paths: paths)
+            evidenceSeals.append(seal)
+            evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
+            appendLog(.success, scope: "evidence", "Sealed acceptance evidence \(seal.id.uuidString)")
+            persistLogs()
+            refreshLabExpansionAssessments()
+        } catch { present(error, context: "Sealing acceptance evidence") }
+    }
+
+    func reviewEvidence(_ seal: EvidenceSeal, approved: Bool, reviewer: String) {
+        let reviewer = reviewer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reviewer.isEmpty else {
+            alertMessage = "Enter a reviewer identity before approving or rejecting evidence."
+            return
+        }
+        do {
+            evidenceSeals = try EvidenceLedger.review(
+                id: seal.id,
+                state: approved ? .approved : .rejected,
+                reviewer: reviewer,
+                note: approved ? "Reviewed for compatibility promotion." : "Rejected; collect new evidence.",
+                paths: paths
+            )
+            evidenceVerificationIssues = EvidenceLedger.verify(paths: paths)
+            refreshLabExpansionAssessments()
+        } catch { present(error, context: "Reviewing evidence") }
+    }
+
+    func updateBackupPolicy(_ policy: LabBackupPolicy) {
+        backupPolicy = policy
+        do { try HardeningJSON.save(policy, to: paths.stateRoot.appendingPathComponent("backup-policy.json")) }
+        catch { present(error, context: "Saving backup policy") }
+    }
+
+    func createLabBackup(destination: URL, passphrase: String? = nil) {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        do {
+            try scalableEventStore?.checkpoint()
+            let backup = try LabBackupManager.create(
+                paths: paths,
+                destination: destination,
+                policy: backupPolicy,
+                appVersion: version,
+                passphrase: passphrase
+            )
+            latestBackupVerification = LabBackupManager.verify(backup, passphrase: passphrase)
+            appendLog(.success, scope: "backup", "Created and verified lab backup at \(backup.path)")
+            persistLogs()
+            reveal(backup)
+        } catch { present(error, context: "Creating lab backup") }
+    }
+
+    func verifyLabBackup(_ backup: URL, passphrase: String? = nil) {
+        latestBackupVerification = LabBackupManager.verify(backup, passphrase: passphrase)
+        if latestBackupVerification?.passed == true {
+            appendLog(.success, scope: "backup", "Backup verification passed")
+        } else {
+            appendLog(.error, scope: "backup", "Backup verification failed")
+        }
+        persistLogs()
+    }
+
+    func stageLabRestore(_ backup: URL, passphrase: String? = nil) {
+        do {
+            latestRestorePlan = LabBackupManager.restorePlan(backup, paths: paths, passphrase: passphrase)
+            guard latestRestorePlan?.canStage == true else {
+                alertMessage = "Restore planning found verification, space, or archive issues. Review the plan before retrying."
+                return
+            }
+            let staged = try LabBackupManager.stageRestore(backup, paths: paths, passphrase: passphrase)
+            latestRestoreCommand = try LabBackupManager.writeApplyRestoreCommand(stagedPayload: staged, paths: paths)
+            appendLog(.success, scope: "backup", "Verified restore staged at \(staged.path); live state was not overwritten")
+            persistLogs()
+            reveal(staged)
+        } catch { present(error, context: "Staging backup restore") }
+    }
+
+    func updateUpdateLifecyclePolicy(_ policy: UpdateLifecyclePolicy) {
+        updateLifecyclePolicy = policy
+        do { try HardeningJSON.save(policy, to: paths.stateRoot.appendingPathComponent("update-lifecycle-policy.json")) }
+        catch { present(error, context: "Saving update lifecycle policy") }
+    }
+
+    func stageDownloadedUpdate() {
+        guard case let .downloaded(version, path) = updateState else {
+            alertMessage = "Download and verify an update before staging installation."
+            return
+        }
+        do {
+            stagedUpdate = try UpdateLifecycleManager.stage(
+                archive: URL(fileURLWithPath: path),
+                currentApp: Bundle.main.bundleURL,
+                version: version,
+                paths: paths,
+                policy: updateLifecyclePolicy
+            )
+            appendLog(.success, scope: "updates", "Staged update \(version) with a rollback copy; installation still requires explicit approval")
+            persistLogs()
+        } catch { present(error, context: "Staging verified update") }
+    }
+
+    func runResilienceSuite() {
+        resilienceReport = ResilienceSuite.run(paths: paths)
+        appendLog(
+            resilienceReport?.passed == true ? .success : .error,
+            scope: "resilience",
+            "Resilience suite completed: \(resilienceReport?.results.filter(\.passed).count ?? 0)/\(resilienceReport?.results.count ?? 0) passed"
+        )
+        persistLogs()
+    }
+
+    func probeGuestProtocol(for device: VirtualDevice) async {
+        guestProtocolHandshakes[device.id] = await backend.guestProtocolHandshake(for: device)
+        await refreshOperationalReadiness()
+    }
+
+    func applyEnvironmentProfile(_ profile: EnvironmentProfile, to device: VirtualDevice) async {
+        environmentAssignments[device.id] = profile.id
+        do {
+            try EnvironmentProfileStore.saveAssignments(environmentAssignments, paths: paths)
+            if let plugin = plugins.first(where: {
+                $0.capabilities.contains("environment-policy") && $0.trusted == true
+            }), let data = try? JSONEncoder().encode(profile), let json = String(data: data, encoding: .utf8) {
+                let result = await PluginRegistry.run(
+                    plugin,
+                    capability: "environment-policy",
+                    device: device,
+                    paths: paths,
+                    additionalEnvironment: ["LAB_ENVIRONMENT_PROFILE": json],
+                    onLine: logger(scope: "plugin:\(plugin.id)")
+                )
+                finish(result, scope: "plugin:\(plugin.id)", success: "Environment profile applied by trusted extension")
+            } else {
+                appendLog(
+                    .warning,
+                    scope: device.name,
+                    "Environment profile saved as test intent; unsupported guest simulations require a trusted environment-policy extension"
+                )
+                persistLogs()
+            }
+        } catch {
+            present(error, context: "Saving environment profile assignment")
+        }
+    }
+
+    func updateStoragePolicy(_ policy: LabStoragePolicy) async {
+        storagePolicy = policy
+        do {
+            try StorageLifecycleManager.savePolicy(policy, paths: paths)
+            await refreshOperationalReadiness()
+        } catch {
+            present(error, context: "Saving storage lifecycle policy")
+        }
+    }
+
+    func exportPortableConfiguration(to destination: URL) {
+        do {
+            let output = try StorageLifecycleManager.exportConfiguration(paths: paths, destination: destination)
+            appendLog(.success, scope: "storage", "Portable configuration exported without firmware, VM disks, or secrets")
+            persistLogs()
+            reveal(output)
+        } catch {
+            present(error, context: "Exporting portable lab configuration")
+        }
+    }
+
+    func initializeRemoteAgent() {
+        do {
+            remoteAgentConfiguration = try RemoteLabAgentBootstrap.initialize(paths: paths)
+            appendLog(.success, scope: "agent", "Initialized an authenticated local queue; the agent remains disabled until explicitly started")
+            persistLogs()
+        } catch {
+            present(error, context: "Initializing remote lab agent")
+        }
+    }
+
+    func refreshRemoteAgentHealth() async {
+        guard let result = await runRemoteAgentCommand(["agent-health", "--json"]) else { return }
+        do {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            remoteAgentHealth = try decoder.decode(RemoteAgentHealthSnapshot.self, from: Data(result.output.utf8))
+            if remoteAgentHealth?.healthy == false {
+                appendLog(.error, scope: "agent", remoteAgentHealth?.issues.joined(separator: " • ") ?? "Agent health check failed")
+                persistLogs()
+            }
+        } catch {
+            if !result.succeeded { alertMessage = "Remote-agent health: \(cleanAgentOutput(result.output))" }
+            else { present(error, context: "Reading remote-agent health") }
+        }
+    }
+
+    func rotateRemoteAgentKey(revokePrevious: Bool) async {
+        var arguments = ["agent-key-rotate"]
+        if revokePrevious { arguments.append("--revoke-previous") }
+        guard let result = await runRemoteAgentCommand(arguments) else { return }
+        guard result.succeeded else {
+            alertMessage = "Rotating remote-agent key: \(cleanAgentOutput(result.output))"
+            return
+        }
+        await refreshRemoteAgentHealth()
+        if var configuration = remoteAgentConfiguration {
+            configuration.activeKeyID = remoteAgentHealth?.activeKeyID
+            configuration.rotatedAt = .now
+            remoteAgentConfiguration = configuration
+            try? HardeningJSON.save(configuration, to: paths.stateRoot.appendingPathComponent("remote-agent.json"))
+        }
+        appendLog(.success, scope: "agent", cleanAgentOutput(result.output))
+        persistLogs()
+    }
+
+    func cancelRemoteAgentJob(_ rawID: String) async {
+        guard UUID(uuidString: rawID.trimmingCharacters(in: .whitespacesAndNewlines)) != nil else {
+            alertMessage = "Enter a valid remote-agent job UUID."
+            return
+        }
+        guard let result = await runRemoteAgentCommand(["agent-cancel", "--job", rawID]) else { return }
+        if result.succeeded { appendLog(.success, scope: "agent", cleanAgentOutput(result.output)) }
+        else { alertMessage = "Cancelling remote-agent job: \(cleanAgentOutput(result.output))" }
+        persistLogs()
+        await refreshRemoteAgentHealth()
+    }
+
+    func cleanupRemoteAgentQueue() async {
+        guard let result = await runRemoteAgentCommand(["agent-cleanup", "--older-than-days", "30"]) else { return }
+        if result.succeeded { appendLog(.success, scope: "agent", cleanAgentOutput(result.output)) }
+        else { alertMessage = "Cleaning remote-agent queue: \(cleanAgentOutput(result.output))" }
+        persistLogs()
+        await refreshRemoteAgentHealth()
+    }
+
+    private func runRemoteAgentCommand(_ command: [String]) async -> CommandResult? {
+        guard let configuration = remoteAgentConfiguration else {
+            alertMessage = "Initialize the remote agent first."
+            return nil
+        }
+        let candidates = [
+            Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/vdlctl"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/debug/vdlctl"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/release/vdlctl"),
+        ]
+        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+            alertMessage = "The bundled vdlctl executable is unavailable."
+            return nil
+        }
+        let arguments = command + [
+            "--queue", configuration.queuePath,
+            "--token-file", configuration.tokenFilePath,
+        ]
+        return await Task.detached(priority: .utility) {
+            ProcessExecutor.run(executable: executable, arguments: arguments, timeout: 30)
+        }.value
+    }
+
+    private func cleanAgentOutput(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func resolveJournalEntry(_ entry: OperationJournalEntry) {
+        guard let index = operationJournalEntries.firstIndex(where: { $0.id == entry.id }) else { return }
+        operationJournalEntries[index].state = .resolved
+        operationJournalEntries[index].updatedAt = .now
+        operationJournalEntries[index].message = "Reviewed and resolved by the user."
+        try? OperationJournalStore.save(operationJournalEntries, paths: paths)
+    }
+
     func refreshDevices() async {
         devices = await backend.listDevices()
         normalizeSelection()
@@ -86,6 +2393,9 @@ final class LabAppModel: ObservableObject {
     func recheckHost() async {
         busyKeys.insert("preflight")
         readiness = await backend.checkHost()
+        companionAssessment = CompanionBackendInspector.inspect(
+            binary: readiness.binaryPath.map { URL(fileURLWithPath: $0) }
+        )
         busyKeys.remove("preflight")
         appendLog(
             readiness.isReady ? .success : .warning,
@@ -97,29 +2407,100 @@ final class LabAppModel: ObservableObject {
 
     // MARK: - VM lifecycle
 
+    func rotateGuestCredential(for device: VirtualDevice) {
+        do {
+            try GuestCredentialVault.rotate(for: device)
+            appendLog(.success, scope: "guest-trust", "Rotated the host-control credential for \(device.name)")
+            persistLogs()
+        } catch { present(error, context: "Rotating guest-control credential") }
+    }
+
+    func revokeGuestCredential(for device: VirtualDevice) {
+        do {
+            try GuestCredentialVault.revoke(for: device)
+            appendLog(.warning, scope: "guest-trust", "Revoked the host-control credential for \(device.name); guest mutation is blocked until rotation")
+            persistLogs()
+        } catch { present(error, context: "Revoking guest-control credential") }
+    }
+
     func createVM(
         name: String,
         variant: FirmwareVariant,
         diskSizeGB: Int,
         iphoneIPSW: URL?,
-        cloudOSIPSW: URL?
+        cloudOSIPSW: URL?,
+        hardwareProfileID: String? = nil,
+        network: NetworkConfiguration = .standard,
+        audio: AudioConfiguration = .playback,
+        isolation: IsolationPolicy = .strict,
+        allowUnverifiedFirmware: Bool = false
     ) async {
         guard requireReady(for: "Create VM") else { return }
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             alertMessage = "Enter a name for the virtual device."
             return
         }
-        let key = "create:\(name)"
-        busyKeys.insert(key)
-        appendLog(.command, scope: name, "Creating \(variant.displayName) VM with a \(diskSizeGB) GB disk")
-        let result = await backend.createVM(
+        let iphone = iphoneIPSW.flatMap { url in firmware.first { $0.path == url.path } }
+        let requestedCloud = cloudOSIPSW.flatMap { url in firmware.first { $0.path == url.path } }
+        let recommendation = iphone.map {
+            CompatibilityEvaluator.recommend(
+                iphone: $0,
+                catalog: compatibility,
+                profiles: hardwareProfiles,
+                availableFirmware: firmware
+            )
+        }
+        guard let profile = hardwareProfiles.profile(id: hardwareProfileID)
+            ?? recommendation?.hardwareProfile
+            ?? hardwareProfiles.profiles.first(where: { $0.status == .supported })
+            ?? hardwareProfiles.profiles.first
+        else {
+            alertMessage = "No virtual hardware profiles are installed."
+            return
+        }
+        let operationID = UUID()
+        let request = VMCreationRequest(
+            operationID: operationID,
             name: name,
+            hardwareProfile: profile,
             variant: variant,
             diskSizeGB: diskSizeGB,
-            iphoneIPSW: iphoneIPSW,
-            cloudOSIPSW: cloudOSIPSW,
+            iphoneFirmware: iphone,
+            cloudOSFirmware: requestedCloud ?? recommendation?.cloudOSFirmware,
+            network: network,
+            audio: audio,
+            isolation: isolation,
+            allowUnverifiedFirmware: allowUnverifiedFirmware
+        )
+        let decision = CompatibilityEvaluator.evaluate(request, compatibility: compatibility)
+        guard decision.decision != .blocked else {
+            alertMessage = decision.messages.joined(separator: "\n")
+            return
+        }
+        guard decision.decision != .warning || allowUnverifiedFirmware else {
+            alertMessage = decision.messages.joined(separator: "\n") + "\n\nEnable the experimental/unverified acknowledgement to continue."
+            return
+        }
+        let key = "create:\(name)"
+        busyKeys.insert(key)
+        beginJournal(
+            id: operationID,
+            kind: .create,
+            target: name,
+            phase: .preparing,
+            recovery: "Remove an incomplete VM bundle only after confirming no backend process is using its disk."
+        )
+        appendLog(
+            .command,
+            scope: name,
+            "Creating \(variant.displayName) VM with \(profile.name), a \(diskSizeGB) GB disk, and \(network.mode.displayName)"
+        )
+        let result = await backend.createVM(
+            request: request,
+            onProgress: progressHandler(scope: name),
             onLine: logger(scope: name)
         )
+        finishJournal(id: operationID, result: result)
         finish(result, scope: name, success: "VM creation completed")
         busyKeys.remove(key)
         await refreshDevices()
@@ -135,7 +2516,15 @@ final class LabAppModel: ObservableObject {
             return
         }
         let key = "launch:\(device.id)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .boot,
+            target: device.name,
+            phase: .booting,
+            recovery: "Re-scan the VM process and socket; stop the device before retrying if either remains active."
+        )
         let packageSuffix = installPackage.map { " and installing \($0.lastPathComponent)" } ?? ""
         appendLog(.command, scope: device.name, "Launching VM\(packageSuffix)")
 
@@ -149,6 +2538,7 @@ final class LabAppModel: ObservableObject {
             installPackage: installPackage,
             onLine: logger(scope: device.name)
         )
+        finishJournal(id: journalID, result: result)
         finish(result, scope: device.name, success: "VM process exited cleanly")
         busyKeys.remove(key)
         await refreshDevices()
@@ -201,9 +2591,18 @@ final class LabAppModel: ObservableObject {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { alertMessage = "Enter a name for the clone."; return }
         let key = "clone:\(device.id)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .create,
+            target: trimmed,
+            phase: .exporting,
+            recovery: "Verify the clone bundle and remove it only if its config or disk copy is incomplete."
+        )
         appendLog(.command, scope: device.name, "Cloning as \(trimmed)")
         let result = await backend.clone(device, as: trimmed, onLine: logger(scope: device.name))
+        finishJournal(id: journalID, result: result)
         finish(result, scope: device.name, success: "Clone created: \(trimmed)")
         busyKeys.remove(key)
         await refreshDevices()
@@ -214,7 +2613,11 @@ final class LabAppModel: ObservableObject {
         _ device: VirtualDevice,
         cpu: Int,
         memoryMB: Int,
-        network: String
+        network: String,
+        hardwareProfileID: String? = nil,
+        networkConfiguration: NetworkConfiguration? = nil,
+        audio: AudioConfiguration? = nil,
+        isolation: IsolationPolicy? = nil
     ) async {
         guard requireReady(for: "Update VM") else { return }
         guard !device.isRunning else {
@@ -224,14 +2627,51 @@ final class LabAppModel: ObservableObject {
         let key = "config:\(device.id)"
         busyKeys.insert(key)
         appendLog(.command, scope: device.name, "Updating hardware configuration")
-        let result = await backend.updateConfiguration(
-            device,
+        let request = VMConfigurationRequest(
+            operationID: UUID(),
+            device: device,
+            hardwareProfileID: hardwareProfileID ?? device.hardwareProfileID,
             cpu: cpu,
             memoryMB: memoryMB,
-            network: network,
+            network: networkConfiguration ?? device.networkConfiguration ?? NetworkConfiguration(
+                mode: network == "bridged" ? .bridged : (network == "none" ? .offline : .nat),
+                proxyURL: nil,
+                captureTraffic: false,
+                allowHostAccess: false
+            ),
+            audio: audio ?? device.audioConfiguration ?? .playback,
+            isolation: isolation ?? device.isolationPolicy ?? .strict
+        )
+        let result = await backend.updateConfiguration(
+            request: request,
+            onProgress: progressHandler(scope: device.name),
             onLine: logger(scope: device.name)
         )
         finish(result, scope: device.name, success: "Configuration updated")
+        if result.succeeded,
+           request.network.proxyURL != nil || request.network.captureTraffic {
+            if let plugin = plugins.first(where: {
+                $0.capabilities.contains("network-policy") && $0.trusted == true
+            }),
+               let data = try? JSONEncoder().encode(request.network),
+               let json = String(data: data, encoding: .utf8) {
+                let extensionResult = await PluginRegistry.run(
+                    plugin,
+                    capability: "network-policy",
+                    device: device,
+                    paths: paths,
+                    additionalEnvironment: ["LAB_NETWORK_CONFIGURATION": json],
+                    onLine: logger(scope: "plugin:\(plugin.id)")
+                )
+                finish(extensionResult, scope: "plugin:\(plugin.id)", success: "Network instrumentation policy applied")
+            } else {
+                appendLog(
+                    .warning,
+                    scope: device.name,
+                    "Proxy and packet-capture policy was saved but requires a trusted network-policy plugin"
+                )
+            }
+        }
         busyKeys.remove(key)
         await refreshDevices()
     }
@@ -243,9 +2683,18 @@ final class LabAppModel: ObservableObject {
             return
         }
         let key = "delete:\(device.id)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .configure,
+            target: device.name,
+            phase: .cleaningUp,
+            recovery: "Re-scan the device library. Preserve any remaining bundle until its ownership is confirmed."
+        )
         appendLog(.command, scope: device.name, "Deleting VM bundle")
         let result = await backend.deleteVM(device, onLine: logger(scope: device.name))
+        finishJournal(id: journalID, result: result)
         finish(result, scope: device.name, success: "VM deleted")
         busyKeys.remove(key)
         await refreshDevices()
@@ -262,16 +2711,28 @@ final class LabAppModel: ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { alertMessage = "Enter a snapshot name."; return }
         let key = "snapshot:\(device.id)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .snapshot,
+            target: "\(device.name)/\(trimmed)",
+            phase: .exporting,
+            recovery: "Discard an incomplete archive and its sidecar only after checksum verification fails."
+        )
         appendLog(.command, scope: device.name, "Creating snapshot “\(trimmed)”")
         let (result, _) = await backend.createSnapshot(
             of: device,
             named: trimmed,
             onLine: logger(scope: device.name)
         )
+        finishJournal(id: journalID, result: result)
         finish(result, scope: device.name, success: "Snapshot created")
         busyKeys.remove(key)
         snapshots = await backend.loadSnapshots()
+        if result.succeeded, snapshotRetention.isEnabled {
+            _ = await applySnapshotRetention()
+        }
     }
 
     func restore(_ snapshot: SnapshotRecord, as newName: String) async {
@@ -279,13 +2740,22 @@ final class LabAppModel: ObservableObject {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { alertMessage = "Enter a name for the restored VM."; return }
         let key = "restore:\(snapshot.id.uuidString)"
+        let journalID = UUID()
         busyKeys.insert(key)
+        beginJournal(
+            id: journalID,
+            kind: .restore,
+            target: trimmed,
+            phase: .restoring,
+            recovery: "Preserve the source snapshot; verify or remove only the newly imported incomplete VM bundle."
+        )
         appendLog(.command, scope: snapshot.sourceVM, "Restoring “\(snapshot.name)” as \(trimmed)")
         let result = await backend.restoreSnapshot(
             snapshot,
             as: trimmed,
             onLine: logger(scope: snapshot.sourceVM)
         )
+        finishJournal(id: journalID, result: result)
         finish(result, scope: snapshot.sourceVM, success: "Snapshot restored as \(trimmed)")
         busyKeys.remove(key)
         await refreshDevices()
@@ -319,6 +2789,72 @@ final class LabAppModel: ObservableObject {
         } catch {
             present(error, context: "Deleting snapshot")
         }
+    }
+
+    func updateSnapshotRetention(_ policy: SnapshotRetentionPolicy) {
+        snapshotRetention = policy
+        do {
+            try SnapshotRetentionStore.save(policy, paths: paths)
+            appendLog(.success, scope: "snapshots", "Snapshot retention policy updated")
+            persistLogs()
+        } catch {
+            present(error, context: "Saving snapshot retention policy")
+        }
+    }
+
+    @discardableResult
+    func applySnapshotRetention() async -> SnapshotRetentionResult {
+        let policy = snapshotRetention
+        guard policy.isEnabled else {
+            return SnapshotRetentionResult(removed: [], preserved: snapshots, reclaimedBytes: 0)
+        }
+
+        let ordered = snapshots.sorted { $0.createdAt > $1.createdAt }
+        var preservedIDs = Set<UUID>()
+        for group in Dictionary(grouping: ordered, by: \.sourceVM).values {
+            for snapshot in group.prefix(max(0, policy.keepLastPerDevice)) {
+                preservedIDs.insert(snapshot.id)
+            }
+        }
+
+        let ageCutoff = Calendar.current.date(byAdding: .day, value: -max(0, policy.maximumAgeDays), to: .now) ?? .distantPast
+        var pruneIDs = Set(ordered.filter {
+            !preservedIDs.contains($0.id) && $0.createdAt < ageCutoff
+        }.map(\.id))
+
+        var projectedBytes = ordered
+            .filter { !pruneIDs.contains($0.id) }
+            .reduce(Int64(0)) { $0 + $1.sizeBytes }
+        if projectedBytes > policy.maximumTotalBytes {
+            for snapshot in ordered.reversed()
+                where !preservedIDs.contains(snapshot.id) && !pruneIDs.contains(snapshot.id) {
+                pruneIDs.insert(snapshot.id)
+                projectedBytes -= snapshot.sizeBytes
+                if projectedBytes <= policy.maximumTotalBytes { break }
+            }
+        }
+
+        var removed: [SnapshotRecord] = []
+        for snapshot in ordered where pruneIDs.contains(snapshot.id) {
+            if policy.verifyBeforePruning {
+                let verification = await backend.verifySnapshot(snapshot)
+                guard verification.status == .verified else {
+                    appendLog(.warning, scope: snapshot.sourceVM, "Retention preserved \(snapshot.name): integrity is \(verification.status.rawValue)")
+                    continue
+                }
+            }
+            do {
+                try await backend.deleteSnapshot(snapshot)
+                removed.append(snapshot)
+            } catch {
+                present(error, context: "Pruning snapshot \(snapshot.name)")
+            }
+        }
+        snapshots = await backend.loadSnapshots()
+        let reclaimed = removed.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        appendLog(.info, scope: "snapshots", "Retention removed \(removed.count) snapshot(s) and reclaimed \(ByteCountFormatter.string(fromByteCount: reclaimed, countStyle: .file))")
+        persistLogs()
+        return SnapshotRetentionResult(removed: removed, preserved: snapshots, reclaimedBytes: reclaimed)
     }
 
     // MARK: - Firmware
@@ -379,6 +2915,45 @@ final class LabAppModel: ObservableObject {
         }
     }
 
+    func firmwareRecommendation(for image: FirmwareImage) -> FirmwareRecommendation {
+        CompatibilityEvaluator.recommend(
+            iphone: image,
+            catalog: compatibility,
+            profiles: hardwareProfiles,
+            availableFirmware: firmware
+        )
+    }
+
+    func backendRecommendation(for image: FirmwareImage) -> BackendRecommendation {
+        BackendRecommendationEvaluator.recommend(
+            firmware: image,
+            catalog: backendCatalog,
+            compatibility: compatibility,
+            activeBackendID: backendDescriptor.id,
+            hostReady: readiness.isReady
+        )
+    }
+
+    func importAppArtifact(_ url: URL) {
+        do {
+            appArtifacts = try AppArtifactStore.importArtifact(url, paths: paths)
+            appendLog(.success, scope: "artifacts", "Imported \(url.lastPathComponent) into the app artifact library")
+            persistLogs()
+        } catch {
+            present(error, context: "Importing app artifact")
+        }
+    }
+
+    func deleteAppArtifact(_ artifact: AppArtifact) {
+        do {
+            appArtifacts = try AppArtifactStore.remove(artifact, paths: paths)
+            appendLog(.info, scope: "artifacts", "Removed \(artifact.name) from the app artifact library")
+            persistLogs()
+        } catch {
+            present(error, context: "Removing app artifact")
+        }
+    }
+
     // MARK: - Screenshots and diagnostics
 
     func captureScreenshot(of device: VirtualDevice) async {
@@ -403,9 +2978,23 @@ final class LabAppModel: ObservableObject {
         busyKeys.insert(key)
         appendLog(.command, scope: device.name, "Collecting diagnostic bundle")
         do {
-            let bundle = try await backend.createDiagnosticBundle(
+            let rawBundle = try await backend.createDiagnosticBundle(
                 for: device,
                 activityLog: formattedActivityLog()
+            )
+            let sanitizedURL = rawBundle.url.deletingLastPathComponent()
+                .appendingPathComponent(rawBundle.url.lastPathComponent + "-sanitized", isDirectory: true)
+            latestDiagnosticPreview = try DiagnosticSanitizer.sanitize(
+                source: rawBundle.url,
+                destination: sanitizedURL,
+                policy: diagnosticPrivacy
+            )
+            try? FileManager.default.removeItem(at: rawBundle.url)
+            let bundle = DiagnosticBundle(
+                id: rawBundle.id,
+                deviceName: rawBundle.deviceName,
+                url: sanitizedURL,
+                createdAt: rawBundle.createdAt
             )
             diagnosticBundles.insert(bundle, at: 0)
             appendLog(.success, scope: device.name, "Diagnostics saved to \(bundle.url.path)")
@@ -419,12 +3008,115 @@ final class LabAppModel: ObservableObject {
         }
     }
 
+    func updateDiagnosticPrivacy(_ policy: DiagnosticPrivacyPolicy) {
+        diagnosticPrivacy = policy
+        do {
+            try DiagnosticPrivacyStore.save(policy, paths: paths)
+            appendLog(.info, scope: "privacy", "Diagnostic privacy policy updated")
+            persistLogs()
+        } catch {
+            present(error, context: "Saving diagnostic privacy policy")
+        }
+    }
+
+    func analyzeDiagnostics(_ bundle: DiagnosticBundle, useTrustedPlugin: Bool = false) async {
+        do {
+            let local = try DiagnosticAnalyzer.analyze(bundle.url)
+            diagnosticAnalysisReports.insert(local, at: 0)
+            appendLog(.success, scope: "diagnostics", local.summary)
+            if useTrustedPlugin,
+               let plugin = plugins.first(where: {
+                   $0.capabilities.contains("diagnostic-analysis") && $0.trusted == true
+               }) {
+                let result = await PluginRegistry.run(
+                    plugin,
+                    capability: "diagnostic-analysis",
+                    device: nil,
+                    paths: paths,
+                    additionalEnvironment: ["LAB_DIAGNOSTIC_BUNDLE": bundle.url.path],
+                    onLine: logger(scope: "plugin:\(plugin.id)")
+                )
+                finish(result, scope: "plugin:\(plugin.id)", success: "Trusted diagnostic analyzer completed")
+            }
+            persistLogs()
+        } catch {
+            present(error, context: "Analyzing diagnostics")
+        }
+    }
+
+    func exportEncryptedDiagnostics(_ bundle: DiagnosticBundle, passphrase: String) {
+        do {
+            let destination = bundle.url.deletingLastPathComponent()
+                .appendingPathComponent(bundle.url.lastPathComponent + ".vdlenc")
+            let output = try DiagnosticSanitizer.encryptedArchive(
+                of: bundle.url,
+                destination: destination,
+                passphrase: passphrase
+            )
+            appendLog(.success, scope: "privacy", "Encrypted diagnostic export created")
+            persistLogs()
+            reveal(output)
+        } catch {
+            present(error, context: "Encrypting diagnostic export (use at least 12 characters)")
+        }
+    }
+
+    func refreshPerformance(for device: VirtualDevice) async {
+        let sample = await backend.performanceSample(for: device)
+        performanceSamples[device.id] = sample
+    }
+
+    func exportGuestDiagnostics(
+        for device: VirtualDevice,
+        categories: [DiagnosticCategory]
+    ) async -> DiagnosticExportResult {
+        let destination = paths.stateRoot
+            .appendingPathComponent("Diagnostics", isDirectory: true)
+            .appendingPathComponent("\(NameSanitizer.fileComponent(device.name))-guest-\(timestamp())", isDirectory: true)
+        let result = await backend.exportGuestDiagnostics(
+            for: device,
+            categories: categories,
+            destination: destination
+        )
+        if result.supported {
+            appendLog(.success, scope: device.name, result.message)
+            persistLogs()
+            return result
+        }
+
+        if let plugin = plugins.first(where: {
+            $0.capabilities.contains("guest-diagnostics") && $0.trusted == true
+        }) {
+            let pluginResult = await PluginRegistry.run(
+                plugin,
+                capability: "guest-diagnostics",
+                device: device,
+                paths: paths,
+                onLine: logger(scope: "plugin:\(plugin.id)")
+            )
+            let pluginExport = DiagnosticExportResult(
+                supported: pluginResult.succeeded,
+                categories: categories,
+                outputURL: pluginResult.succeeded ? destination : nil,
+                message: pluginResult.output
+            )
+            appendLog(pluginResult.succeeded ? .success : .error, scope: device.name, pluginExport.message)
+            persistLogs()
+            return pluginExport
+        }
+
+        appendLog(.warning, scope: device.name, result.message)
+        persistLogs()
+        return result
+    }
+
     // MARK: - Multi-device test runs
 
     func startDeploymentTest(
         name: String,
         deviceIDs: Set<String>,
-        packageURL: URL
+        packageURL: URL,
+        assertions: [TestAssertion] = TestAssertion.deploymentDefaults
     ) async {
         guard requireReady(for: "Run multi-device test") else { return }
         let selected = devices.filter { deviceIDs.contains($0.id) }
@@ -445,6 +3137,8 @@ final class LabAppModel: ObservableObject {
             state: .running,
             results: selected.map { DeviceTestResult(deviceName: $0.name, state: .running, message: "Booting and installing") }
         )
+        record.appArtifactID = appArtifacts.first { $0.path == packageURL.path }?.id
+        record.assertions = assertions
         testRuns.insert(record, at: 0)
         saveTestRuns()
         let runID = record.id
@@ -453,11 +3147,34 @@ final class LabAppModel: ObservableObject {
         busyKeys.insert("test-run:\(runID.uuidString)")
         let backend = self.backend
         let paths = self.paths
+        let shouldCollectDiagnostics = assertions.contains { $0.kind == .diagnosticsCollected }
+        let gate = LabResourceGate(policy: resourcePolicy)
+        let runPolicy = resourcePolicy
 
         let results = await withTaskGroup(of: DeviceTestResult.self, returning: [DeviceTestResult].self) { group in
             for device in selected {
                 let logger = logger(scope: "test:\(device.name)")
                 group.addTask {
+                    let reservedMemory = min(
+                        max(1, device.memoryMB),
+                        max(1, runPolicy.maximumAggregateMemoryMB)
+                    )
+                    guard await HostResourceMonitor.waitForCPU(
+                        below: runPolicy.maximumHostCPUPercent,
+                        cancellation: cancellation
+                    ) else {
+                        return DeviceTestResult(
+                            id: UUID(),
+                            deviceName: device.name,
+                            state: cancellation.isCancelled ? .cancelled : .failed,
+                            message: "Host CPU remained above the configured resource limit",
+                            screenshotPath: nil,
+                            diagnosticBundlePath: nil,
+                            startedAt: .now,
+                            completedAt: .now
+                        )
+                    }
+                    await gate.acquire(memoryMB: reservedMemory)
                     let startedAt = Date()
                     let screenshot = paths.stateRoot
                         .appendingPathComponent("Test Runs", isDirectory: true)
@@ -487,24 +3204,51 @@ final class LabAppModel: ObservableObject {
                         let capture = await backend.captureScreenshot(device, destination: screenshot)
                         screenshotPath = capture.succeeded ? (capture.path ?? screenshot.path) : nil
                     }
+                    var diagnosticPath: String?
+                    if shouldCollectDiagnostics,
+                       let bundle = try? await backend.createDiagnosticBundle(
+                           for: device,
+                           activityLog: "Generated by deployment test \(runID.uuidString)\n"
+                       ) {
+                        diagnosticPath = bundle.url.path
+                    }
+                    let performance = await backend.performanceSample(for: device)
                     let current = await backend.listDevices().first { $0.id == device.id }
                     if let current, current.isRunning {
                         _ = await backend.stop(current, onLine: logger)
                     }
                     let launch = await launchTask.value
-                    let passed = guestReady && launch.succeeded && !cancellation.isCancelled
-                    return DeviceTestResult(
+                    let duration = Date().timeIntervalSince(startedAt)
+                    let assertionResults = TestAssertionEvaluator.evaluate(
+                        assertions,
+                        guestReady: guestReady,
+                        launch: launch,
+                        screenshotPath: screenshotPath,
+                        diagnosticPath: diagnosticPath,
+                        duration: duration,
+                        networkMode: device.networkConfiguration?.mode
+                            ?? NetworkMode(rawValue: device.network.mode),
+                        audioConfigured: device.audioConfiguration?.outputEnabled == true
+                            && performance.audioSampleRateHz != nil,
+                        performance: performance
+                    )
+                    let passed = assertionResults.allSatisfy { !$0.assertion.isRequired || $0.passed }
+                        && !cancellation.isCancelled
+                    let passedAssertions = assertionResults.filter(\.passed).count
+                    let deviceResult = DeviceTestResult(
                         id: UUID(),
                         deviceName: device.name,
                         state: passed ? .passed : ((launch.cancelled || cancellation.isCancelled) ? .cancelled : .failed),
-                        message: passed
-                            ? "Guest connected, app deployment completed, screenshot captured, and VM stopped"
-                            : (guestReady ? "VM exited with code \(launch.exitCode)" : "Guest control did not become ready"),
+                        message: "\(passedAssertions)/\(assertionResults.count) assertions passed",
                         screenshotPath: screenshotPath,
-                        diagnosticBundlePath: nil,
+                        diagnosticBundlePath: diagnosticPath,
                         startedAt: startedAt,
-                        completedAt: .now
+                        completedAt: .now,
+                        assertionResults: assertionResults,
+                        performanceSummary: performance.source
                     )
+                    await gate.release(memoryMB: reservedMemory)
+                    return deviceResult
                 }
             }
             var collected: [DeviceTestResult] = []
@@ -516,6 +3260,9 @@ final class LabAppModel: ObservableObject {
         record.completedAt = .now
         record.state = results.allSatisfy { $0.state == .passed } ? .passed
             : (results.contains { $0.state == .cancelled } ? .cancelled : .failed)
+        if let report = try? TestReportStore.write(record, paths: paths) {
+            record.reportPath = report.path
+        }
         replaceTestRun(record)
         orchestrationFlags.removeValue(forKey: runID)
         busyKeys.remove("test-run:\(runID.uuidString)")
@@ -526,6 +3273,17 @@ final class LabAppModel: ObservableObject {
         )
         await refreshDevices()
         persistLogs()
+    }
+
+    func updateResourcePolicy(_ policy: LabResourcePolicy) {
+        resourcePolicy = policy
+        do {
+            try ResourcePolicyStore.save(policy, paths: paths)
+            appendLog(.info, scope: "scheduler", "Resource policy updated: \(policy.maximumConcurrentVMs) concurrent VMs, \(policy.maximumAggregateMemoryMB) MB")
+            persistLogs()
+        } catch {
+            present(error, context: "Saving resource policy")
+        }
     }
 
     func runBaselineAcceptance(on source: VirtualDevice, packageURL: URL?) async {
@@ -546,6 +3304,7 @@ final class LabAppModel: ObservableObject {
             state: .running,
             results: [DeviceTestResult(deviceName: source.name, state: .running, message: "Cloning baseline")]
         )
+        record.appArtifactID = packageURL.flatMap { package in appArtifacts.first { $0.path == package.path }?.id }
         testRuns.insert(record, at: 0)
         saveTestRuns()
         let cancellation = OperationCancellationFlag()
@@ -652,6 +3411,9 @@ final class LabAppModel: ObservableObject {
                 completedAt: .now
             )]
         }
+        if let report = try? TestReportStore.write(record, paths: paths) {
+            record.reportPath = report.path
+        }
         replaceTestRun(record)
         orchestrationFlags.removeValue(forKey: record.id)
         busyKeys.remove("test-run:\(record.id.uuidString)")
@@ -674,6 +3436,37 @@ final class LabAppModel: ObservableObject {
         saveWorkflows()
     }
 
+    func addWorkflow(name: String, steps: [AutomationStep], schedule: String?, headless: Bool) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !steps.isEmpty else { return }
+        workflows.append(AutomationWorkflow(
+            id: UUID(),
+            name: trimmed,
+            steps: steps,
+            isBuiltIn: false,
+            schedule: schedule?.trimmingCharacters(in: .whitespacesAndNewlines),
+            headless: headless
+        ))
+        saveWorkflows()
+    }
+
+    func updateWorkflow(_ workflow: AutomationWorkflow) {
+        guard !workflow.isBuiltIn,
+              let index = workflows.firstIndex(where: { $0.id == workflow.id }) else { return }
+        workflows[index] = workflow
+        saveWorkflows()
+    }
+
+    func moveWorkflowStep(workflowID: UUID, stepID: UUID, offset: Int) {
+        guard let workflowIndex = workflows.firstIndex(where: { $0.id == workflowID && !$0.isBuiltIn }),
+              let stepIndex = workflows[workflowIndex].steps.firstIndex(where: { $0.id == stepID }) else { return }
+        let destination = min(max(0, stepIndex + offset), workflows[workflowIndex].steps.count - 1)
+        guard destination != stepIndex else { return }
+        let step = workflows[workflowIndex].steps.remove(at: stepIndex)
+        workflows[workflowIndex].steps.insert(step, at: destination)
+        saveWorkflows()
+    }
+
     func deleteWorkflow(_ workflow: AutomationWorkflow) {
         guard !workflow.isBuiltIn else { return }
         workflows.removeAll { $0.id == workflow.id }
@@ -690,51 +3483,98 @@ final class LabAppModel: ObservableObject {
         var launchTask: Task<CommandResult, Never>?
         var current = initialDevice
 
-        for step in workflow.steps {
+        workflowSteps: for step in workflow.steps {
             if Task.isCancelled || cancellation.isCancelled { break }
             if let refreshed = await backend.listDevices().first(where: { $0.id == initialDevice.id }) {
                 current = refreshed
             }
+            if step.condition == "running", !current.isRunning { continue }
+            if step.condition == "stopped", current.isRunning { continue }
+            if let delay = step.delaySeconds, delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
             appendLog(.info, scope: initialDevice.name, "Automation: \(step.action.displayName)")
-            switch step.action {
-            case .boot:
-                if !current.isRunning {
-                    let backend = self.backend
-                    let logger = logger(scope: initialDevice.name)
-                    let deviceToLaunch = current
-                    launchTask = Task {
-                        await backend.launch(deviceToLaunch, installPackage: nil, onLine: logger)
+            let attempts = max(1, (step.retryCount ?? 0) + 1)
+            var stepSucceeded = false
+            for attempt in 0..<attempts {
+                switch step.action {
+                case .boot, .installApp:
+                    if !current.isRunning {
+                        let backend = self.backend
+                        let logger = logger(scope: initialDevice.name)
+                        let deviceToLaunch = current
+                        let package = step.action == .installApp
+                            ? step.value.map { URL(fileURLWithPath: $0) }
+                            : nil
+                        launchTask = Task {
+                            await backend.launch(deviceToLaunch, installPackage: package, onLine: logger)
+                        }
                     }
-                }
-            case .waitForGuest:
-                let seconds = Int(step.value ?? "120") ?? 120
-                var ready = false
-                for _ in 0..<max(1, seconds / 3) {
-                    if cancellation.isCancelled { break }
-                    try? await Task.sleep(for: .seconds(3))
-                    if await backend.sendHardwareKey(current, name: "home").succeeded {
-                        ready = true
-                        break
+                    stepSucceeded = true
+                case .waitForGuest:
+                    let seconds = Int(step.value ?? "120") ?? 120
+                    for _ in 0..<max(1, seconds / 3) {
+                        if cancellation.isCancelled { break }
+                        try? await Task.sleep(for: .seconds(3))
+                        if await backend.sendHardwareKey(current, name: "home").succeeded {
+                            stepSucceeded = true
+                            break
+                        }
                     }
-                }
-                if !ready { appendLog(.warning, scope: current.name, "Guest control wait timed out") }
-            case .screenshot:
-                await captureScreenshot(of: current)
-            case .pressHome:
-                let result = await backend.sendHardwareKey(current, name: "home")
-                appendLog(result.succeeded ? .success : .warning, scope: current.name, result.error ?? "Home key sent")
-            case .stop:
-                if current.isRunning { _ = await backend.stop(current, onLine: logger(scope: current.name)) }
-            case .snapshot:
-                if !current.isRunning {
-                    _ = await backend.createSnapshot(
-                        of: current,
-                        named: step.value ?? "Automated Snapshot",
-                        onLine: logger(scope: current.name)
+                case .delay:
+                    let seconds = Double(step.value ?? "1") ?? 1
+                    try? await Task.sleep(for: .seconds(max(0, seconds)))
+                    stepSucceeded = true
+                case .screenshot:
+                    let directory = paths.stateRoot.appendingPathComponent("Automation", isDirectory: true)
+                    let destination = directory.appendingPathComponent("\(NameSanitizer.fileComponent(current.name))-\(timestamp()).png")
+                    stepSucceeded = await backend.captureScreenshot(current, destination: destination).succeeded
+                case .pressHome, .assertGuestReady:
+                    let result = await backend.sendHardwareKey(current, name: "home")
+                    stepSucceeded = result.succeeded
+                    appendLog(result.succeeded ? .success : .warning, scope: current.name, result.error ?? "Guest control responded")
+                case .setNetworkMode:
+                    guard !current.isRunning else { stepSucceeded = false; break }
+                    let mode = NetworkMode(rawValue: step.value ?? "nat") ?? .nat
+                    await updateConfiguration(
+                        current,
+                        cpu: current.cpuCount,
+                        memoryMB: current.memoryMB,
+                        network: mode.backendValue,
+                        networkConfiguration: NetworkConfiguration(
+                            mode: mode,
+                            proxyURL: current.networkConfiguration?.proxyURL,
+                            captureTraffic: current.networkConfiguration?.captureTraffic ?? false,
+                            allowHostAccess: current.networkConfiguration?.allowHostAccess ?? false
+                        )
                     )
+                    stepSucceeded = true
+                case .samplePerformance:
+                    await refreshPerformance(for: current)
+                    stepSucceeded = performanceSamples[current.id] != nil
+                case .stop:
+                    if current.isRunning {
+                        stepSucceeded = await backend.stop(current, onLine: logger(scope: current.name)).succeeded
+                    } else {
+                        stepSucceeded = true
+                    }
+                case .snapshot:
+                    if !current.isRunning {
+                        stepSucceeded = await backend.createSnapshot(
+                            of: current,
+                            named: step.value ?? "Automated Snapshot",
+                            onLine: logger(scope: current.name)
+                        ).0.succeeded
+                    }
+                case .diagnostics:
+                    stepSucceeded = await collectDiagnostics(for: current) != nil
                 }
-            case .diagnostics:
-                _ = await collectDiagnostics(for: current)
+                if stepSucceeded { break }
+                if attempt + 1 < attempts { try? await Task.sleep(for: .seconds(1)) }
+            }
+            if !stepSucceeded {
+                appendLog(.error, scope: current.name, "Automation step failed: \(step.action.displayName)")
+                if step.continueOnFailure != true { break workflowSteps }
             }
         }
         if let launchTask, workflow.steps.contains(where: { $0.action == .stop }) {
@@ -744,12 +3584,33 @@ final class LabAppModel: ObservableObject {
         orchestrationFlags.removeValue(forKey: workflow.id)
         snapshots = await backend.loadSnapshots()
         await refreshDevices()
-        appendLog(.success, scope: initialDevice.name, "Workflow completed: \(workflow.name)")
+        appendLog(.success, scope: initialDevice.name, "Workflow finished: \(workflow.name)")
         persistLogs()
     }
 
-    func reloadPlugins() {
-        plugins = PluginRegistry.loadPlugins(paths: paths)
+    func reloadPlugins() async {
+        let labPaths = paths
+        plugins = await Task.detached(priority: .utility) {
+            PluginRegistry.loadPlugins(paths: labPaths)
+        }.value
+    }
+
+    func setPluginTrusted(_ plugin: PluginDescriptor, trusted: Bool) async {
+        do {
+            let labPaths = paths
+            plugins = try await Task.detached(priority: .userInitiated) {
+                try PluginRegistry.setTrusted(plugin, trusted: trusted, paths: labPaths)
+                return PluginRegistry.loadPlugins(paths: labPaths)
+            }.value
+            appendLog(
+                trusted ? .warning : .info,
+                scope: "plugin:\(plugin.id)",
+                trusted ? "Plugin trusted with an executable checksum and declared permissions" : "Plugin trust revoked"
+            )
+            persistLogs()
+        } catch {
+            present(error, context: trusted ? "Trusting plugin" : "Revoking plugin trust")
+        }
     }
 
     func runPlugin(_ plugin: PluginDescriptor, capability: String, device: VirtualDevice?) async {
@@ -763,6 +3624,53 @@ final class LabAppModel: ObservableObject {
             onLine: logger(scope: scope)
         )
         finish(result, scope: scope, success: "Plugin completed")
+    }
+
+    func installXcodeDeploymentHelper() {
+        do {
+            let embeddedCLI = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/vdlctl")
+            let helper = try DeveloperTools.installHelper(
+                paths: paths,
+                vdlctlPath: FileManager.default.isExecutableFile(atPath: embeddedCLI.path)
+                    ? embeddedCLI.path : "/opt/homebrew/bin/vdlctl"
+            )
+            xcodeIntegration = DeveloperTools.inspect(paths: paths)
+            appendLog(.success, scope: "developer-tools", "Installed Xcode deployment helper at \(helper.path)")
+            persistLogs()
+        } catch {
+            present(error, context: "Installing Xcode deployment helper")
+        }
+    }
+
+    func checkForUpdates(automatic: Bool = false) async {
+        if !automatic { updateState = .checking }
+        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        do {
+            updateState = try await updateService.check(
+                currentVersion: current, channel: updateLifecyclePolicy.channel
+            )
+        } catch {
+            if !automatic { updateState = .failed(error.localizedDescription) }
+        }
+    }
+
+    func downloadAvailableUpdate() async {
+        do {
+            let destination = paths.stateRoot.appendingPathComponent("Updates", isDirectory: true)
+            updateState = try await updateService.downloadVerifiedUpdate(
+                destinationRoot: destination,
+                requireSignedManifest: updateLifecyclePolicy.requireSignedManifest
+            )
+            if case let .downloaded(_, path) = updateState {
+                reveal(URL(fileURLWithPath: path))
+            }
+        } catch {
+            updateState = .failed(error.localizedDescription)
+        }
+    }
+
+    func snapshotCount(for device: VirtualDevice) -> Int {
+        snapshots.filter { $0.sourceVM == device.name }.count
     }
 
     // MARK: - Activity
@@ -808,6 +3716,10 @@ final class LabAppModel: ObservableObject {
             testRuns.insert(record, at: 0)
         }
         saveTestRuns()
+        try? scalableEventStore?.append(
+            category: "test-run", entityID: record.id.uuidString,
+            occurredAt: record.createdAt, value: record
+        )
     }
 
     private func saveWorkflows() {
@@ -828,6 +3740,41 @@ final class LabAppModel: ObservableObject {
         return true
     }
 
+    private func beginJournal(
+        id: UUID = UUID(),
+        kind: LabOperationKind,
+        target: String,
+        phase: LabOperationPhase,
+        recovery: String
+    ) {
+        operationJournalEntries.insert(
+            OperationJournalEntry(
+                id: id,
+                kind: kind,
+                target: target,
+                startedAt: .now,
+                updatedAt: .now,
+                state: .running,
+                phase: phase,
+                recoveryInstruction: recovery,
+                message: "Operation started."
+            ),
+            at: 0
+        )
+        try? OperationJournalStore.save(operationJournalEntries, paths: paths)
+    }
+
+    private func finishJournal(id: UUID, result: CommandResult) {
+        guard let index = operationJournalEntries.firstIndex(where: { $0.id == id }) else { return }
+        operationJournalEntries[index].updatedAt = .now
+        operationJournalEntries[index].state = result.succeeded ? .completed : .failed
+        operationJournalEntries[index].phase = result.succeeded ? .completed : (result.cancelled ? .cancelled : .failed)
+        operationJournalEntries[index].message = result.succeeded
+            ? "Operation completed successfully."
+            : "Operation exited with status \(result.exitCode). Review logs before cleanup or retry."
+        try? OperationJournalStore.save(operationJournalEntries, paths: paths)
+    }
+
     private func finish(_ result: CommandResult, scope: String, success: String) {
         if result.succeeded {
             appendLog(.success, scope: scope, success)
@@ -842,30 +3789,39 @@ final class LabAppModel: ObservableObject {
         { [weak self] line in self?.relayLog(scope: scope, line: line) }
     }
 
+    private func progressHandler(scope: String) -> LabProgressHandler {
+        { [weak self] event in self?.relayProgress(scope: scope, event: event) }
+    }
+
     nonisolated private func relayLog(scope: String, line: String) {
         Task { @MainActor [weak self] in
             self?.appendLog(.info, scope: scope, line)
         }
     }
 
+    nonisolated private func relayProgress(scope: String, event: LabProgressEvent) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            progressEvents.append(event)
+            if progressEvents.count > 300 { progressEvents.removeFirst(progressEvents.count - 300) }
+            appendLog(.info, scope: scope, "[\(event.phase.rawValue)] \(event.message)")
+        }
+    }
+
     private func appendLog(_ level: LogLevel, scope: String, _ message: String) {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        logs.append(LogEntry(level: level, scope: scope, message: trimmed))
+        let entry = LogEntry(level: level, scope: scope, message: trimmed)
+        logs.append(entry)
         if logs.count > 2_000 { logs.removeFirst(logs.count - 2_000) }
+        try? scalableEventStore?.append(
+            category: "activity", entityID: scope,
+            occurredAt: entry.timestamp, value: entry
+        )
     }
 
     private var activityURL: URL {
         paths.stateRoot.appendingPathComponent("activity.json")
-    }
-
-    private func loadPersistedLogs() {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let data = try? Data(contentsOf: activityURL),
-              let records = try? decoder.decode([LogEntry].self, from: data)
-        else { return }
-        logs = Array(records.suffix(2_000))
     }
 
     private func persistLogs() {

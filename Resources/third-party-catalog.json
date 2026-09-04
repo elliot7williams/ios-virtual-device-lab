@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-23",
+  "records": [
+    {
+      "id": "vphone-cli",
+      "name": "vphone-cli",
+      "role": "External primary iOS VM backend",
+      "sourceURL": "https://github.com/Lakr233/vphone-cli",
+      "license": "MIT",
+      "version": "upstream 545fd35e0f36f1885d2c4990c2e44048daa24924; companion 48896066820a41ab2c9629be3137eb211fbe05b6",
+      "integrationState": "activeExternal",
+      "reviewState": "verified",
+      "sourceCodeUse": "No source copied into the manager; invoked as a separately installed or built executable",
+      "distributedWithApp": false,
+      "modifications": [
+        "Companion branch forwards bounded guest file listing/download through the existing vphoned API.",
+        "Companion branch adds versioned host-control capabilities and truthful unsupported-feature fields.",
+        "Companion branch publishes backend contract schema 1 and strips host-control credentials from clone, export, and import paths."
+      ],
+      "obligations": [
+        "Preserve the MIT license and copyright notice if vphone source or substantial portions are redistributed.",
+        "Review and preserve notices for any redistributed vphone transitive dependencies."
+      ],
+      "notes": ["The manager does not package the vphone executable or Apple firmware."]
+    },
+    {
+      "id": "apple-virtualization",
+      "name": "Apple Virtualization.framework",
+      "role": "Platform virtualization framework used by the external backend",
+      "sourceURL": "https://developer.apple.com/documentation/virtualization",
+      "license": "Apple SDK and platform terms",
+      "version": "Host macOS SDK; not pinned by the manager",
+      "integrationState": "platformFramework",
+      "reviewState": "verified",
+      "sourceCodeUse": "Apple platform API; not copied into this repository",
+      "distributedWithApp": false,
+      "modifications": [],
+      "obligations": ["Follow applicable Apple SDK, entitlement, platform, and distribution terms."],
+      "notes": ["The manager currently reaches this framework indirectly through vphone-cli."]
+    },
+    {
+      "id": "swift-swiftui",
+      "name": "Swift and SwiftUI",
+      "role": "Language, standard libraries, and native macOS UI framework",
+      "sourceURL": "https://www.swift.org/",
+      "license": "Swift open-source licenses and Apple SDK terms for SwiftUI",
+      "version": "Host Xcode/Swift toolchain",
+      "integrationState": "platformFramework",
+      "reviewState": "verified",
+      "sourceCodeUse": "Standard toolchain and platform framework use",
+      "distributedWithApp": false,
+      "modifications": [],
+      "obligations": ["Follow Swift project notices and Apple SDK/distribution terms as applicable."],
+      "notes": []
+    },
+    {
+      "id": "vphone-transitive",
+      "name": "vphone-cli transitive dependencies",
+      "role": "Dependencies of the separately built backend",
+      "sourceURL": "https://github.com/Lakr233/vphone-cli/blob/main/Package.resolved",
+      "license": "Per component",
+      "version": "Pinned by the vphone companion checkout Package.resolved",
+      "integrationState": "transitiveExternal",
+      "reviewState": "conditional",
+      "sourceCodeUse": "Remain behind the external backend boundary",
+      "distributedWithApp": false,
+      "modifications": [],
+      "obligations": ["Perform a component-level notice and redistribution review before packaging a backend binary."],
+      "notes": ["The manager release does not redistribute these packages."]
+    },
+    {
+      "id": "qemu",
+      "name": "QEMU",
+      "role": "Alternative backend and hardware-emulation research candidate",
+      "sourceURL": "https://www.qemu.org/",
+      "license": "GPL-2.0 overall; individual components may use other licenses",
+      "version": "Unpinned — no code or binary incorporated",
+      "integrationState": "researchOnly",
+      "reviewState": "conditional",
+      "sourceCodeUse": "Research reference only",
+      "distributedWithApp": false,
+      "modifications": [],
+      "obligations": [
+        "Pin the exact QEMU version and components before implementation.",
+        "Review source, redistribution, copyleft, notice, and transitive obligations for the proposed adapter."
+      ],
+      "notes": ["The catalog entry is not an install, dependency, compatibility, or iOS boot claim."]
+    },
+    {
+      "id": "corellium",
+      "name": "Corellium",
+      "role": "Commercial feature and UX benchmark",
+      "sourceURL": "https://www.corellium.com/",
+      "license": "Proprietary / commercial",
+      "version": "Not applicable — reference only",
+      "integrationState": "referenceOnly",
+      "reviewState": "referenceOnly",
+      "sourceCodeUse": "None; independently implemented product concepts only",
+      "distributedWithApp": false,
+      "modifications": [],
+      "obligations": ["Do not copy or redistribute proprietary source, binaries, assets, or protected materials without authorization."],
+      "notes": ["Listing does not imply endorsement, partnership, or compatibility."]
+    }
+  ]
+}

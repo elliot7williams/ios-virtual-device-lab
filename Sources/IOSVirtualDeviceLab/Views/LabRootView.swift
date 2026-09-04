@@ -18,6 +18,10 @@ struct LabRootView: View {
                     ForEach(LabSection.allCases) { section in
                         Label(section.rawValue, systemImage: section.systemImage)
                             .tag(section)
+                            .accessibilityIdentifier("lab.section.\(section.rawValue.lowercased().replacingOccurrences(of: " ", with: "-"))")
+                            .accessibilityAction(.default) {
+                                model.selectedSection = section
+                            }
                     }
                 }
 
@@ -58,6 +62,9 @@ struct LabRootView: View {
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .accessibilityLabel("Refresh virtual device lab")
+                .accessibilityIdentifier("lab.refresh")
+                .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.isBusy("refresh"))
 
                 Button {
@@ -65,6 +72,9 @@ struct LabRootView: View {
                 } label: {
                     Label("New Virtual Device", systemImage: "plus")
                 }
+                .accessibilityLabel("Create a new virtual device")
+                .accessibilityIdentifier("lab.create-device")
+                .keyboardShortcut("n", modifiers: .command)
             }
         }
         .sheet(isPresented: $showingCreateVM) {
@@ -91,14 +101,38 @@ struct LabRootView: View {
             DevicesView(showCreateVM: $showingCreateVM)
         case .firmware:
             FirmwareLibraryView()
+        case .profiles:
+            HardwareProfilesView()
         case .compatibility:
             CompatibilityView()
+        case .backends:
+            BackendAttributionView()
         case .snapshots:
             SnapshotsView()
         case .testRuns:
             TestRunsView()
         case .automation:
             AutomationView()
+        case .diagnostics:
+            DiagnosticsPerformanceView()
+        case .operations:
+            LabOperationsView()
+        case .continuity:
+            LabContinuityView()
+        case .platformEngineering:
+            PlatformEngineeringView()
+        case .qualificationAndScale:
+            LabExpansionView()
+        case .productionDepth:
+            ProductionDepthView()
+        case .releaseCompletion:
+            ReleaseCompletionView()
+        case .operationsHardening:
+            OperationsHardeningView()
+        case .productionReadiness:
+            ProductionReadinessView()
+        case .developerTools:
+            DeveloperToolsView()
         case .plugins:
             PluginsView()
         case .activity:

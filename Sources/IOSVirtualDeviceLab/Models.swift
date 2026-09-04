@@ -3,10 +3,22 @@ import Foundation
 enum LabSection: String, CaseIterable, Identifiable {
     case devices = "Virtual Devices"
     case firmware = "Firmware Library"
+    case profiles = "Hardware Profiles"
     case compatibility = "Compatibility"
+    case backends = "Backends & Attribution"
     case snapshots = "Snapshots"
     case testRuns = "Test Runs"
     case automation = "Automation"
+    case diagnostics = "Diagnostics & Performance"
+    case operations = "Lab Operations"
+    case continuity = "Continuity & Beta"
+    case platformEngineering = "Platform Engineering"
+    case qualificationAndScale = "Qualification & Scale"
+    case productionDepth = "Production Depth"
+    case releaseCompletion = "v1 Completion"
+    case operationsHardening = "v1.1 Hardening"
+    case productionReadiness = "Production Readiness"
+    case developerTools = "Developer Tools"
     case plugins = "Plugins"
     case activity = "Activity"
 
@@ -16,10 +28,22 @@ enum LabSection: String, CaseIterable, Identifiable {
         switch self {
         case .devices: "iphone.gen3"
         case .firmware: "shippingbox"
+        case .profiles: "iphone.gen3.radiowaves.left.and.right"
         case .compatibility: "checkmark.seal"
+        case .backends: "square.stack.3d.up"
         case .snapshots: "camera.filters"
         case .testRuns: "checklist"
         case .automation: "flowchart"
+        case .diagnostics: "waveform.path.ecg"
+        case .operations: "checkmark.shield"
+        case .continuity: "externaldrive.badge.checkmark"
+        case .platformEngineering: "wrench.and.screwdriver.fill"
+        case .qualificationAndScale: "point.3.connected.trianglepath.dotted"
+        case .productionDepth: "building.2.crop.circle"
+        case .releaseCompletion: "flag.checkered.2.crossed"
+        case .operationsHardening: "lock.shield"
+        case .productionReadiness: "shield.lefthalf.filled.badge.checkmark"
+        case .developerTools: "hammer"
         case .plugins: "puzzlepiece.extension"
         case .activity: "text.alignleft"
         }
@@ -93,6 +117,10 @@ struct VirtualDevice: Identifiable, Hashable, Sendable {
     let diskURL: URL
     var isRunning: Bool
     var isPaused: Bool = false
+    var hardwareProfileID: String? = nil
+    var networkConfiguration: NetworkConfiguration? = nil
+    var audioConfiguration: AudioConfiguration? = nil
+    var isolationPolicy: IsolationPolicy? = nil
 
     var id: String { name }
 
@@ -133,14 +161,17 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
     var kind: FirmwareKind
     let path: String
     let fileName: String
-    let device: String?
-    let version: String?
-    let build: String?
+    var device: String?
+    var version: String?
+    var build: String?
     let sizeBytes: Int64
     let importedAt: Date
     var sha256: String? = nil
     var validation: FirmwareValidation? = nil
     var compatibilityStatus: CompatibilityStatus? = nil
+    var recommendedProfileID: String? = nil
+    var manifestMetadata: IPSWManifestMetadata? = nil
+    var provenance: FirmwareProvenance? = nil
 
     var url: URL { URL(fileURLWithPath: path) }
 
@@ -173,8 +204,28 @@ struct FirmwareImage: Identifiable, Codable, Hashable, Sendable {
             version: parsed.version,
             build: parsed.build,
             sizeBytes: size,
-            importedAt: importedAt
+            importedAt: importedAt,
+            provenance: .localImport(path: url.path, importedAt: importedAt)
         )
+    }
+}
+
+struct IPSWBuildIdentity: Codable, Hashable, Sendable {
+    let deviceClass: String?
+    let variant: String?
+    let boardID: String?
+    let chipID: String?
+}
+
+struct IPSWManifestMetadata: Codable, Hashable, Sendable {
+    let productVersion: String?
+    let productBuildVersion: String?
+    let supportedProductTypes: [String]
+    let buildIdentities: [IPSWBuildIdentity]
+    let sourceEntry: String
+
+    var primaryProductType: String? {
+        supportedProductTypes.count == 1 ? supportedProductTypes[0] : nil
     }
 }
 
@@ -190,6 +241,85 @@ struct FirmwareValidation: Codable, Hashable, Sendable {
     let hasBuildManifest: Bool
     let archiveEntryCount: Int
     let issues: [String]
+}
+
+enum DiagnosticSeverity: String, Codable, CaseIterable, Sendable {
+    case information
+    case warning
+    case critical
+}
+
+enum DiagnosticClassification: String, Codable, CaseIterable, Sendable {
+    case appCrash
+    case vmCrash
+    case bootFailure
+    case kernelPanic
+    case resourcePressure
+    case networkFailure
+    case audioFailure
+    case unknown
+}
+
+struct DiagnosticFinding: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let classification: DiagnosticClassification
+    let severity: DiagnosticSeverity
+    let title: String
+    let evidence: String
+    let recommendation: String
+    let sourceFile: String?
+
+    init(
+        classification: DiagnosticClassification,
+        severity: DiagnosticSeverity,
+        title: String,
+        evidence: String,
+        recommendation: String,
+        sourceFile: String? = nil
+    ) {
+        id = UUID()
+        self.classification = classification
+        self.severity = severity
+        self.title = title
+        self.evidence = evidence
+        self.recommendation = recommendation
+        self.sourceFile = sourceFile
+    }
+}
+
+struct DiagnosticAnalysisReport: Identifiable, Codable, Hashable, Sendable {
+    let id: UUID
+    let bundlePath: String
+    let createdAt: Date
+    let analyzer: String
+    let findings: [DiagnosticFinding]
+    let summary: String
+}
+
+struct DiagnosticPrivacyPolicy: Codable, Hashable, Sendable {
+    var redactSecrets: Bool
+    var redactPersonalData: Bool
+    var includeHostProfile: Bool
+    var includeScreenshots: Bool
+    var maximumFileBytes: Int64
+    var encryptExports: Bool
+
+    static let standard = DiagnosticPrivacyPolicy(
+        redactSecrets: true,
+        redactPersonalData: true,
+        includeHostProfile: false,
+        includeScreenshots: true,
+        maximumFileBytes: 50 * 1_048_576,
+        encryptExports: false
+    )
+}
+
+struct DiagnosticPrivacyPreview: Codable, Hashable, Sendable {
+    let filesIncluded: Int
+    let filesExcluded: Int
+    let redactions: Int
+    let totalBytes: Int64
+    let warnings: [String]
 }
 
 enum CompatibilityStatus: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -222,6 +352,11 @@ struct CompatibilityEntry: Identifiable, Codable, Hashable, Sendable {
     let status: CompatibilityStatus
     let notes: String
     let validatedHosts: [String]
+    let hardwareProfileIDs: [String]?
+    let bootStatus: String?
+    let knownIssues: [String]?
+    let requiredPatches: [String]?
+    let appDeploymentSupport: String?
 
     func matches(version: String?, build: String?, device candidateDevice: String?) -> Bool {
         guard let version else { return false }
@@ -378,6 +513,7 @@ struct CommandResult: Sendable {
     let exitCode: Int32
     var timedOut: Bool = false
     var cancelled: Bool = false
+    var outputLimitExceeded: Bool = false
     var duration: TimeInterval = 0
 
     var succeeded: Bool { exitCode == 0 }
@@ -405,6 +541,8 @@ struct DeviceTestResult: Identifiable, Codable, Hashable, Sendable {
     var diagnosticBundlePath: String?
     var startedAt: Date
     var completedAt: Date?
+    var assertionResults: [TestAssertionResult]?
+    var performanceSummary: String?
 
     init(deviceName: String, state: TestRunState = .queued, message: String = "Queued") {
         id = UUID()
@@ -422,7 +560,9 @@ struct DeviceTestResult: Identifiable, Codable, Hashable, Sendable {
         screenshotPath: String?,
         diagnosticBundlePath: String?,
         startedAt: Date,
-        completedAt: Date?
+        completedAt: Date?,
+        assertionResults: [TestAssertionResult]? = nil,
+        performanceSummary: String? = nil
     ) {
         self.id = id
         self.deviceName = deviceName
@@ -432,6 +572,8 @@ struct DeviceTestResult: Identifiable, Codable, Hashable, Sendable {
         self.diagnosticBundlePath = diagnosticBundlePath
         self.startedAt = startedAt
         self.completedAt = completedAt
+        self.assertionResults = assertionResults
+        self.performanceSummary = performanceSummary
     }
 }
 
@@ -444,13 +586,35 @@ struct TestRunRecord: Identifiable, Codable, Hashable, Sendable {
     var completedAt: Date?
     var state: TestRunState
     var results: [DeviceTestResult]
+    var assertions: [TestAssertion]? = nil
+    var reportPath: String? = nil
+    var appArtifactID: UUID? = nil
+}
+
+struct LabResourcePolicy: Codable, Hashable, Sendable {
+    var maximumConcurrentVMs: Int
+    var maximumAggregateMemoryMB: Int
+    var reservedHostMemoryMB: Int
+    var maximumHostCPUPercent: Double
+
+    static let standard = LabResourcePolicy(
+        maximumConcurrentVMs: 2,
+        maximumAggregateMemoryMB: 12_288,
+        reservedHostMemoryMB: 4_096,
+        maximumHostCPUPercent: 85
+    )
 }
 
 enum AutomationAction: String, Codable, CaseIterable, Identifiable, Sendable {
     case boot
+    case installApp
     case waitForGuest
+    case delay
     case screenshot
     case pressHome
+    case setNetworkMode
+    case samplePerformance
+    case assertGuestReady
     case stop
     case snapshot
     case diagnostics
@@ -460,9 +624,14 @@ enum AutomationAction: String, Codable, CaseIterable, Identifiable, Sendable {
     var displayName: String {
         switch self {
         case .boot: "Boot"
+        case .installApp: "Boot & Install App"
         case .waitForGuest: "Wait for Guest"
+        case .delay: "Delay"
         case .screenshot: "Capture Screenshot"
         case .pressHome: "Press Home"
+        case .setNetworkMode: "Set Network Mode"
+        case .samplePerformance: "Sample Performance"
+        case .assertGuestReady: "Assert Guest Ready"
         case .stop: "Stop"
         case .snapshot: "Create Snapshot"
         case .diagnostics: "Collect Diagnostics"
@@ -472,13 +641,28 @@ enum AutomationAction: String, Codable, CaseIterable, Identifiable, Sendable {
 
 struct AutomationStep: Identifiable, Codable, Hashable, Sendable {
     let id: UUID
-    let action: AutomationAction
-    let value: String?
+    var action: AutomationAction
+    var value: String?
+    var delaySeconds: Double?
+    var retryCount: Int?
+    var continueOnFailure: Bool?
+    var condition: String?
 
-    init(_ action: AutomationAction, value: String? = nil) {
+    init(
+        _ action: AutomationAction,
+        value: String? = nil,
+        delaySeconds: Double = 0,
+        retryCount: Int = 0,
+        continueOnFailure: Bool = false,
+        condition: String? = nil
+    ) {
         id = UUID()
         self.action = action
         self.value = value
+        self.delaySeconds = delaySeconds
+        self.retryCount = retryCount
+        self.continueOnFailure = continueOnFailure
+        self.condition = condition
     }
 }
 
@@ -487,6 +671,8 @@ struct AutomationWorkflow: Identifiable, Codable, Hashable, Sendable {
     var name: String
     var steps: [AutomationStep]
     var isBuiltIn: Bool
+    var schedule: String? = nil
+    var headless: Bool? = nil
 }
 
 struct PluginDescriptor: Identifiable, Codable, Hashable, Sendable {
@@ -497,6 +683,39 @@ struct PluginDescriptor: Identifiable, Codable, Hashable, Sendable {
     let capabilities: [String]
     let arguments: [String]
     let description: String?
+    var apiVersion: Int?
+    var executableSHA256: String?
+    var trusted: Bool?
+    var permissions: [String]?
+    var sandbox: PluginSandboxPolicy?
+
+    init(
+        id: String,
+        name: String,
+        version: String,
+        executable: String,
+        capabilities: [String],
+        arguments: [String],
+        description: String?,
+        apiVersion: Int? = 1,
+        executableSHA256: String? = nil,
+        trusted: Bool? = false,
+        permissions: [String]? = nil,
+        sandbox: PluginSandboxPolicy? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.version = version
+        self.executable = executable
+        self.capabilities = capabilities
+        self.arguments = arguments
+        self.description = description
+        self.apiVersion = apiVersion
+        self.executableSHA256 = executableSHA256
+        self.trusted = trusted
+        self.permissions = permissions
+        self.sandbox = sandbox
+    }
 }
 
 struct DiagnosticBundle: Identifiable, Hashable, Sendable {
@@ -531,13 +750,48 @@ struct BackendCapabilities: Sendable {
     let screenshots: Bool
     let automation: Bool
     let guestLogs: Bool
+    let networking: Bool
+    let audio: Bool
+    let performanceMetrics: Bool
+    let crashExport: Bool
+    let xcodeDeployment: Bool
 
     static let vphone = BackendCapabilities(
         pause: true,
         screenshots: true,
         automation: true,
-        guestLogs: false
+        guestLogs: true,
+        networking: true,
+        audio: true,
+        performanceMetrics: true,
+        crashExport: true,
+        xcodeDeployment: true
     )
+
+    var featureSupport: [BackendFeatureSupport] {
+        [
+            BackendFeatureSupport(name: "NAT / bridged / offline networking", state: networking ? .available : .unavailable, reason: "Mapped to vphone VM network configuration"),
+            BackendFeatureSupport(name: "Proxy injection", state: .unavailable, reason: "No guest proxy API is exposed by vphone"),
+            BackendFeatureSupport(name: "Packet capture", state: .extensionRequired, reason: "Requires a trusted capture plugin with explicit permission"),
+            BackendFeatureSupport(name: "Host audio input/output", state: audio ? .available : .unavailable, reason: "vphone provisions Virtio sound streams backed by host audio"),
+            BackendFeatureSupport(name: "Audio interruptions and accessories", state: .unavailable, reason: "The engine does not expose interruption or Bluetooth/headphone simulation"),
+            BackendFeatureSupport(name: "CPU, memory, and disk I/O", state: performanceMetrics ? .available : .unavailable, reason: "Measured from the host VM processes"),
+            BackendFeatureSupport(name: "Guest GPU utilization and FPS", state: .unavailable, reason: "Virtualization.framework does not expose these counters"),
+        ]
+    }
+}
+
+enum BackendFeatureState: String, Codable, Sendable {
+    case available
+    case extensionRequired
+    case unavailable
+}
+
+struct BackendFeatureSupport: Identifiable, Codable, Hashable, Sendable {
+    let name: String
+    let state: BackendFeatureState
+    let reason: String
+    var id: String { name }
 }
 
 final class OperationCancellationFlag: @unchecked Sendable {
@@ -566,7 +820,8 @@ struct LabPaths: Sendable {
 
     static var `default`: LabPaths {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let root = home.appendingPathComponent(".vphone", isDirectory: true)
+        let root = uiTestRoot(arguments: ProcessInfo.processInfo.arguments)
+            ?? home.appendingPathComponent(".vphone", isDirectory: true)
         return LabPaths(
             dataRoot: root,
             libraryRoot: root.appendingPathComponent("VMs", isDirectory: true),
@@ -576,10 +831,26 @@ struct LabPaths: Sendable {
         )
     }
 
+    static func uiTestRoot(
+        arguments: [String],
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory
+    ) -> URL? {
+        guard let option = arguments.firstIndex(of: "--vdl-ui-test-root"),
+              arguments.indices.contains(option + 1) else { return nil }
+        let candidate = URL(fileURLWithPath: arguments[option + 1], isDirectory: true)
+            .standardizedFileURL
+        let temporaryRoot = temporaryDirectory.standardizedFileURL
+        guard candidate.path.hasPrefix(temporaryRoot.path + "/"),
+              candidate.pathComponents.count > temporaryRoot.pathComponents.count else { return nil }
+        return candidate
+    }
+
     func createDirectories() throws {
-        let fm = FileManager.default
         for url in [dataRoot, libraryRoot, firmwareRoot, snapshotsRoot, stateRoot] {
-            try fm.createDirectory(at: url, withIntermediateDirectories: true)
+            // VM data may live on an external, ownership-disabled volume. Creating a
+            // missing directory with 0700 is safe; reapplying chmod to every existing
+            // directory can block that volume and must not gate application startup.
+            try SecureFilesystem.prepareDirectory(url, enforceExistingPermissions: false)
         }
     }
 }

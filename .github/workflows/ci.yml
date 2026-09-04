@@ -10,7 +10,7 @@ jobs:
     runs-on: macos-26
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Toolchain
         run: |
@@ -18,7 +18,12 @@ jobs:
           xcodebuild -version
 
       - name: Unit tests
-        run: swift test
+        run: |
+          swift scripts/check_workflow_maintenance.swift .
+          swift test --enable-code-coverage
+          coverage_report="$(swift test --show-codecov-path)"
+          swift scripts/check_coverage.swift "$coverage_report" 25 65 60 85
+          cp "$coverage_report" .build/coverage.json
 
       - name: Build signed app bundle
         run: ./scripts/build_app.sh
@@ -30,9 +35,70 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           test -f "$app/Contents/Resources/AppIcon.icns"
           test -f "$app/Contents/Resources/compatibility-manifest.json"
+          test -f "$app/Contents/Resources/host-compatibility.json"
+          test -f "$app/Contents/Resources/backend-catalog.json"
+          test -f "$app/Contents/Resources/third-party-catalog.json"
+          test -f "$app/Contents/Resources/fleet-server-policy.example.json"
+          test -f "$app/Contents/Resources/fleet-worker-evidence.example.json"
+          test -f "$app/Contents/Resources/fleet-worker.example.json"
+          test -f "$app/Contents/Resources/supply-chain-policy.json"
+          test -f "$app/Contents/Resources/supply-chain-evidence.example.json"
+          test -f "$app/Contents/Resources/supply-chain-manifest.json"
+          test -f "$app/Contents/Resources/sbom.cdx.json"
+          test -f "$app/Contents/Resources/build-provenance.json"
+          test -f "$app/Contents/Resources/en.lproj/Localizable.strings"
+          test "$(find "$app/Contents/Resources/Runbooks" -type f -name '*.md' | wc -l | tr -d ' ')" = 6
+          test -x "$app/Contents/MacOS/vdlctl"
+          test -x "$app/Contents/MacOS/vdl-ui-smoke"
+          test -x "$app/Contents/MacOS/vdl-fleetd"
+          test -x "$app/Contents/MacOS/vdl-fleetworker"
+          "$app/Contents/MacOS/vdlctl" version
+          "$app/Contents/MacOS/vdlctl" depth status --json
+          "$app/Contents/MacOS/vdlctl" completion status --json
+          "$app/Contents/MacOS/vdlctl" operations status --json
+          "$app/Contents/MacOS/vdl-ui-smoke" --help
+          "$app/Contents/MacOS/vdl-fleetd" --help
+          "$app/Contents/MacOS/vdl-fleetd" --protocol-json > .build/fleet-protocol.json
+          swift scripts/check_fleet_protocol.swift .build/fleet-protocol.json
+          "$app/Contents/MacOS/vdl-fleetworker" --help
+          "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
+          test -f .build/vdl-dry-run/junit.xml
+          queue='.build/agent-smoke/Queue'
+          token='.build/agent-smoke/token'
+          "$app/Contents/MacOS/vdlctl" agent-init --queue "$queue" --token-file "$token"
+          job_output="$("$app/Contents/MacOS/vdlctl" agent-submit --workflow boot-smoke --device ci-placeholder --dry-run --queue "$queue" --token-file "$token")"
+          job_id="${job_output##*: }"
+          "$app/Contents/MacOS/vdlctl" agent-run-once --queue "$queue" --token-file "$token"
+          "$app/Contents/MacOS/vdlctl" agent-status --queue "$queue" --job "$job_id"
+          "$app/Contents/MacOS/vdlctl" agent-health --queue "$queue" --token-file "$token" --json
+          "$app/Contents/MacOS/vdlctl" agent-key-rotate --token-file "$token" --revoke-previous
+          cancel_output="$("$app/Contents/MacOS/vdlctl" agent-submit --workflow boot-smoke --device cancelled-placeholder --dry-run --queue "$queue" --token-file "$token")"
+          cancel_id="${cancel_output##*: }"
+          "$app/Contents/MacOS/vdlctl" agent-cancel --queue "$queue" --job "$cancel_id"
+          test -f "$queue/Cancelled/$cancel_id.json"
+          "$app/Contents/MacOS/vdlctl" agent-cleanup --queue "$queue" --older-than-days 30
+          first_output="$("$app/Contents/MacOS/vdlctl" agent-submit --workflow boot-smoke --device concurrent-one --dry-run --queue "$queue" --token-file "$token")"
+          second_output="$("$app/Contents/MacOS/vdlctl" agent-submit --workflow boot-smoke --device concurrent-two --dry-run --queue "$queue" --token-file "$token")"
+          first_id="${first_output##*: }"
+          second_id="${second_output##*: }"
+          "$app/Contents/MacOS/vdlctl" agent-run-once --queue "$queue" --token-file "$token" &
+          worker_one=$!
+          "$app/Contents/MacOS/vdlctl" agent-run-once --queue "$queue" --token-file "$token" &
+          worker_two=$!
+          wait "$worker_one" "$worker_two"
+          "$app/Contents/MacOS/vdlctl" agent-status --queue "$queue" --job "$first_id"
+          "$app/Contents/MacOS/vdlctl" agent-status --queue "$queue" --job "$second_id"
+          test "$(stat -f '%Lp' "$queue")" = 700
+          test "$(stat -f '%Lp' "$queue/Results/$first_id.json")" = 600
 
       - name: Upload app bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ios-virtual-device-lab-${{ github.sha }}
           path: .build/iOS Virtual Device Lab.app
+
+      - name: Upload coverage evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: source-coverage-${{ github.sha }}
+          path: .build/coverage.json
