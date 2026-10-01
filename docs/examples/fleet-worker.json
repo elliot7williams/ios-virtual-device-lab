@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "coordinatorURL": "https://replace-controller.example:7443/",
+  "agentID": "replace-with-policy-subject",
+  "displayName": "Replace Worker Mac",
+  "clientIdentityLabel": "Replace Fleet Worker Identity",
+  "serverCertificateSHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "vdlctlPath": null,
+  "outputRoot": "/Users/Shared/VirtualDeviceLabWorker",
+  "pollIntervalSeconds": 10,
+  "jobTimeoutSeconds": 7200,
+  "maximumConcurrentJobs": 1
+}

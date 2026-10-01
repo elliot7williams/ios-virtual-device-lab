@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "serverIdentityLabel": "iOS Virtual Device Lab Fleet Server",
+  "listenPort": 9443,
+  "stateRoot": "/Users/REPLACE_ME/Library/Application Support/iOS Virtual Device Lab/Fleet Server",
+  "principals": [
+    {
+      "subject": "lab-operator",
+      "role": "operator",
+      "certificateSHA256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "enabled": true
+    },
+    {
+      "subject": "lab-administrator",
+      "role": "administrator",
+      "certificateSHA256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "enabled": true
+    }
+  ],
+  "requirePlatformTrust": true
+}

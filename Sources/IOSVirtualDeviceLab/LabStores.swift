@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum TestRunStore {
@@ -7,6 +8,19 @@ enum TestRunStore {
 
     static func save(_ records: [TestRunRecord], paths: LabPaths) throws {
         try encodeFile(records, to: paths.stateRoot.appendingPathComponent("test-runs.json"))
+    }
+}
+
+enum ResourcePolicyStore {
+    static func load(paths: LabPaths) -> LabResourcePolicy {
+        decodeFile(
+            LabResourcePolicy.self,
+            from: paths.stateRoot.appendingPathComponent("resource-policy.json")
+        ) ?? .standard
+    }
+
+    static func save(_ policy: LabResourcePolicy, paths: LabPaths) throws {
+        try encodeFile(policy, to: paths.stateRoot.appendingPathComponent("resource-policy.json"))
     }
 }
 
@@ -84,7 +98,19 @@ enum PluginRegistry {
               "executable": "/absolute/path/to/lab-tools",
               "capabilities": ["diagnostics"],
               "arguments": [],
-              "description": "Optional diagnostics integration"
+              "description": "Optional diagnostics integration",
+              "apiVersion": 1,
+              "trusted": false,
+              "permissions": ["diagnostics"],
+              "sandbox": {
+                "enabled": true,
+                "allowNetwork": false,
+                "allowDeviceRead": false,
+                "allowTemporaryFiles": true,
+                "timeoutSeconds": 120,
+                "maximumOutputBytes": 5242880,
+                "requirePerRunApproval": true
+              }
             }
             ```
 
@@ -114,6 +140,7 @@ enum PluginRegistry {
         capability: String,
         device: VirtualDevice?,
         paths: LabPaths,
+        additionalEnvironment: [String: String] = [:],
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult {
         guard plugin.capabilities.contains(capability) else {
@@ -124,6 +151,30 @@ enum PluginRegistry {
                 exitCode: 64
             )
         }
+        guard plugin.apiVersion ?? 1 == 1 else {
+            return CommandResult(
+                executable: plugin.executable,
+                arguments: plugin.arguments + [capability],
+                output: "Plugin API version \(plugin.apiVersion ?? 0) is not supported; this app supports version 1",
+                exitCode: 65
+            )
+        }
+        guard plugin.trusted == true else {
+            return CommandResult(
+                executable: plugin.executable,
+                arguments: plugin.arguments + [capability],
+                output: "Plugin is not trusted. Review its executable and grant trust in the Plugins screen.",
+                exitCode: 77
+            )
+        }
+        if let permissions = plugin.permissions, !permissions.contains(capability) {
+            return CommandResult(
+                executable: plugin.executable,
+                arguments: plugin.arguments + [capability],
+                output: "Plugin has not been granted the \(capability) permission",
+                exitCode: 77
+            )
+        }
         guard FileManager.default.isExecutableFile(atPath: plugin.executable) else {
             return CommandResult(
                 executable: plugin.executable,
@@ -132,23 +183,119 @@ enum PluginRegistry {
                 exitCode: 126
             )
         }
+        if let expected = plugin.executableSHA256 {
+            guard let actual = try? sha256(of: URL(fileURLWithPath: plugin.executable)), actual == expected else {
+                return CommandResult(
+                    executable: plugin.executable,
+                    arguments: plugin.arguments + [capability],
+                    output: "Plugin executable changed after it was trusted; review and trust it again",
+                    exitCode: 77
+                )
+            }
+        }
         let outputRoot = paths.stateRoot.appendingPathComponent("Plugin Output", isDirectory: true)
         try? FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
         var environment = [
             "LAB_DATA_ROOT": paths.dataRoot.path,
             "LAB_OUTPUT_ROOT": outputRoot.path,
-        ]
+        ].merging(additionalEnvironment) { _, new in new }
         if let device {
             environment["LAB_DEVICE_NAME"] = device.name
             environment["LAB_DEVICE_BUNDLE"] = device.bundleURL.path
         }
-        return await ProcessExecutor.runAsync(
-            executable: URL(fileURLWithPath: plugin.executable),
-            arguments: plugin.arguments + [capability],
+        let policy = plugin.sandbox ?? .standard
+        let sandboxExecutable = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+        if policy.enabled && !FileManager.default.isExecutableFile(atPath: sandboxExecutable.path) {
+            return CommandResult(
+                executable: plugin.executable,
+                arguments: plugin.arguments + [capability],
+                output: "The plugin requires sandbox isolation, but sandbox-exec is unavailable on this host",
+                exitCode: 69
+            )
+        }
+        let executable = policy.enabled ? sandboxExecutable : URL(fileURLWithPath: plugin.executable)
+        let arguments = policy.enabled
+            ? [
+                "-p",
+                PluginSandboxProfile.make(
+                    executable: plugin.executable,
+                    outputRoot: outputRoot,
+                    deviceRoot: device?.bundleURL,
+                    policy: policy
+                ),
+                plugin.executable,
+            ] + plugin.arguments + [capability]
+            : plugin.arguments + [capability]
+        let startedAt = Date()
+        let result = await ProcessExecutor.runAsync(
+            executable: executable,
+            arguments: arguments,
             environment: environment,
-            timeout: 300,
+            timeout: TimeInterval(max(1, policy.timeoutSeconds)),
+            maximumOutputBytes: max(1, policy.maximumOutputBytes),
             onLine: onLine
         )
+        let outputBytes = result.output.lengthOfBytes(using: .utf8)
+        try? PluginAuditStore.append(
+            PluginAuditRecord(
+                id: UUID(),
+                pluginID: plugin.id,
+                capability: capability,
+                startedAt: startedAt,
+                completedAt: .now,
+                deviceName: device?.name,
+                sandboxed: policy.enabled,
+                networkAllowed: policy.allowNetwork,
+                exitCode: result.exitCode,
+                timedOut: result.timedOut,
+                outputBytes: outputBytes
+            ),
+            paths: paths
+        )
+        if result.outputLimitExceeded {
+            return CommandResult(
+                executable: result.executable,
+                arguments: result.arguments,
+                output: "Plugin output exceeded the \(policy.maximumOutputBytes)-byte audit limit and was rejected",
+                exitCode: 70,
+                timedOut: result.timedOut,
+                cancelled: result.cancelled,
+                outputLimitExceeded: true,
+                duration: result.duration
+            )
+        }
+        return result
+    }
+
+    static func setTrusted(_ plugin: PluginDescriptor, trusted: Bool, paths: LabPaths) throws {
+        let directory = root(paths: paths)
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        guard let descriptorURL = files.first(where: {
+            $0.pathExtension.lowercased() == "json"
+                && decodeFile(PluginDescriptor.self, from: $0)?.id == plugin.id
+        }) else { throw CocoaError(.fileNoSuchFile) }
+        var updated = plugin
+        updated.apiVersion = updated.apiVersion ?? 1
+        updated.trusted = trusted
+        updated.permissions = updated.permissions ?? updated.capabilities
+        updated.executableSHA256 = trusted
+            ? try sha256(of: URL(fileURLWithPath: plugin.executable))
+            : nil
+        try encodeFile(updated, to: descriptorURL)
+    }
+
+    private static func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let data = try handle.read(upToCount: 4 * 1_024 * 1_024), !data.isEmpty {
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
 

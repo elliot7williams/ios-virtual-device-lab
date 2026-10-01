@@ -106,6 +106,36 @@ private struct FirmwareRow: View {
                         .foregroundStyle(validation.state == .invalid ? .red : .secondary)
                         .lineLimit(2)
                 }
+                if let manifest = image.manifestMetadata {
+                    Text(
+                        "BuildManifest: iOS \(manifest.productVersion ?? "unknown") (\(manifest.productBuildVersion ?? "unknown")) • \(manifest.supportedProductTypes.count) product type(s) • \(manifest.buildIdentities.count) build identity record(s)"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                }
+                if let provenance = image.provenance {
+                    Text(
+                        "Provenance: \(provenance.sourceKind.rawValue) • \(provenance.signingStatus.rawValue) • \(provenance.retentionPolicy.rawValue) • imported by \(provenance.importedBy)"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .help(provenance.ownershipNote)
+                }
+                if image.kind == .iPhone {
+                    let recommendation = model.firmwareRecommendation(for: image)
+                    let backend = model.backendRecommendation(for: image)
+                    if let profile = recommendation.hardwareProfile {
+                        Text("Recommended: \(profile.name)\(recommendation.cloudOSFirmware.map { " • cloudOS \($0.versionLabel)" } ?? "")")
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                    }
+                    Text("Backend: \(backend.title) • \(backend.verdict.displayName)")
+                        .font(.caption2)
+                        .foregroundStyle(backend.verdict == .ready ? .green : (backend.verdict == .blocked ? .red : .orange))
+                        .help(backend.reasons.joined(separator: "\n"))
+                }
             }
             Spacer()
             Picker(

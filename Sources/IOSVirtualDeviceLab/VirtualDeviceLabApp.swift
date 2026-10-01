@@ -1,15 +1,30 @@
 import SwiftUI
+import AppKit
 
 @main
 struct IOSVirtualDeviceLabApp: App {
     @StateObject private var model = LabAppModel()
+    @StateObject private var launchHealth = LaunchHealthMonitor.shared
+
+    init() {
+        LabMatrixProbe.handleCommandLine()
+        LaunchHealthMonitor.shared.begin(paths: .default)
+    }
 
     var body: some Scene {
         WindowGroup {
             LabRootView()
                 .environmentObject(model)
+                .environmentObject(launchHealth)
                 .frame(minWidth: 1_050, minHeight: 680)
-                .task { await model.bootstrap() }
+                .task {
+                    await model.bootstrap(safeMode: launchHealth.record.safeMode)
+                    launchHealth.markReady()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    model.stopNetworkFixture()
+                    launchHealth.markCleanExit()
+                }
         }
         .defaultSize(width: 1_240, height: 780)
         .commands {
@@ -24,6 +39,7 @@ struct IOSVirtualDeviceLabApp: App {
         Settings {
             LabSettingsView()
                 .environmentObject(model)
+                .environmentObject(launchHealth)
                 .frame(width: 560, height: 320)
         }
     }

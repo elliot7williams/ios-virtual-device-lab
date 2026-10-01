@@ -41,9 +41,18 @@ final class StreamAccumulator: @unchecked Sendable {
     private var completeOutput = ""
     private var pendingLine = ""
     private let onLine: @Sendable (String) -> Void
+    private let maximumOutputBytes: Int?
+    private let onLimitExceeded: @Sendable () -> Void
+    private var exceededLimit = false
 
-    init(onLine: @escaping @Sendable (String) -> Void) {
+    init(
+        maximumOutputBytes: Int? = nil,
+        onLine: @escaping @Sendable (String) -> Void,
+        onLimitExceeded: @escaping @Sendable () -> Void = {}
+    ) {
+        self.maximumOutputBytes = maximumOutputBytes
         self.onLine = onLine
+        self.onLimitExceeded = onLimitExceeded
     }
 
     func consume(_ data: Data) {
@@ -53,9 +62,22 @@ final class StreamAccumulator: @unchecked Sendable {
 
     func consume(_ text: String) {
         var completed: [String] = []
+        var reachedLimit = false
         lock.lock()
-        completeOutput += text
-        pendingLine += text
+        guard !exceededLimit else { lock.unlock(); return }
+        var accepted = text
+        if let maximumOutputBytes {
+            let currentBytes = completeOutput.lengthOfBytes(using: .utf8)
+            let remaining = max(0, maximumOutputBytes - currentBytes)
+            let incoming = Data(text.utf8)
+            if incoming.count > remaining {
+                accepted = String(decoding: incoming.prefix(remaining), as: UTF8.self)
+                exceededLimit = true
+                reachedLimit = true
+            }
+        }
+        completeOutput += accepted
+        pendingLine += accepted
         let pieces = pendingLine.components(separatedBy: .newlines)
         if pieces.count > 1 {
             completed = Array(pieces.dropLast())
@@ -63,6 +85,7 @@ final class StreamAccumulator: @unchecked Sendable {
         }
         lock.unlock()
         for line in completed where !line.isEmpty { onLine(line) }
+        if reachedLimit { onLimitExceeded() }
     }
 
     func finish() -> String {
@@ -77,6 +100,12 @@ final class StreamAccumulator: @unchecked Sendable {
         if !tail.isEmpty { onLine(tail) }
         return output
     }
+
+    var outputLimitExceeded: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return exceededLimit
+    }
 }
 
 enum ProcessExecutor {
@@ -87,6 +116,7 @@ enum ProcessExecutor {
         environment additions: [String: String] = [:],
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
+        maximumOutputBytes: Int? = nil,
         control: ProcessControl? = nil,
         onLine: @escaping @Sendable (String) -> Void = { _ in }
     ) -> CommandResult {
@@ -94,7 +124,12 @@ enum ProcessExecutor {
         let process = Process()
         let outputPipe = Pipe()
         let inputPipe = Pipe()
-        let accumulator = StreamAccumulator(onLine: onLine)
+        let processControl = control ?? ProcessControl()
+        let accumulator = StreamAccumulator(
+            maximumOutputBytes: maximumOutputBytes,
+            onLine: onLine,
+            onLimitExceeded: { processControl.cancel() }
+        )
 
         process.executableURL = executable
         process.arguments = arguments
@@ -103,8 +138,8 @@ enum ProcessExecutor {
         process.standardError = outputPipe
         process.standardInput = inputPipe
         process.environment = ProcessInfo.processInfo.environment.merging(additions) { _, new in new }
-        control?.attach(process)
-        defer { control?.detach() }
+        processControl.attach(process)
+        defer { processControl.detach() }
 
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             accumulator.consume(handle.availableData)
@@ -116,7 +151,7 @@ enum ProcessExecutor {
                 inputPipe.fileHandleForWriting.write(standardInput)
             }
             try? inputPipe.fileHandleForWriting.close()
-            if control?.isCancellationRequested == true, process.isRunning {
+            if processControl.isCancellationRequested, process.isRunning {
                 process.interrupt()
             }
         } catch {
@@ -135,20 +170,20 @@ enum ProcessExecutor {
         var timedOut = false
         if let timeout {
             let deadline = Date().addingTimeInterval(timeout)
-            while process.isRunning && Date() < deadline && control?.isCancellationRequested != true {
+            while process.isRunning && Date() < deadline && !processControl.isCancellationRequested {
                 Thread.sleep(forTimeInterval: 0.05)
             }
-            if process.isRunning && control?.isCancellationRequested != true {
+            if process.isRunning && !processControl.isCancellationRequested {
                 timedOut = true
                 process.interrupt()
             }
         } else {
-            while process.isRunning && control?.isCancellationRequested != true {
+            while process.isRunning && !processControl.isCancellationRequested {
                 Thread.sleep(forTimeInterval: 0.05)
             }
         }
 
-        if process.isRunning && control?.isCancellationRequested == true {
+        if process.isRunning && processControl.isCancellationRequested {
             process.interrupt()
         }
         if process.isRunning {
@@ -174,7 +209,8 @@ enum ProcessExecutor {
             output: accumulator.finish(),
             exitCode: status,
             timedOut: timedOut,
-            cancelled: control?.isCancellationRequested == true,
+            cancelled: processControl.isCancellationRequested,
+            outputLimitExceeded: accumulator.outputLimitExceeded,
             duration: Date().timeIntervalSince(startedAt)
         )
     }
@@ -186,6 +222,7 @@ enum ProcessExecutor {
         environment additions: [String: String] = [:],
         standardInput: Data? = nil,
         timeout: TimeInterval? = nil,
+        maximumOutputBytes: Int? = nil,
         control: ProcessControl? = nil,
         onLine: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> CommandResult {
@@ -199,6 +236,7 @@ enum ProcessExecutor {
                     environment: additions,
                     standardInput: standardInput,
                     timeout: timeout,
+                    maximumOutputBytes: maximumOutputBytes,
                     control: control,
                     onLine: onLine
                 )
@@ -211,8 +249,10 @@ enum ProcessExecutor {
 
 actor VPhoneBackend: LabBackend {
     let paths: LabPaths
+    nonisolated let descriptor = BackendDescriptor.vphone
     nonisolated let capabilities = BackendCapabilities.vphone
     private var activeControls: [UUID: ProcessControl] = [:]
+    private var previousIOCounters: [String: (read: UInt64, written: UInt64, timestamp: Date)] = [:]
 
     init(paths: LabPaths = .default) {
         self.paths = paths
@@ -240,24 +280,42 @@ actor VPhoneBackend: LabBackend {
 
     func checkHost() -> HostReadiness {
         let swVers = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/bin/sw_vers"), arguments: ["-productVersion"])
+            executable: URL(fileURLWithPath: "/usr/bin/sw_vers"),
+            arguments: ["-productVersion"],
+            timeout: 5
+        )
         let architecture = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/bin/uname"), arguments: ["-m"])
+            executable: URL(fileURLWithPath: "/usr/bin/uname"),
+            arguments: ["-m"],
+            timeout: 5
+        )
         let model = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/sbin/sysctl"), arguments: ["-n", "hw.model"])
+            executable: URL(fileURLWithPath: "/usr/sbin/sysctl"),
+            arguments: ["-n", "hw.model"],
+            timeout: 5
+        )
         let hypervisor = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/sbin/sysctl"), arguments: ["-n", "kern.hv_vmm_present"])
+            executable: URL(fileURLWithPath: "/usr/sbin/sysctl"),
+            arguments: ["-n", "kern.hv_vmm_present"],
+            timeout: 5
+        )
         let sip = ProcessExecutor.run(
-            executable: URL(fileURLWithPath: "/usr/bin/csrutil"), arguments: ["status"])
+            executable: URL(fileURLWithPath: "/usr/bin/csrutil"),
+            arguments: ["status"],
+            timeout: 10
+        )
 
         let research = researchGuestStatus()
         let binary = resolveBinary()
-        let binaryCheck = binary.map { ProcessExecutor.run(executable: $0, arguments: ["--help"]) }
+        let binaryCheck = binary.map {
+            ProcessExecutor.run(executable: $0, arguments: ["--vdl-contract"], timeout: 5, maximumOutputBytes: 64 * 1_024)
+        }
+        let companion = CompanionBackendInspector.inspect(binary: binary)
 
         let arch = architecture.output.trimmed
         let nested = hypervisor.output.trimmed == "1"
         let researchEnabled = research.localizedCaseInsensitiveContains("enabled")
-        let binaryReady = binaryCheck?.succeeded == true
+        let binaryReady = binaryCheck?.succeeded == true && companion.compatible
 
         let state: ReadinessState
         if arch != "arm64" || nested || binary == nil {
@@ -287,8 +345,10 @@ actor VPhoneBackend: LabBackend {
         let initial = ProcessExecutor.run(
             executable: csrutil,
             arguments: ["allow-research-guests", "status"],
-            standardInput: Data()
+            standardInput: Data(),
+            timeout: 10
         )
+        if initial.timedOut { return "Research-guest policy check timed out" }
         guard initial.output.contains("Pick a macOS installation") else {
             return initial.output.trimmed.nilIfEmpty ?? "Unavailable"
         }
@@ -304,8 +364,10 @@ actor VPhoneBackend: LabBackend {
         let chosen = ProcessExecutor.run(
             executable: csrutil,
             arguments: ["allow-research-guests", "status"],
-            standardInput: Data("\(number)\n".utf8)
+            standardInput: Data("\(number)\n".utf8),
+            timeout: 10
         )
+        if chosen.timedOut { return "Research-guest policy selection timed out" }
         if let statusRange = chosen.output.range(of: "Allow Research Guests status:") {
             return String(chosen.output[statusRange.lowerBound...])
                 .components(separatedBy: .newlines)
@@ -360,6 +422,7 @@ actor VPhoneBackend: LabBackend {
             ?? readFirstLine(bundleURL.appendingPathComponent("udid-prediction.txt"))
 
         let pids = runningPIDs(for: diskURL)
+        let metadata = loadDeviceMetadata(from: bundleURL)
         return VirtualDevice(
             name: bundleURL.lastPathComponent,
             cpuCount: cpu,
@@ -371,7 +434,29 @@ actor VPhoneBackend: LabBackend {
             bundleURL: bundleURL,
             diskURL: diskURL,
             isRunning: !pids.isEmpty,
-            isPaused: !pids.isEmpty && pids.allSatisfy(isProcessPaused)
+            isPaused: !pids.isEmpty && pids.allSatisfy(isProcessPaused),
+            hardwareProfileID: metadata?.hardwareProfileID,
+            networkConfiguration: metadata?.network,
+            audioConfiguration: metadata?.audio,
+            isolationPolicy: metadata?.isolation
+        )
+    }
+
+    private func loadDeviceMetadata(from bundleURL: URL) -> LabDeviceMetadata? {
+        let url = bundleURL.appendingPathComponent("lab-metadata.json")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? decoder.decode(LabDeviceMetadata.self, from: data)
+    }
+
+    private func saveDeviceMetadata(_ metadata: LabDeviceMetadata, to bundleURL: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(metadata).write(
+            to: bundleURL.appendingPathComponent("lab-metadata.json"),
+            options: .atomic
         )
     }
 
@@ -442,7 +527,7 @@ actor VPhoneBackend: LabBackend {
             .volumeAvailableCapacityForImportantUsageKey,
             .volumeAvailableCapacityKey,
         ]
-        let values = try? paths.dataRoot.resourceValues(forKeys: keys)
+        let values = try? paths.dataRoot.resolvingSymlinksInPath().resourceValues(forKeys: keys)
         let important = values?.volumeAvailableCapacityForImportantUsage ?? 0
         let fallback = Int64(values?.volumeAvailableCapacity ?? 0)
         return StorageCheck(
@@ -566,24 +651,35 @@ actor VPhoneBackend: LabBackend {
     }
 
     func stop(_ device: VirtualDevice, onLine: @escaping @Sendable (String) -> Void) async -> CommandResult {
-        await runCLI(
+        if device.isPaused {
+            let resumed = signalVM(device, signal: SIGCONT, action: "resume before stopping", onLine: onLine)
+            guard resumed.succeeded else { return resumed }
+        }
+        return await runCLI(
             ["vm", "stop", device.name, "--library-root", paths.libraryRoot.path],
             onLine: onLine
         )
     }
 
     func createVM(
-        name: String,
-        variant: FirmwareVariant,
-        diskSizeGB: Int,
-        iphoneIPSW: URL?,
-        cloudOSIPSW: URL?,
+        request: VMCreationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult {
+        let name = request.name
+        let iphoneIPSW = request.iphoneFirmware?.url
+        let cloudOSIPSW = request.cloudOSFirmware?.url
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .create,
+            phase: .validating,
+            fractionCompleted: 0.05,
+            message: "Validating firmware and \(request.hardwareProfile.name)"
+        ))
         var arguments = [
             "vm", "create", name,
-            "--variant", variant.rawValue,
-            "--disk-size", String(diskSizeGB),
+            "--variant", request.variant.rawValue,
+            "--disk-size", String(request.diskSizeGB),
             "--root-popup",
             "--library-root", paths.libraryRoot.path,
         ]
@@ -596,7 +692,62 @@ actor VPhoneBackend: LabBackend {
         let minimumWorkspace = Int64(15) * 1_073_741_824
         let check = storageCheck(requiredBytes: minimumWorkspace + sourceBytes)
         guard check.isSufficient else { return insufficientStorageResult(check, arguments: arguments) }
-        return await runCLI(arguments, onLine: onLine)
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .create,
+            phase: .preparing,
+            fractionCompleted: 0.1,
+            message: "Preparing VM storage"
+        ))
+        let progressLine: @Sendable (String) -> Void = { line in
+            onLine(line)
+            let lower = line.lowercased()
+            let phase: LabOperationPhase?
+            let fraction: Double?
+            if lower.contains("download") {
+                phase = .downloading; fraction = 0.25
+            } else if lower.contains("restore") {
+                phase = .restoring; fraction = 0.5
+            } else if lower.contains("patch") {
+                phase = .patching; fraction = 0.7
+            } else if lower.contains("boot") {
+                phase = .booting; fraction = 0.85
+            } else {
+                phase = nil; fraction = nil
+            }
+            if let phase {
+                onProgress(LabProgressEvent(
+                    operationID: request.operationID,
+                    kind: .create,
+                    phase: phase,
+                    fractionCompleted: fraction,
+                    message: line
+                ))
+            }
+        }
+        let result = await runCLI(arguments, onLine: progressLine)
+        if result.succeeded {
+            let metadata = LabDeviceMetadata(
+                schemaVersion: 1,
+                hardwareProfileID: request.hardwareProfile.id,
+                network: request.network,
+                audio: request.audio,
+                isolation: request.isolation,
+                updatedAt: .now
+            )
+            try? saveDeviceMetadata(metadata, to: paths.libraryRoot.appendingPathComponent(name))
+            if let created = listDevices().first(where: { $0.name == name }) {
+                _ = try? GuestCredentialVault.rotate(for: created)
+            }
+        }
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .create,
+            phase: result.succeeded ? .completed : (result.cancelled ? .cancelled : .failed),
+            fractionCompleted: result.succeeded ? 1 : nil,
+            message: result.succeeded ? "Virtual device created" : "Virtual device creation failed"
+        ))
+        return result
     }
 
     func clone(
@@ -604,10 +755,14 @@ actor VPhoneBackend: LabBackend {
         as newName: String,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult {
-        await runCLI(
+        let result = await runCLI(
             ["vm", "clone", device.name, newName, "--library-root", paths.libraryRoot.path],
             onLine: onLine
         )
+        if result.succeeded, let clone = listDevices().first(where: { $0.name == newName }) {
+            _ = try? GuestCredentialVault.rotate(for: clone)
+        }
+        return result
     }
 
     func deleteVM(_ device: VirtualDevice, onLine: @escaping @Sendable (String) -> Void) async -> CommandResult {
@@ -618,22 +773,46 @@ actor VPhoneBackend: LabBackend {
     }
 
     func updateConfiguration(
-        _ device: VirtualDevice,
-        cpu: Int,
-        memoryMB: Int,
-        network: String,
+        request: VMConfigurationRequest,
+        onProgress: @escaping LabProgressHandler,
         onLine: @escaping @Sendable (String) -> Void
     ) async -> CommandResult {
-        await runCLI(
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .configure,
+            phase: .preparing,
+            fractionCompleted: 0.2,
+            message: "Applying backend configuration"
+        ))
+        let result = await runCLI(
             [
-                "vm", "config", device.name,
-                "--cpu", String(cpu),
-                "--memory", String(memoryMB),
-                "--network", network,
+                "vm", "config", request.device.name,
+                "--cpu", String(request.cpu),
+                "--memory", String(request.memoryMB),
+                "--network", request.network.mode.backendValue,
                 "--library-root", paths.libraryRoot.path,
             ],
             onLine: onLine
         )
+        if result.succeeded {
+            let metadata = LabDeviceMetadata(
+                schemaVersion: 1,
+                hardwareProfileID: request.hardwareProfileID,
+                network: request.network,
+                audio: request.audio,
+                isolation: request.isolation,
+                updatedAt: .now
+            )
+            try? saveDeviceMetadata(metadata, to: request.device.bundleURL)
+        }
+        onProgress(LabProgressEvent(
+            operationID: request.operationID,
+            kind: .configure,
+            phase: result.succeeded ? .completed : .failed,
+            fractionCompleted: result.succeeded ? 1 : nil,
+            message: result.succeeded ? "Configuration applied" : "Configuration failed"
+        ))
+        return result
     }
 
     // MARK: - Snapshots / backups
@@ -726,7 +905,7 @@ actor VPhoneBackend: LabBackend {
                 exitCode: 74
             )
         }
-        return await runCLI(
+        let result = await runCLI(
             [
                 "vm", "import",
                 "--in", snapshot.archivePath,
@@ -735,6 +914,10 @@ actor VPhoneBackend: LabBackend {
             ],
             onLine: onLine
         )
+        if result.succeeded, let restored = listDevices().first(where: { $0.name == newName }) {
+            _ = try? GuestCredentialVault.rotate(for: restored)
+        }
+        return result
     }
 
     func verifySnapshot(_ snapshot: SnapshotRecord) -> SnapshotVerification {
@@ -816,18 +999,247 @@ actor VPhoneBackend: LabBackend {
         sendControl(to: device, payload: ["t": "key", "name": name, "screen": false])
     }
 
+    func guestProtocolHandshake(for device: VirtualDevice) -> GuestProtocolHandshake {
+        GuestProtocolNegotiator.negotiate(
+            json: sendControlJSON(
+                to: device,
+                payload: [
+                    "t": "capabilities",
+                    "protocol_min": GuestProtocolNegotiator.supported.lowerBound,
+                    "protocol_max": GuestProtocolNegotiator.supported.upperBound,
+                    "screen": false,
+                ]
+            ).json
+        )
+    }
+
+    func performGuestAutomation(
+        _ request: GuestAutomationRequest,
+        on device: VirtualDevice
+    ) -> GuestAutomationResult {
+        let started = Date()
+        let handshake = guestProtocolHandshake(for: device)
+        let blockers = GuestAutomationGate.validate(request: request, handshake: handshake, policy: .strict)
+        guard blockers.isEmpty else {
+            return GuestAutomationResult(
+                id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
+                startedAt: started, completedAt: .now, succeeded: false,
+                message: blockers.joined(separator: " "), accessibilityRoot: nil
+            )
+        }
+        var payload: [String: Any] = [
+            "t": request.action.rawValue,
+            "request_id": request.id.uuidString,
+            "timeout_seconds": request.timeoutSeconds,
+            "screen": false,
+        ]
+        if let bundleIdentifier = request.bundleIdentifier { payload["bundle_id"] = bundleIdentifier }
+        if let selector = request.selector { payload["selector"] = selector }
+        if let value = request.value { payload["value"] = value }
+        let response = sendControlJSON(to: device, payload: payload)
+        guard let json = response.json else {
+            return GuestAutomationResult(
+                id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
+                startedAt: started, completedAt: .now, succeeded: false,
+                message: response.error ?? "Guest automation returned no protocol response.", accessibilityRoot: nil
+            )
+        }
+        let accessibilityRoot: AccessibilityNode? = (json["accessibility_root"] as? [String: Any]).flatMap { object in
+            guard JSONSerialization.isValidJSONObject(object),
+                  let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+            return try? JSONDecoder().decode(AccessibilityNode.self, from: data)
+        }
+        return GuestAutomationResult(
+            id: UUID(), requestID: request.id, deviceName: device.name, action: request.action,
+            startedAt: started, completedAt: .now, succeeded: json["ok"] as? Bool == true,
+            message: json["message"] as? String ?? json["error"] as? String ?? "Guest automation completed.",
+            accessibilityRoot: accessibilityRoot
+        )
+    }
+
+    func deployGuestCompanion(
+        _ request: GuestCompanionDeploymentRequest,
+        on device: VirtualDevice
+    ) -> GuestCompanionDeploymentResult {
+        let handshake = guestProtocolHandshake(for: device)
+        guard handshake.status == .compatible,
+              handshake.negotiatedVersion == 3,
+              handshake.authenticated,
+              handshake.replayProtected,
+              handshake.capabilities.contains(.companionLifecycle) else {
+            return GuestCompanionDeploymentResult(
+                requestID: request.id, deviceName: device.name, succeeded: false,
+                installedVersion: nil,
+                message: "Companion deployment requires authenticated protocol v3 and the companion_lifecycle capability."
+            )
+        }
+        let payload = URL(fileURLWithPath: request.payloadPath)
+        guard FileManager.default.fileExists(atPath: payload.path),
+              (try? fileSHA256(payload))?.caseInsensitiveCompare(request.payloadSHA256) == .orderedSame else {
+            return GuestCompanionDeploymentResult(
+                requestID: request.id, deviceName: device.name, succeeded: false,
+                installedVersion: nil, message: "The pinned companion payload is missing or changed."
+            )
+        }
+        let response = sendControlJSON(to: device, payload: [
+            "t": "companion_install",
+            "request_id": request.id.uuidString,
+            "identifier": request.identifier,
+            "version": request.version,
+            "payload_path": request.payloadPath,
+            "payload_sha256": request.payloadSHA256,
+            "screen": false,
+        ])
+        let succeeded = response.json?["ok"] as? Bool == true
+        return GuestCompanionDeploymentResult(
+            requestID: request.id, deviceName: device.name, succeeded: succeeded,
+            installedVersion: succeeded ? (response.json?["installed_version"] as? String ?? request.version) : nil,
+            message: response.json?["message"] as? String
+                ?? response.json?["error"] as? String
+                ?? response.error
+                ?? "Guest companion deployment returned no result."
+        )
+    }
+
+    func injectFault(
+        _ scenario: FaultInjectionScenario,
+        on device: VirtualDevice
+    ) -> FaultInjectionResult {
+        let started = Date()
+        let handshake = guestProtocolHandshake(for: device)
+        let blockers = FaultInjectionGate.validate(scenario: scenario, handshake: handshake)
+        guard blockers.isEmpty else {
+            return FaultInjectionResult(
+                id: UUID(), scenarioID: scenario.id, deviceName: device.name,
+                startedAt: started, completedAt: .now, succeeded: false,
+                message: blockers.joined(separator: " ")
+            )
+        }
+        var payload: [String: Any] = [
+            "t": "fault_injection",
+            "request_id": scenario.id.uuidString,
+            "name": scenario.name,
+            "domain": scenario.domain.rawValue,
+            "duration_seconds": scenario.durationSeconds,
+            "offline": scenario.offline,
+            "screen": false,
+        ]
+        if let value = scenario.latencyMilliseconds { payload["latency_ms"] = value }
+        if let value = scenario.packetLossPercent { payload["packet_loss_percent"] = value }
+        if let value = scenario.proxyURL { payload["proxy_url"] = value }
+        if let value = scenario.audioFault { payload["audio_fault"] = value.rawValue }
+        if let value = scenario.audioRoute { payload["audio_route"] = value }
+        let response = sendControlJSON(to: device, payload: payload)
+        let succeeded = response.json?["ok"] as? Bool == true
+        return FaultInjectionResult(
+            id: UUID(), scenarioID: scenario.id, deviceName: device.name,
+            startedAt: started, completedAt: .now, succeeded: succeeded,
+            message: response.json?["message"] as? String
+                ?? response.json?["error"] as? String
+                ?? response.error
+                ?? "Fault injection returned no result."
+        )
+    }
+
+    func recoverFaults(
+        scenarioID: UUID?,
+        on device: VirtualDevice
+    ) -> FaultRecoveryReceipt {
+        let requestedAt = Date()
+        let handshake = guestProtocolHandshake(for: device)
+        let trusted = handshake.status == .compatible
+            && handshake.negotiatedVersion == 3
+            && handshake.authenticated
+            && handshake.replayProtected
+            && handshake.capabilities.contains(.faultInjection)
+        guard trusted else {
+            return FaultRecoveryReceipt(
+                id: UUID(), scenarioID: scenarioID, deviceName: device.name,
+                requestedAt: requestedAt, completedAt: .now,
+                clearAcknowledged: false, statusVerified: false, remainingFaults: [],
+                message: "Fault cleanup requires authenticated, replay-protected guest protocol v3 and fault_injection capability."
+            )
+        }
+        var clearPayload: [String: Any] = [
+            "t": "fault_clear", "request_id": UUID().uuidString, "screen": false,
+        ]
+        if let scenarioID { clearPayload["scenario_id"] = scenarioID.uuidString }
+        let clear = sendControlJSON(to: device, payload: clearPayload)
+        let clearAcknowledged = clear.json?["ok"] as? Bool == true
+        let status = sendControlJSON(to: device, payload: [
+            "t": "fault_status", "request_id": UUID().uuidString, "screen": false,
+        ])
+        let statusVerified = status.json?["ok"] as? Bool == true
+        let remaining = status.json?["active_faults"] as? [String] ?? []
+        let recovered = clearAcknowledged && statusVerified && remaining.isEmpty
+        let message = recovered
+            ? "Guest acknowledged fault cleanup and verified that no active faults remain."
+            : clear.json?["message"] as? String
+                ?? clear.json?["error"] as? String
+                ?? status.json?["message"] as? String
+                ?? status.json?["error"] as? String
+                ?? clear.error
+                ?? status.error
+                ?? "Fault cleanup could not be verified."
+        return FaultRecoveryReceipt(
+            id: UUID(), scenarioID: scenarioID, deviceName: device.name,
+            requestedAt: requestedAt, completedAt: .now,
+            clearAcknowledged: clearAcknowledged, statusVerified: statusVerified,
+            remainingFaults: remaining, message: message
+        )
+    }
+
     private func sendControl(to device: VirtualDevice, payload: [String: Any]) -> ControlResponse {
-        let socket = device.bundleURL.appendingPathComponent("vphone.sock")
-        guard FileManager.default.fileExists(atPath: socket.path) else {
+        let handshake = guestProtocolHandshake(for: device)
+        guard isTrustedMutationHandshake(handshake) else {
             return ControlResponse(
                 succeeded: false,
                 path: nil,
-                error: "Host control socket is not available; boot the VM with its window visible",
+                error: "Guest-control mutation was blocked because protocol v3 authentication did not complete.",
                 imageData: nil
             )
         }
-        guard var request = try? JSONSerialization.data(withJSONObject: payload) else {
-            return ControlResponse(succeeded: false, path: nil, error: "Could not encode control request", imageData: nil)
+        let response = sendControlJSON(to: device, payload: payload)
+        guard let json = response.json else {
+            return ControlResponse(
+                succeeded: false,
+                path: nil,
+                error: response.error ?? "Control request failed",
+                imageData: nil
+            )
+        }
+        let imageData = (json["image"] as? String).flatMap { Data(base64Encoded: $0) }
+        return ControlResponse(
+            succeeded: json["ok"] as? Bool == true,
+            path: json["path"] as? String,
+            error: json["error"] as? String,
+            imageData: imageData
+        )
+    }
+
+    private func sendControlJSON(
+        to device: VirtualDevice,
+        payload: [String: Any]
+    ) -> (json: [String: Any]?, error: String?) {
+        let socket = device.bundleURL.appendingPathComponent("vphone.sock")
+        guard FileManager.default.fileExists(atPath: socket.path) else {
+            return (nil, "Host control socket is not available; boot the VM with its window visible")
+        }
+        var authenticatedPayload = payload
+        do {
+            let keyData = try guestControlKey(for: device)
+            authenticatedPayload["auth_timestamp"] = Int(Date().timeIntervalSince1970)
+            authenticatedPayload["auth_nonce"] = UUID().uuidString
+            authenticatedPayload["auth_key_id"] = "local-v1"
+            let canonical = try JSONSerialization.data(withJSONObject: authenticatedPayload, options: [.sortedKeys])
+            authenticatedPayload["auth_signature"] = Data(HMAC<SHA256>.authenticationCode(
+                for: canonical, using: SymmetricKey(data: keyData)
+            )).base64EncodedString()
+        } catch {
+            return (nil, "Could not provision the per-VM host-control credential: \(error.localizedDescription)")
+        }
+        guard var request = try? JSONSerialization.data(withJSONObject: authenticatedPayload, options: [.sortedKeys]) else {
+            return (nil, "Could not encode control request")
         }
         request.append(0x0A)
         let result = ProcessExecutor.run(
@@ -842,20 +1254,21 @@ actor VPhoneBackend: LabBackend {
               let data = responseLine.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            return ControlResponse(
-                succeeded: false,
-                path: nil,
-                error: result.timedOut ? "Control request timed out" : result.output.trimmed,
-                imageData: nil
-            )
+            return (nil, result.timedOut ? "Control request timed out" : result.output.trimmed)
         }
-        let imageData = (json["image"] as? String).flatMap { Data(base64Encoded: $0) }
-        return ControlResponse(
-            succeeded: json["ok"] as? Bool == true,
-            path: json["path"] as? String,
-            error: json["error"] as? String,
-            imageData: imageData
-        )
+        return (json, json["error"] as? String)
+    }
+
+    private func guestControlKey(for device: VirtualDevice) throws -> Data {
+        try GuestCredentialVault.key(for: device)
+    }
+
+    private func isTrustedMutationHandshake(_ handshake: GuestProtocolHandshake) -> Bool {
+        handshake.status == .compatible
+            && handshake.negotiatedVersion == 3
+            && handshake.authenticated
+            && handshake.replayProtected
+            && (handshake.authenticationClockSkewSeconds ?? .max) <= 30
     }
 
     func createDiagnosticBundle(
@@ -928,6 +1341,226 @@ actor VPhoneBackend: LabBackend {
         return DiagnosticBundle(id: UUID(), deviceName: device.name, url: root, createdAt: createdAt)
     }
 
+    func performanceSample(for device: VirtualDevice) -> PerformanceSample {
+        let pids = runningPIDs(for: device.diskURL)
+        guard !pids.isEmpty else {
+            return PerformanceSample(
+                deviceName: device.name,
+                cpuPercent: 0,
+                residentMemoryBytes: 0,
+                audioSampleRateHz: device.audioConfiguration?.sampleRateHz,
+                source: "Host process counters (VM stopped)"
+            )
+        }
+        let result = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/bin/ps"),
+            arguments: ["-o", "%cpu=,rss=", "-p", pids.map(String.init).joined(separator: ",")],
+            timeout: 10
+        )
+        var totalCPU = 0.0
+        var totalRSSKB: Int64 = 0
+        if result.succeeded {
+            for line in result.output.components(separatedBy: .newlines) {
+                let fields = line.split(whereSeparator: { $0.isWhitespace })
+                guard fields.count >= 2 else { continue }
+                totalCPU += Double(fields[0]) ?? 0
+                totalRSSKB += Int64(fields[1]) ?? 0
+            }
+        }
+        let now = Date()
+        let counters = processIOCounters(pids)
+        let prior = previousIOCounters[device.id]
+        previousIOCounters[device.id] = counters.map { ($0.read, $0.written, now) }
+        let elapsed = prior.map { now.timeIntervalSince($0.timestamp) } ?? 0
+        let readRate: Int64? = counters.flatMap { current in
+            guard let prior, elapsed > 0, current.read >= prior.read else { return nil }
+            return Int64(Double(current.read - prior.read) / elapsed)
+        }
+        let writeRate: Int64? = counters.flatMap { current in
+            guard let prior, elapsed > 0, current.written >= prior.written else { return nil }
+            return Int64(Double(current.written - prior.written) / elapsed)
+        }
+        let runtime = sendControlJSON(to: device, payload: ["t": "capabilities", "screen": false]).json
+        let audioAvailable = runtime?["audio_output"] as? Bool == true
+        return PerformanceSample(
+            deviceName: device.name,
+            cpuPercent: result.succeeded ? totalCPU : nil,
+            residentMemoryBytes: result.succeeded ? totalRSSKB * 1_024 : nil,
+            diskReadBytesPerSecond: readRate,
+            diskWriteBytesPerSecond: writeRate,
+            gpuPercent: nil,
+            framesPerSecond: nil,
+            audioSampleRateHz: audioAvailable ? device.audioConfiguration?.sampleRateHz : nil,
+            source: "Host vphone process CPU, memory, and rusage disk-I/O counters"
+        )
+    }
+
+    private func processIOCounters(_ pids: [Int32]) -> (read: UInt64, written: UInt64)? {
+        var totalRead: UInt64 = 0
+        var totalWritten: UInt64 = 0
+        var collected = false
+        for pid in pids {
+            var info = rusage_info_v4()
+            let status = withUnsafeMutablePointer(to: &info) { pointer in
+                var raw: rusage_info_t? = UnsafeMutableRawPointer(pointer)
+                return proc_pid_rusage(pid, RUSAGE_INFO_V4, &raw)
+            }
+            guard status == 0 else { continue }
+            totalRead &+= info.ri_diskio_bytesread
+            totalWritten &+= info.ri_diskio_byteswritten
+            collected = true
+        }
+        return collected ? (totalRead, totalWritten) : nil
+    }
+
+    func exportGuestDiagnostics(
+        for device: VirtualDevice,
+        categories: [DiagnosticCategory],
+        destination: URL
+    ) -> DiagnosticExportResult {
+        let handshake = guestProtocolHandshake(for: device)
+        guard isTrustedMutationHandshake(handshake) else {
+            return DiagnosticExportResult(
+                supported: false,
+                categories: categories,
+                outputURL: nil,
+                message: "Guest diagnostic export requires an authenticated protocol v3 channel."
+            )
+        }
+        let requestedRoots = guestDiagnosticRoots(for: categories)
+        guard !requestedRoots.isEmpty else {
+            return DiagnosticExportResult(
+                supported: true,
+                categories: categories,
+                outputURL: destination,
+                message: "No guest diagnostic categories were selected"
+            )
+        }
+        do {
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        } catch {
+            return DiagnosticExportResult(
+                supported: true,
+                categories: categories,
+                outputURL: nil,
+                message: "Could not create diagnostic destination: \(error.localizedDescription)"
+            )
+        }
+
+        var exported = 0
+        var skipped = 0
+        var errors: [String] = []
+        for root in requestedRoots {
+            exportGuestTree(
+                device: device,
+                guestRoot: root,
+                guestPath: root,
+                destinationRoot: destination.appendingPathComponent(NameSanitizer.fileComponent(root)),
+                depth: 0,
+                exported: &exported,
+                skipped: &skipped,
+                errors: &errors
+            )
+            if exported >= 200 { break }
+        }
+        let summary = "Exported \(exported) guest diagnostic file(s); skipped \(skipped)."
+            + (errors.isEmpty ? "" : " \(errors.prefix(3).joined(separator: " • "))")
+        try? summary.write(
+            to: destination.appendingPathComponent("SUMMARY.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        return DiagnosticExportResult(
+            supported: !errors.contains(where: { $0.contains("unknown command") }),
+            categories: categories,
+            outputURL: exported > 0 ? destination : nil,
+            message: summary
+        )
+    }
+
+    private func guestDiagnosticRoots(for categories: [DiagnosticCategory]) -> [String] {
+        var roots: [String] = []
+        let selected = Set(categories)
+        if !selected.isDisjoint(with: [.guestSystemLogs, .applicationLogs, .bootFailures]) {
+            roots += ["/var/log", "/var/mobile/Library/Logs"]
+        }
+        if !selected.isDisjoint(with: [.appCrashes, .vmCrashes, .kernelPanics]) {
+            roots += [
+                "/var/mobile/Library/Logs/CrashReporter",
+                "/Library/Logs/CrashReporter",
+            ]
+        }
+        var seen = Set<String>()
+        return roots.filter { seen.insert($0).inserted }
+    }
+
+    private func exportGuestTree(
+        device: VirtualDevice,
+        guestRoot: String,
+        guestPath: String,
+        destinationRoot: URL,
+        depth: Int,
+        exported: inout Int,
+        skipped: inout Int,
+        errors: inout [String]
+    ) {
+        guard depth <= 4, exported < 200 else { skipped += 1; return }
+        let listing = sendControlJSON(
+            to: device,
+            payload: ["t": "guest_file_list", "path": guestPath, "screen": false]
+        )
+        guard let json = listing.json, json["ok"] as? Bool == true,
+              let entries = json["entries"] as? [[String: Any]] else {
+            if let error = listing.error, !error.isEmpty { errors.append("\(guestPath): \(error)") }
+            return
+        }
+        let allowedExtensions = Set(["log", "txt", "crash", "ips", "panic", "plist", "json"])
+        for entry in entries {
+            guard exported < 200,
+                  let name = entry["name"] as? String,
+                  !name.isEmpty,
+                  name != ".",
+                  name != "..",
+                  !name.contains("/") else { continue }
+            let type = entry["type"] as? String ?? "file"
+            let childGuest = guestPath + "/" + name
+            if type == "dir" {
+                exportGuestTree(
+                    device: device,
+                    guestRoot: guestRoot,
+                    guestPath: childGuest,
+                    destinationRoot: destinationRoot,
+                    depth: depth + 1,
+                    exported: &exported,
+                    skipped: &skipped,
+                    errors: &errors
+                )
+                continue
+            }
+            guard type == "file",
+                  (entry["size"] as? NSNumber)?.int64Value ?? 0 <= 50 * 1_048_576,
+                  allowedExtensions.contains(URL(fileURLWithPath: name).pathExtension.lowercased())
+            else { skipped += 1; continue }
+            let relative = childGuest.replacingOccurrences(of: guestRoot + "/", with: "")
+            let destination = destinationRoot.appendingPathComponent(relative)
+            let response = sendControlJSON(
+                to: device,
+                payload: [
+                    "t": "guest_file_get",
+                    "path": childGuest,
+                    "destination": destination.path,
+                    "maximum_bytes": 50 * 1_048_576,
+                    "screen": false,
+                ]
+            )
+            if response.json?["ok"] as? Bool == true { exported += 1 }
+            else {
+                skipped += 1
+                if let error = response.error { errors.append("\(childGuest): \(error)") }
+            }
+        }
+    }
+
     private func copyDiagnosticArtifacts(from sourceRoot: URL, to destinationRoot: URL) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
@@ -981,7 +1614,17 @@ actor VPhoneBackend: LabBackend {
         var records = loadFirmware()
         var known = Set(records.map(\.path))
         for url in urls where !known.contains(url.path) {
-            records.append(FirmwareImage.inspect(url, kind: kind))
+            var inspected = FirmwareImage.inspect(url, kind: kind)
+            if let metadata = try? IPSWManifestInspector.inspect(url) {
+                inspected.manifestMetadata = metadata
+                inspected.version = metadata.productVersion ?? inspected.version
+                inspected.build = metadata.productBuildVersion ?? inspected.build
+                inspected.device = IPSWManifestInspector.preferredProductType(
+                    from: metadata,
+                    filenameDevice: inspected.device
+                )
+            }
+            records.append(inspected)
             known.insert(url.path)
         }
         try saveFirmwareCatalog(records)
@@ -1000,6 +1643,7 @@ actor VPhoneBackend: LabBackend {
         let fm = FileManager.default
         var issues: [String] = []
         var hasBuildManifest = false
+        var parsedBuildManifest = false
         var entryCount = 0
         var digest: String?
         let url = firmware.url
@@ -1017,8 +1661,9 @@ actor VPhoneBackend: LabBackend {
             arguments: ["-Z1", url.path],
             timeout: 120
         )
+        var entries: [String] = []
         if listing.succeeded {
-            let entries = listing.output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+            entries = listing.output.components(separatedBy: .newlines).filter { !$0.isEmpty }
             entryCount = entries.count
             hasBuildManifest = entries.contains { $0 == "BuildManifest.plist" || $0.hasSuffix("/BuildManifest.plist") }
             if !hasBuildManifest { issues.append("Archive does not contain BuildManifest.plist") }
@@ -1026,20 +1671,63 @@ actor VPhoneBackend: LabBackend {
             issues.append("Archive could not be read as a ZIP/IPSW")
         }
 
+        if hasBuildManifest {
+            do {
+                let metadata = try IPSWManifestInspector.inspect(url, archiveEntries: entries)
+                parsedBuildManifest = true
+                let filename = FirmwareFilenameParser.parse(firmware.fileName)
+                if let filenameVersion = filename.version,
+                   let manifestVersion = metadata.productVersion,
+                   filenameVersion != manifestVersion {
+                    issues.append("Filename iOS \(filenameVersion) differs from BuildManifest \(manifestVersion)")
+                }
+                if let filenameBuild = filename.build,
+                   let manifestBuild = metadata.productBuildVersion,
+                   filenameBuild != manifestBuild {
+                    issues.append("Filename build \(filenameBuild) differs from BuildManifest \(manifestBuild)")
+                }
+                if let filenameDevice = filename.device,
+                   !metadata.supportedProductTypes.isEmpty,
+                   !metadata.supportedProductTypes.contains(filenameDevice) {
+                    issues.append("Filename device \(filenameDevice) is not listed by BuildManifest")
+                }
+                records[index].manifestMetadata = metadata
+                records[index].version = metadata.productVersion ?? records[index].version
+                records[index].build = metadata.productBuildVersion ?? records[index].build
+                records[index].device = IPSWManifestInspector.preferredProductType(
+                    from: metadata,
+                    filenameDevice: filename.device ?? records[index].device
+                )
+            } catch {
+                issues.append(error.localizedDescription)
+            }
+        }
+
         digest = try sha256(of: url)
-        let compatibilityStatus = compatibility.status(for: firmware)
+        let compatibilityStatus = compatibility.status(for: records[index])
         if compatibilityStatus == .unverified {
             issues.append("No matching entry exists in the compatibility manifest")
         } else if compatibilityStatus == .incompatible {
             issues.append("This firmware is marked incompatible")
         }
 
-        let structurallyInvalid = !listing.succeeded || !hasBuildManifest || url.pathExtension.lowercased() != "ipsw"
+        let structurallyInvalid = !listing.succeeded
+            || !hasBuildManifest
+            || !parsedBuildManifest
+            || url.pathExtension.lowercased() != "ipsw"
         let state: FirmwareValidationState = structurallyInvalid
             ? .invalid
             : (issues.isEmpty ? .valid : .warning)
 
         records[index].sha256 = digest
+        if records[index].provenance == nil {
+            records[index].provenance = .localImport(
+                path: records[index].path,
+                importedAt: records[index].importedAt
+            )
+        }
+        records[index].provenance?.checksumSHA256 = digest
+        records[index].provenance?.signingStatus = structurallyInvalid ? .invalid : .verifiedMetadata
         records[index].compatibilityStatus = compatibilityStatus
         records[index].validation = FirmwareValidation(
             state: state,

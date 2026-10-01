@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "port": 8787,
+  "dnsPort": 53535,
+  "latencyMilliseconds": 100,
+  "bytesPerSecond": 65536,
+  "lossPercent": 0,
+  "seed": "radio-tests-v1",
+  "offline": false,
+  "simulatedDate": "2026-09-30T12:00:00Z",
+  "dnsRecords": { "radio.test": "127.0.0.1" },
+  "responses": [
+    { "method": "GET", "path": "/health", "status": 200, "contentType": "application/json", "body": "{\"ok\":true}" },
+    { "method": "GET", "path": "/metadata", "status": 200, "contentType": "application/json", "body": "{\"title\":\"Fixture station\",\"stream\":\"http://127.0.0.1:8787/stream\"}" },
+    { "method": "GET", "path": "/stream", "status": 503, "contentType": "application/json", "body": "{\"error\":\"planned stream interruption\"}" }
+  ]
+}

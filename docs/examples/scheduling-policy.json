@@ -1,0 +1,8 @@
+{
+  "maximumConcurrentPerHost": 1,
+  "maximumQueuedPerSubject": 100,
+  "maximumAttempts": 3,
+  "retryBackoffSeconds": 30,
+  "leaseSeconds": 300,
+  "agingSeconds": 300
+}

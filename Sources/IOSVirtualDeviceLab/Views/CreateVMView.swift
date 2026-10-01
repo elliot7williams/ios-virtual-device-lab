@@ -9,9 +9,29 @@ struct CreateVMView: View {
     @State private var diskSizeGB = 64
     @State private var iphonePath: String?
     @State private var cloudOSPath: String?
+    @State private var hardwareProfileID: String?
+    @State private var networkMode: NetworkMode = .nat
+    @State private var proxyURL = ""
+    @State private var captureTraffic = false
+    @State private var allowHostNetwork = false
+    @State private var audioOutput = true
+    @State private var audioInput = false
+    @State private var audioRoute: AudioRoute = .systemOutput
+    @State private var simulateInterruptions = false
+    @State private var allowClipboard = false
+    @State private var allowHostIntegration = false
+    @State private var allowUnverified = false
 
     private var iphoneImages: [FirmwareImage] { model.firmware.filter { $0.kind == .iPhone } }
     private var cloudImages: [FirmwareImage] { model.firmware.filter { $0.kind == .cloudOS } }
+    private var selectedIPhone: FirmwareImage? { iphonePath.flatMap { path in iphoneImages.first { $0.path == path } } }
+    private var recommendation: FirmwareRecommendation? { selectedIPhone.map(model.firmwareRecommendation(for:)) }
+
+    private var canCreate: Bool {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard recommendation?.decision != .blocked else { return false }
+        return recommendation?.decision != .warning || allowUnverified
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -40,6 +60,20 @@ struct CreateVMView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Virtual hardware") {
+                    Picker("Device profile", selection: $hardwareProfileID) {
+                        ForEach(model.hardwareProfiles.profiles) { profile in
+                            Text("\(profile.name) — iOS \(profile.minimumIOSMajor)–\(profile.maximumIOSMajor)")
+                                .tag(Optional(profile.id))
+                        }
+                    }
+                    if let profile = model.hardwareProfiles.profile(id: hardwareProfileID) {
+                        Text("\(profile.soc) • \(profile.cpuCores) CPU • \(profile.memoryMB) MB RAM • \(profile.productType)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Firmware") {
                     Picker("iPhone IPSW", selection: $iphonePath) {
                         Text("Automatic supported firmware").tag(String?.none)
@@ -60,6 +94,20 @@ struct CreateVMView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if let recommendation {
+                        VStack(alignment: .leading, spacing: 4) {
+                            StatusPill(
+                                text: recommendation.status.displayName,
+                                color: recommendation.decision == .allowed ? .green : (recommendation.decision == .blocked ? .red : .orange)
+                            )
+                            ForEach(recommendation.messages, id: \.self) { message in
+                                Text(message).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        if recommendation.decision == .warning {
+                            Toggle("I understand this firmware is experimental or unverified", isOn: $allowUnverified)
+                        }
+                    }
                 }
 
                 Section("Storage") {
@@ -67,6 +115,26 @@ struct CreateVMView: View {
                     Text("Firmware downloads and VM data are stored under \(model.paths.dataRoot.path).")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("Networking & isolation") {
+                    Picker("Network mode", selection: $networkMode) {
+                        ForEach(NetworkMode.allCases) { mode in Text(mode.displayName).tag(mode) }
+                    }
+                    TextField("Proxy URL (optional)", text: $proxyURL)
+                    Toggle("Capture network traffic when supported", isOn: $captureTraffic)
+                    Toggle("Allow VM access to host network", isOn: $allowHostNetwork)
+                    Toggle("Allow clipboard integration", isOn: $allowClipboard)
+                    Toggle("Allow optional host integration", isOn: $allowHostIntegration)
+                }
+
+                Section("Audio testing") {
+                    Toggle("Virtual audio output", isOn: $audioOutput)
+                    Toggle("Virtual audio input", isOn: $audioInput)
+                    Picker("Route", selection: $audioRoute) {
+                        ForEach(AudioRoute.allCases) { route in Text(route.rawValue).tag(route) }
+                    }
+                    Toggle("Enable interruption simulation workflow", isOn: $simulateInterruptions)
                 }
             }
             .formStyle(.grouped)
@@ -79,11 +147,17 @@ struct CreateVMView: View {
                 Button("Cancel", role: .cancel) { dismiss() }
                 Button("Create") { submit() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!canCreate)
             }
         }
         .padding(24)
-        .frame(width: 620, height: 590)
+        .frame(width: 720, height: 780)
+        .onAppear {
+            hardwareProfileID = hardwareProfileID
+                ?? model.hardwareProfiles.profiles.first(where: { $0.status == .supported })?.id
+                ?? model.hardwareProfiles.profiles.first?.id
+        }
+        .onChange(of: iphonePath) { _, _ in applyRecommendation() }
     }
 
     private func submit() {
@@ -97,8 +171,38 @@ struct CreateVMView: View {
                 variant: variant,
                 diskSizeGB: diskSizeGB,
                 iphoneIPSW: iphoneURL,
-                cloudOSIPSW: cloudURL
+                cloudOSIPSW: cloudURL,
+                hardwareProfileID: hardwareProfileID,
+                network: NetworkConfiguration(
+                    mode: networkMode,
+                    proxyURL: proxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : proxyURL,
+                    captureTraffic: captureTraffic,
+                    allowHostAccess: allowHostNetwork
+                ),
+                audio: AudioConfiguration(
+                    outputEnabled: audioOutput,
+                    inputEnabled: audioInput,
+                    route: audioRoute,
+                    sampleRateHz: 48_000,
+                    simulateInterruptions: simulateInterruptions,
+                    backgroundAudioValidation: true
+                ),
+                isolation: IsolationPolicy(
+                    allowNetwork: networkMode != .offline,
+                    allowHostNetwork: allowHostNetwork,
+                    sharedFolderPath: nil,
+                    allowClipboard: allowClipboard,
+                    allowHostIntegration: allowHostIntegration
+                ),
+                allowUnverifiedFirmware: allowUnverified
             )
         }
+    }
+
+    private func applyRecommendation() {
+        guard let recommendation else { return }
+        hardwareProfileID = recommendation.hardwareProfile?.id ?? hardwareProfileID
+        cloudOSPath = recommendation.cloudOSFirmware?.path ?? cloudOSPath
+        allowUnverified = false
     }
 }

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "allowedLicenses": [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0"
+  ],
+  "deniedLicenses": [
+    "AGPL-3.0-only",
+    "GPL-3.0-only"
+  ],
+  "maximumAllowedSeverity": "high",
+  "requireSBOM": true,
+  "requireProvenance": true,
+  "blockUnknownLicenses": true
+}

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "records": [
+    {
+      "id": "upstream-macos26-iphone26",
+      "macOSPrefixes": ["26."],
+      "modelPrefixes": ["Mac16,"],
+      "backendVersionPrefixes": ["*"],
+      "iosMajorVersions": [26],
+      "status": "validated",
+      "evidence": "This family appears in the upstream tested-environment matrix; reproduce locally before making a project support claim.",
+      "updatedAt": "2026-08-10"
+    },
+    {
+      "id": "upstream-macos27-iphone18-27",
+      "macOSPrefixes": ["27."],
+      "modelPrefixes": ["Mac16,"],
+      "backendVersionPrefixes": ["*"],
+      "iosMajorVersions": [18, 26, 27],
+      "status": "experimental",
+      "evidence": "Upstream beta-host evidence exists, but beta hosts remain experimental for this project.",
+      "updatedAt": "2026-08-10"
+    },
+    {
+      "id": "local-macos15-research",
+      "macOSPrefixes": ["15."],
+      "modelPrefixes": ["*"],
+      "backendVersionPrefixes": ["*"],
+      "iosMajorVersions": [],
+      "status": "unverified",
+      "evidence": "The current macOS 15 host is tracked as a research configuration until a real baseline acceptance report passes.",
+      "updatedAt": "2026-08-10"
+    }
+  ]
+}

@@ -65,7 +65,7 @@ private struct DeviceRow: View {
                 Text(device.iosLabel)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Text("\(device.cpuCount) CPU • \(device.memoryLabel)")
+                Text("\(device.cpuCount) CPU • \(device.memoryLabel) • \(model.snapshotCount(for: device)) snapshots")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -226,6 +226,7 @@ private struct DeviceDetailView: View {
             MetricCard(title: "Memory", value: device.memoryLabel, systemImage: "memorychip")
             MetricCard(title: "Virtual disk", value: device.diskLabel, systemImage: "internaldrive")
             MetricCard(title: "Network", value: device.network.mode.uppercased(), systemImage: "network")
+            MetricCard(title: "Snapshots", value: "\(model.snapshotCount(for: device))", systemImage: "camera.filters")
         }
     }
 
@@ -236,6 +237,7 @@ private struct DeviceDetailView: View {
                 detailRow("cloudOS", device.restoreInfo.map { "\($0.cloudOS.version) (\($0.cloudOS.build))" } ?? "Not restored")
                 detailRow("Variant", device.variantLabel)
                 detailRow("Device model", device.restoreInfo?.device ?? "—")
+                detailRow("Hardware profile", model.hardwareProfiles.profile(id: device.hardwareProfileID)?.name ?? "Legacy / unassigned")
                 detailRow("UDID", device.udid ?? "—")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -345,25 +347,68 @@ private struct DeviceConfigurationSheet: View {
 
     @State private var cpu: Int
     @State private var memoryMB: Int
-    @State private var network: String
+    @State private var profileID: String?
+    @State private var networkMode: NetworkMode
+    @State private var proxyURL: String
+    @State private var captureTraffic: Bool
+    @State private var allowHostNetwork: Bool
+    @State private var audioOutput: Bool
+    @State private var audioInput: Bool
+    @State private var audioRoute: AudioRoute
+    @State private var simulateInterruptions: Bool
+    @State private var allowClipboard: Bool
+    @State private var allowHostIntegration: Bool
 
     init(device: VirtualDevice) {
         self.device = device
         _cpu = State(initialValue: max(1, device.cpuCount))
         _memoryMB = State(initialValue: max(2_048, device.memoryMB))
-        _network = State(initialValue: device.network.mode)
+        _profileID = State(initialValue: device.hardwareProfileID)
+        _networkMode = State(initialValue: device.networkConfiguration?.mode ?? (device.network.mode == "bridged" ? .bridged : (device.network.mode == "none" ? .offline : .nat)))
+        _proxyURL = State(initialValue: device.networkConfiguration?.proxyURL ?? "")
+        _captureTraffic = State(initialValue: device.networkConfiguration?.captureTraffic ?? false)
+        _allowHostNetwork = State(initialValue: device.networkConfiguration?.allowHostAccess ?? false)
+        _audioOutput = State(initialValue: device.audioConfiguration?.outputEnabled ?? true)
+        _audioInput = State(initialValue: device.audioConfiguration?.inputEnabled ?? false)
+        _audioRoute = State(initialValue: device.audioConfiguration?.route ?? .systemOutput)
+        _simulateInterruptions = State(initialValue: device.audioConfiguration?.simulateInterruptions ?? false)
+        _allowClipboard = State(initialValue: device.isolationPolicy?.allowClipboard ?? false)
+        _allowHostIntegration = State(initialValue: device.isolationPolicy?.allowHostIntegration ?? false)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Configure \(device.name)").font(.title2.weight(.semibold))
             Form {
-                Stepper("CPU cores: \(cpu)", value: $cpu, in: 2...16)
-                Stepper("Memory: \(memoryMB) MB", value: $memoryMB, in: 2_048...32_768, step: 1_024)
-                Picker("Network", selection: $network) {
-                    Text("NAT").tag("nat")
-                    Text("Bridged").tag("bridged")
-                    Text("None").tag("none")
+                Section("Hardware") {
+                    Picker("Device profile", selection: $profileID) {
+                        Text("Legacy / unassigned").tag(String?.none)
+                        ForEach(model.hardwareProfiles.profiles) { profile in
+                            Text(profile.name).tag(Optional(profile.id))
+                        }
+                    }
+                    Stepper("CPU cores: \(cpu)", value: $cpu, in: 2...16)
+                    Stepper("Memory: \(memoryMB) MB", value: $memoryMB, in: 2_048...32_768, step: 1_024)
+                }
+                Section("Network") {
+                    Picker("Mode", selection: $networkMode) {
+                        ForEach(NetworkMode.allCases) { mode in Text(mode.displayName).tag(mode) }
+                    }
+                    TextField("Proxy URL (optional)", text: $proxyURL)
+                    Toggle("Capture traffic", isOn: $captureTraffic)
+                    Toggle("Allow host-network access", isOn: $allowHostNetwork)
+                }
+                Section("Audio") {
+                    Toggle("Output", isOn: $audioOutput)
+                    Toggle("Input", isOn: $audioInput)
+                    Picker("Route", selection: $audioRoute) {
+                        ForEach(AudioRoute.allCases) { route in Text(route.rawValue).tag(route) }
+                    }
+                    Toggle("Simulate interruptions", isOn: $simulateInterruptions)
+                }
+                Section("Isolation") {
+                    Toggle("Allow clipboard", isOn: $allowClipboard)
+                    Toggle("Allow host integration", isOn: $allowHostIntegration)
                 }
             }
             .formStyle(.grouped)
@@ -373,13 +418,40 @@ private struct DeviceConfigurationSheet: View {
                 Button("Apply") {
                     dismiss()
                     Task {
-                        await model.updateConfiguration(device, cpu: cpu, memoryMB: memoryMB, network: network)
+                        await model.updateConfiguration(
+                            device,
+                            cpu: cpu,
+                            memoryMB: memoryMB,
+                            network: networkMode.backendValue,
+                            hardwareProfileID: profileID,
+                            networkConfiguration: NetworkConfiguration(
+                                mode: networkMode,
+                                proxyURL: proxyURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : proxyURL,
+                                captureTraffic: captureTraffic,
+                                allowHostAccess: allowHostNetwork
+                            ),
+                            audio: AudioConfiguration(
+                                outputEnabled: audioOutput,
+                                inputEnabled: audioInput,
+                                route: audioRoute,
+                                sampleRateHz: 48_000,
+                                simulateInterruptions: simulateInterruptions,
+                                backgroundAudioValidation: true
+                            ),
+                            isolation: IsolationPolicy(
+                                allowNetwork: networkMode != .offline,
+                                allowHostNetwork: allowHostNetwork,
+                                sharedFolderPath: nil,
+                                allowClipboard: allowClipboard,
+                                allowHostIntegration: allowHostIntegration
+                            )
+                        )
                     }
                 }
                 .buttonStyle(.borderedProminent)
             }
         }
         .padding(22)
-        .frame(width: 480)
+        .frame(width: 560, height: 680)
     }
 }

@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import CryptoKit
 import XCTest
 @testable import IOSVirtualDeviceLab
 
@@ -152,6 +154,102 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         XCTAssertNotNil(validated[0].sha256)
     }
 
+    func testBuildManifestOverridesMisleadingIPSWFilename() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-inspection-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "ProductVersion": "14.8.1",
+            "ProductBuildVersion": "18H107",
+            "SupportedProductTypes": ["iPhone10,6"],
+            "BuildIdentities": [[
+                "ApBoardID": 10,
+                "ApChipID": 32784,
+                "Info": ["DeviceClass": "d221ap", "Variant": "Customer Erase Install"],
+            ]],
+        ]
+        let manifestData = try PropertyListSerialization.data(fromPropertyList: manifest, format: .binary, options: 0)
+        try manifestData.write(to: root.appendingPathComponent("BuildManifest.plist"))
+        let ipsw = root.appendingPathComponent("iPhone17,3_26.1_23B85_Restore.ipsw")
+        let zipped = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/zip"),
+            arguments: ["-q", ipsw.path, "BuildManifest.plist"],
+            currentDirectory: root
+        )
+        XCTAssertTrue(zipped.succeeded)
+
+        let backend = VPhoneBackend(paths: makePaths(root: root.appendingPathComponent("lab")))
+        try await backend.prepareStorage()
+        let imported = try await backend.importFirmware([ipsw], kind: .iPhone)
+        XCTAssertEqual(imported.first?.version, "14.8.1")
+        XCTAssertEqual(imported.first?.build, "18H107")
+        XCTAssertEqual(imported.first?.device, "iPhone10,6")
+        let validated = try await backend.validateFirmware(imported[0], compatibility: .empty)
+        XCTAssertEqual(validated[0].manifestMetadata?.buildIdentities.first?.deviceClass, "d221ap")
+        XCTAssertTrue(validated[0].validation?.issues.contains { $0.contains("Filename iOS") } == true)
+    }
+
+    func testDiagnosticSanitizerAndClassifier() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostic-sanitizer-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("raw")
+        let destination = root.appendingPathComponent("sanitized")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try "Authorization: Bearer secret-token-123456\nuser@example.com\nkernel panic detected\n"
+            .write(to: source.appendingPathComponent("panic.log"), atomically: true, encoding: .utf8)
+        try "serial number".write(
+            to: source.appendingPathComponent("host-system-profile.txt"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let preview = try DiagnosticSanitizer.sanitize(
+            source: source,
+            destination: destination,
+            policy: .standard
+        )
+        XCTAssertGreaterThanOrEqual(preview.redactions, 2)
+        XCTAssertEqual(preview.filesExcluded, 1)
+        let sanitized = try String(contentsOf: destination.appendingPathComponent("panic.log"), encoding: .utf8)
+        XCTAssertFalse(sanitized.contains("secret-token"))
+        XCTAssertFalse(sanitized.contains("user@example.com"))
+        let report = try DiagnosticAnalyzer.analyze(destination)
+        XCTAssertTrue(report.findings.contains { $0.classification == .kernelPanic })
+        let encrypted = root.appendingPathComponent("diagnostics.vdlenc")
+        let decrypted = root.appendingPathComponent("diagnostics.zip")
+        _ = try DiagnosticSanitizer.encryptedArchive(
+            of: destination,
+            destination: encrypted,
+            passphrase: "correct horse battery staple"
+        )
+        _ = try DiagnosticSanitizer.decryptArchive(
+            encrypted,
+            destination: decrypted,
+            passphrase: "correct horse battery staple"
+        )
+        XCTAssertEqual(try Data(contentsOf: decrypted).prefix(2), Data([0x50, 0x4B]))
+    }
+
+    func testResourceGateQueuesBeyondConcurrencyAndMemoryBudget() async {
+        let gate = LabResourceGate(policy: LabResourcePolicy(
+            maximumConcurrentVMs: 1,
+            maximumAggregateMemoryMB: 4_096,
+            reservedHostMemoryMB: 1_024,
+            maximumHostCPUPercent: 100
+        ))
+        await gate.acquire(memoryMB: 4_096)
+        let waiter = Task { await gate.acquire(memoryMB: 4_096) }
+        try? await Task.sleep(for: .milliseconds(50))
+        let queuedState = await gate.state()
+        XCTAssertEqual(queuedState, LabResourceGate.State(runningCount: 1, reservedMemoryMB: 4_096, waitingCount: 1))
+        await gate.release(memoryMB: 4_096)
+        await waiter.value
+        let resumedState = await gate.state()
+        XCTAssertEqual(resumedState.runningCount, 1)
+        await gate.release(memoryMB: 4_096)
+    }
+
     func testProcessExecutorTimeoutAndCancellation() async {
         let timed = ProcessExecutor.run(
             executable: URL(fileURLWithPath: "/bin/sleep"),
@@ -172,6 +270,17 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         control.cancel()
         let cancelled = await task.value
         XCTAssertTrue(cancelled.cancelled)
+    }
+
+    func testProcessExecutorEnforcesOutputLimitDuringExecution() {
+        let result = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/yes"),
+            timeout: 5,
+            maximumOutputBytes: 1_024
+        )
+        XCTAssertTrue(result.outputLimitExceeded)
+        XCTAssertLessThanOrEqual(result.output.lengthOfBytes(using: .utf8), 1_024)
+        XCTAssertTrue(result.cancelled)
     }
 
     func testMockBackendAndBuiltInWorkflows() async {
@@ -196,14 +305,30 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             executable: "/bin/echo",
             capabilities: ["diagnostics"],
             arguments: ["plugin"],
-            description: nil
+            description: nil,
+            trusted: false,
+            permissions: ["diagnostics"]
         )
         let data = try JSONEncoder().encode(plugin)
         try data.write(to: PluginRegistry.root(paths: paths).appendingPathComponent("echo.json"))
         let loaded = PluginRegistry.loadPlugins(paths: paths)
         XCTAssertEqual(loaded.map(\.id), ["test.echo"])
-        let result = await PluginRegistry.run(
+        let blocked = await PluginRegistry.run(
             loaded[0],
+            capability: "diagnostics",
+            device: nil,
+            paths: paths,
+            onLine: { _ in }
+        )
+        XCTAssertFalse(blocked.succeeded)
+        XCTAssertTrue(blocked.output.contains("not trusted"))
+
+        try PluginRegistry.setTrusted(loaded[0], trusted: true, paths: paths)
+        let trusted = try XCTUnwrap(PluginRegistry.loadPlugins(paths: paths).first)
+        XCTAssertTrue(trusted.trusted == true)
+        XCTAssertNotNil(trusted.executableSHA256)
+        let result = await PluginRegistry.run(
+            trusted,
             capability: "diagnostics",
             device: nil,
             paths: paths,
@@ -211,6 +336,1887 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
         )
         XCTAssertTrue(result.succeeded)
         XCTAssertTrue(result.output.contains("plugin diagnostics"))
+        let audit = PluginAuditStore.load(paths: paths)
+        XCTAssertEqual(audit.first?.pluginID, "test.echo")
+        XCTAssertTrue(audit.first?.sandboxed == true)
+    }
+
+    func testHardwareProfilesAndOlderIOSRecommendation() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let paths = makePaths(root: root)
+        let profiles = HardwareProfilesCatalog.load(paths: paths)
+        XCTAssertGreaterThanOrEqual(profiles.profiles.count, 6)
+        XCTAssertEqual(profiles.profile(id: "iphone-x-a11")?.soc, "A11 Bionic")
+
+        let compatibility = CompatibilityCatalog.load(paths: paths)
+        let ios15 = FirmwareImage.inspect(
+            URL(fileURLWithPath: "/tmp/iPhone10,6_15.8_19H370_Restore.ipsw")
+        )
+        let recommendation = CompatibilityEvaluator.recommend(
+            iphone: ios15,
+            catalog: compatibility,
+            profiles: profiles,
+            availableFirmware: [ios15]
+        )
+        XCTAssertEqual(recommendation.status, .researching)
+        XCTAssertEqual(recommendation.decision, .warning)
+        XCTAssertEqual(recommendation.hardwareProfile?.id, "iphone-x-a11")
+    }
+
+    func testCompatibilityGateBlocksMismatchedHardware() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let paths = makePaths(root: root)
+        let profiles = HardwareProfilesCatalog.load(paths: paths)
+        let profile = try XCTUnwrap(profiles.profile(id: "iphone-x-a11"))
+        let image = FirmwareImage.inspect(
+            URL(fileURLWithPath: "/tmp/iPhone17,3_26.1_23B85_Restore.ipsw")
+        )
+        let request = VMCreationRequest(
+            operationID: UUID(),
+            name: "mismatch",
+            hardwareProfile: profile,
+            variant: .regular,
+            diskSizeGB: 64,
+            iphoneFirmware: image,
+            cloudOSFirmware: nil,
+            network: .standard,
+            audio: .playback,
+            isolation: .strict,
+            allowUnverifiedFirmware: true
+        )
+        let result = CompatibilityEvaluator.evaluate(
+            request,
+            compatibility: CompatibilityCatalog.load(paths: paths)
+        )
+        XCTAssertEqual(result.decision, .blocked)
+        XCTAssertTrue(result.messages.contains { $0.contains("does not match") })
+    }
+
+    func testAssertionEvaluatorProducesExplicitPassFailEvidence() {
+        let screenshot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assertion-screen-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: screenshot) }
+        let image = NSImage(size: NSSize(width: 32, height: 32))
+        image.lockFocus()
+        NSColor.black.setFill()
+        NSRect(x: 0, y: 0, width: 16, height: 32).fill()
+        NSColor.white.setFill()
+        NSRect(x: 16, y: 0, width: 16, height: 32).fill()
+        image.unlockFocus()
+        let bitmap = image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+        try? bitmap?.representation(using: .png, properties: [:])?.write(to: screenshot)
+        let assertions = TestAssertion.deploymentDefaults + [
+            TestAssertion(.maximumDuration, expectedValue: "10")
+        ]
+        let command = CommandResult(
+            executable: "mock",
+            arguments: [],
+            output: "ok",
+            exitCode: 0,
+            duration: 4
+        )
+        let results = TestAssertionEvaluator.evaluate(
+            assertions,
+            guestReady: true,
+            launch: command,
+            screenshotPath: screenshot.path,
+            diagnosticPath: nil,
+            duration: 4
+        )
+        XCTAssertEqual(results.count, assertions.count)
+        XCTAssertTrue(results.allSatisfy(\.passed))
+    }
+
+    func testAppArtifactLibraryCopiesAndRemovesBuild() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("artifact-store-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let source = root.appendingPathComponent("Music.ipa")
+        try Data("sample-app".utf8).write(to: source)
+        let imported = try AppArtifactStore.importArtifact(source, paths: paths)
+        XCTAssertEqual(imported.count, 1)
+        XCTAssertNotNil(imported[0].sha256)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: imported[0].path))
+        let remaining = try AppArtifactStore.remove(imported[0], paths: paths)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testTestReportIncludesAssertions() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test-report-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let assertion = TestAssertion(.guestReady)
+        let run = TestRunRecord(
+            id: UUID(),
+            kind: .deployment,
+            name: "Music Compatibility",
+            packagePath: "/tmp/Music.ipa",
+            createdAt: .now,
+            completedAt: .now,
+            state: .passed,
+            results: [DeviceTestResult(
+                id: UUID(),
+                deviceName: "iOS 15",
+                state: .passed,
+                message: "1/1 assertions passed",
+                screenshotPath: nil,
+                diagnosticBundlePath: nil,
+                startedAt: .now,
+                completedAt: .now,
+                assertionResults: [TestAssertionResult(assertion: assertion, passed: true, message: "Connected")]
+            )]
+        )
+        let report = try TestReportStore.write(run, paths: paths)
+        let text = try String(contentsOf: report, encoding: .utf8)
+        XCTAssertTrue(text.contains("Music Compatibility"))
+        XCTAssertTrue(text.contains("Guest control connected"))
+    }
+
+    @MainActor
+    func testSnapshotRetentionKeepsNewestPerDevice() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("retention-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        let now = Date()
+        let snapshots = (0..<4).map { index in
+            SnapshotRecord(
+                id: UUID(),
+                name: "Snapshot \(index)",
+                sourceVM: "music-lab",
+                createdAt: now.addingTimeInterval(TimeInterval(-index * 86_400)),
+                archivePath: "/mock/\(index).tgz",
+                sizeBytes: 1_024
+            )
+        }
+        let backend = MockLabBackend(snapshots: snapshots)
+        let model = LabAppModel(paths: paths, backend: backend)
+        await model.bootstrap()
+        model.updateSnapshotRetention(SnapshotRetentionPolicy(
+            isEnabled: true,
+            keepLastPerDevice: 2,
+            maximumAgeDays: 1,
+            maximumTotalBytes: .max,
+            verifyBeforePruning: true
+        ))
+        let result = await model.applySnapshotRetention()
+        XCTAssertEqual(result.removed.count, 2)
+        XCTAssertEqual(model.snapshots.count, 2)
+    }
+
+    func testDeveloperHelperGeneration() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("developer-helper-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let helper = try DeveloperTools.installHelper(paths: paths, vdlctlPath: "/opt/homebrew/bin/vdlctl")
+        let text = try String(contentsOf: helper, encoding: .utf8)
+        XCTAssertTrue(text.contains("vdlctl"))
+        XCTAssertTrue(text.contains("deploy --device"))
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper.path))
+    }
+
+    func testAcceptanceDefinitionRequiresRealEvidence() {
+        let device = VirtualDevice(
+            name: "music-lab", cpuCount: 6, memoryMB: 4_096, diskSizeBytes: 64 * 1_073_741_824,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil),
+            restoreInfo: RestoreInfoReport(
+                ios: OSVersionReport(version: "26.1", build: "23B85"),
+                cloudOS: OSVersionReport(version: "26.1", build: "23B85"),
+                variant: "regular", device: "iPhone17,3"
+            ),
+            udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/music-lab"),
+            diskURL: URL(fileURLWithPath: "/tmp/music-lab/Disk.img"), isRunning: false,
+            hardwareProfileID: "iphone-16-pro-a18"
+        )
+        let host = HostReadiness(
+            state: .ready, macOSVersion: "26.3", model: "Mac16,12", architecture: "arm64",
+            sipStatus: "enabled without debug", researchGuestsStatus: "enabled",
+            binaryPath: "/mock/vphone-cli", binaryExitCode: 0, nestedVirtualization: true, checkedAt: .now
+        )
+        let kinds: [TestAssertionKind] = [
+            .guestReady, .networkMode, .audioConfigured, .launchSucceeded,
+            .diagnosticsCollected, .maximumDuration,
+        ]
+        let results = kinds.map { kind in
+            TestAssertionResult(assertion: TestAssertion(kind), passed: true, message: "evidence")
+        }
+        let run = TestRunRecord(
+            id: UUID(), kind: .baselineAcceptance, name: "Baseline", packagePath: nil,
+            createdAt: .now, completedAt: .now, state: .passed,
+            results: [DeviceTestResult(
+                id: UUID(), deviceName: device.name, state: .passed, message: "passed",
+                screenshotPath: "/tmp/screen.png", diagnosticBundlePath: "/tmp/diagnostics",
+                startedAt: .now, completedAt: .now, assertionResults: results
+            )]
+        )
+        let handshake = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.screenshots, .guestFiles],
+            maximumMessageBytes: 1_048_576, authenticated: true,
+            replayProtected: true, authenticationClockSkewSeconds: 30,
+            transport: "test", message: "compatible"
+        )
+        let report = AcceptanceEvaluator.evaluate(
+            host: host, device: device, testRuns: [run], capabilities: .vphone, handshake: handshake
+        )
+        XCTAssertTrue(report.isPassed)
+        XCTAssertEqual(report.gates.count, AcceptanceGateKind.allCases.count)
+    }
+
+    func testHostCompatibilityMatrixMatchesSpecificEvidence() {
+        let catalog = HostCompatibilityCatalog(
+            schemaVersion: 1,
+            records: [HostCompatibilityRecord(
+                id: "test", macOSPrefixes: ["26."], modelPrefixes: ["Mac16,"],
+                backendVersionPrefixes: ["*"], iosMajorVersions: [26], status: .validated,
+                evidence: "validated fixture", updatedAt: "2026-08-10"
+            )]
+        )
+        let host = HostReadiness(
+            state: .ready, macOSVersion: "26.3", model: "Mac16,12", architecture: "arm64",
+            sipStatus: "enabled", researchGuestsStatus: "enabled", binaryPath: "/mock",
+            binaryExitCode: 0, nestedVirtualization: true, checkedAt: .now
+        )
+        var device = VirtualDevice(
+            name: "test", cpuCount: 1, memoryMB: 1_024, diskSizeBytes: 1,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil),
+            restoreInfo: RestoreInfoReport(
+                ios: OSVersionReport(version: "26.1", build: "x"),
+                cloudOS: OSVersionReport(version: "26.1", build: "x"), variant: nil, device: nil
+            ), udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/test"),
+            diskURL: URL(fileURLWithPath: "/tmp/test/Disk.img"), isRunning: false
+        )
+        device.hardwareProfileID = "profile"
+        XCTAssertEqual(
+            HostCompatibilityDatabase.assess(catalog: catalog, host: host, backendVersion: nil, device: device).status,
+            .validated
+        )
+    }
+
+    func testSchemaMigrationBacksUpAndIsIdempotent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("migration-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        try Data("[]".utf8).write(to: paths.stateRoot.appendingPathComponent("activity.json"))
+        let first = try LabMigrationManager.migrate(paths: paths)
+        XCTAssertEqual(first.destinationVersion, LabMigrationManager.currentSchemaVersion)
+        XCTAssertFalse(first.applied.isEmpty)
+        XCTAssertNotNil(first.latestBackupPath)
+        let second = try LabMigrationManager.migrate(paths: paths)
+        XCTAssertTrue(second.applied.isEmpty)
+    }
+
+    func testEveryHistoricalSchemaFixtureMigratesToCurrent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("migration-history-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        for source in 0..<LabMigrationManager.currentSchemaVersion {
+            let paths = makePaths(root: root.appendingPathComponent("v\(source)"))
+            try paths.createDirectories()
+            try HardeningJSON.save(
+                LabMigrationState(schemaVersion: source, history: []),
+                to: paths.stateRoot.appendingPathComponent("lab-schema.json")
+            )
+            try HardeningJSON.save(["fixture": source], to: paths.stateRoot.appendingPathComponent("activity.json"))
+            let report = try LabMigrationManager.migrate(paths: paths)
+            XCTAssertEqual(report.sourceVersion, source)
+            XCTAssertEqual(report.destinationVersion, LabMigrationManager.currentSchemaVersion)
+            XCTAssertEqual(report.applied.count, LabMigrationManager.currentSchemaVersion - source)
+        }
+    }
+
+    func testOperationJournalRecoversInterruptedWork() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("journal-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let entry = OperationJournalEntry(
+            id: UUID(), kind: .restore, target: "restored-device", startedAt: .now,
+            updatedAt: .now, state: .running, phase: .restoring,
+            recoveryInstruction: "Verify the imported bundle", message: "running"
+        )
+        try OperationJournalStore.save([entry], paths: paths)
+        let recovered = try OperationJournalStore.recoverInterrupted(paths: paths)
+        XCTAssertEqual(recovered.first?.state, .interrupted)
+        XCTAssertEqual(recovered.first?.phase, .failed)
+    }
+
+    func testEnvironmentProfilesAndAssignmentsPersist() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("environment-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        XCTAssertGreaterThanOrEqual(EnvironmentProfileStore.load(paths: paths).count, 2)
+        let profileID = EnvironmentProfileStore.builtIns[0].id
+        try EnvironmentProfileStore.saveAssignments(["music-lab": profileID], paths: paths)
+        XCTAssertEqual(EnvironmentProfileStore.loadAssignments(paths: paths)["music-lab"], profileID)
+    }
+
+    func testGuestProtocolNegotiationRejectsUnknownVersion() {
+        let compatible = GuestProtocolNegotiator.negotiate(json: [
+            "protocol_version": 2,
+            "screenshots": true,
+            "maximum_message_bytes": 4096,
+            "authenticated": true,
+            "replay_protection": true,
+            "authentication_clock_skew_seconds": 30,
+        ])
+        XCTAssertEqual(compatible.status, .compatible)
+        XCTAssertTrue(compatible.capabilities.contains(.screenshots))
+        XCTAssertEqual(compatible.maximumMessageBytes, 4096)
+        XCTAssertTrue(compatible.replayProtected)
+        XCTAssertEqual(compatible.authenticationClockSkewSeconds, 30)
+        XCTAssertEqual(GuestProtocolNegotiator.negotiate(json: ["protocol_version": 99]).status, .incompatible)
+    }
+
+    func testStorageLifecycleDetectsDuplicateFirmware() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("storage-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        var first = FirmwareImage.inspect(root.appendingPathComponent("a.ipsw"))
+        var second = FirmwareImage.inspect(root.appendingPathComponent("b.ipsw"))
+        first.sha256 = "same"
+        second.sha256 = "same"
+        let inventory = StorageLifecycleManager.scan(
+            paths: paths, devices: [], firmware: [first, second], snapshots: [], policy: .standard
+        )
+        XCTAssertEqual(inventory.duplicateFirmware.count, 1)
+        XCTAssertTrue(inventory.warnings.contains { $0.contains("Duplicate") })
+    }
+
+    func testFirmwareInspectionRecordsProvenance() {
+        let image = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/test.ipsw"))
+        XCTAssertEqual(image.provenance?.sourceKind, .localImport)
+        XCTAssertEqual(image.provenance?.retentionPolicy, .keep)
+        XCTAssertTrue(image.provenance?.ownershipNote.contains("does not redistribute") == true)
+    }
+
+    func testBackendAndAttributionCatalogsPreserveIntegrationBoundaries() {
+        let paths = makePaths(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let backends = ProjectCatalogLoader.loadBackends(paths: paths)
+        let attribution = ProjectCatalogLoader.loadAttribution(paths: paths)
+
+        XCTAssertEqual(backends.entries.filter(\.isRunnable).map(\.id), ["com.virtualdevicelab.vphone"])
+        XCTAssertEqual(backends.entry(id: "org.qemu.qemu")?.integrationState, .plannedAdapter)
+        XCTAssertFalse(backends.entry(id: "org.qemu.qemu")?.selectable ?? true)
+        XCTAssertEqual(backends.entry(id: "com.corellium.reference")?.integrationState, .referenceOnly)
+        XCTAssertFalse(backends.entry(id: "com.corellium.reference")?.selectable ?? true)
+        XCTAssertTrue(attribution.completenessIssues.isEmpty)
+        XCTAssertEqual(attribution.records.first(where: { $0.id == "vphone-cli" })?.license, "MIT")
+        XCTAssertFalse(attribution.records.first(where: { $0.id == "qemu" })?.distributedWithApp ?? true)
+    }
+
+    func testBackendRecommendationDoesNotPromoteResearchCandidateToRunnable() {
+        let paths = makePaths(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let backends = ProjectCatalogLoader.loadBackends(paths: paths)
+        let compatibility = CompatibilityCatalog.load(paths: paths)
+        let supported = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/iPhone17,3_18.6.2_22G100_Restore.ipsw"))
+        let oldResearch = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/iPhone10,6_14.8_18H17_Restore.ipsw"))
+
+        let supportedRecommendation = BackendRecommendationEvaluator.recommend(
+            firmware: supported,
+            catalog: backends,
+            compatibility: compatibility,
+            activeBackendID: "com.virtualdevicelab.vphone",
+            hostReady: true
+        )
+        XCTAssertEqual(supportedRecommendation.verdict, .ready)
+        XCTAssertEqual(supportedRecommendation.selectedBackendID, "com.virtualdevicelab.vphone")
+
+        let researchRecommendation = BackendRecommendationEvaluator.recommend(
+            firmware: oldResearch,
+            catalog: backends,
+            compatibility: compatibility,
+            activeBackendID: "com.virtualdevicelab.vphone",
+            hostReady: true
+        )
+        XCTAssertEqual(researchRecommendation.verdict, .unavailable)
+        XCTAssertNil(researchRecommendation.selectedBackendID)
+        XCTAssertTrue(researchRecommendation.researchCandidateIDs.contains("org.qemu.qemu"))
+        XCTAssertFalse(researchRecommendation.researchCandidateIDs.contains("com.corellium.reference"))
+    }
+
+    func testQualificationCampaignPinsFixtureAndBlocksIncompleteEvidence() {
+        let host = testHost()
+        let campaign = QualificationCampaignStore.create(
+            host: host, backend: .vphone, device: nil, firmware: nil, acceptance: .empty
+        )
+        XCTAssertEqual(campaign.state, .blocked)
+        XCTAssertEqual(campaign.backendID, BackendDescriptor.vphone.id)
+        XCTAssertTrue(campaign.hostFingerprint.contains(host.model))
+        XCTAssertGreaterThanOrEqual(campaign.blockers.count, 3)
+    }
+
+    func testSetupAssistantRepairsOnlySafeDirectories() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("setup-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try SetupAssistant.repairSafeDirectories(paths: paths)
+        let report = SetupAssistant.inspect(paths: paths, host: testHost())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.stateRoot.appendingPathComponent("Evidence").path))
+        XCTAssertTrue(report.checks.first(where: { $0.id == "host" })?.canRepairInApp == false)
+        XCTAssertEqual(report.schemaVersion, 1)
+    }
+
+    func testGuestTrustAndAccessibilityFailClosed() {
+        let unauthenticated = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.screenshots, .accessibilityTree],
+            maximumMessageBytes: 1_048_576, authenticated: false,
+            replayProtected: true, authenticationClockSkewSeconds: 30,
+            transport: "fixture", message: "fixture"
+        )
+        XCTAssertFalse(GuestTrustEvaluator.evaluate(unauthenticated, policy: .strict).trustedForMutation)
+        XCTAssertFalse(UIAutomationReadiness.assess(handshake: unauthenticated).available)
+        let authenticated = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.accessibilityTree],
+            maximumMessageBytes: 1_048_576, authenticated: true,
+            replayProtected: true, authenticationClockSkewSeconds: 30,
+            transport: "fixture", message: "fixture"
+        )
+        XCTAssertTrue(UIAutomationReadiness.assess(handshake: authenticated).available)
+    }
+
+    func testEvidenceLedgerDetectsPayloadTamperingAndSurvivesReview() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("evidence-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let first = try EvidenceLedger.seal(
+            ["gate": "passed"], subject: "Acceptance fixture", host: testHost(),
+            appVersion: "0.7.0", backend: .vphone, paths: paths
+        )
+        _ = try EvidenceLedger.review(
+            id: first.id, state: .approved, reviewer: "Test Reviewer", note: "Reviewed", paths: paths
+        )
+        _ = try EvidenceLedger.seal(
+            ["gate": "passed-again"], subject: "Second fixture", host: testHost(),
+            appVersion: "0.7.0", backend: .vphone, paths: paths
+        )
+        XCTAssertTrue(EvidenceLedger.verify(paths: paths).isEmpty)
+        let payload = paths.stateRoot.appendingPathComponent("Evidence/\(first.id.uuidString)-payload.json")
+        try Data("tampered".utf8).write(to: payload, options: .atomic)
+        XCTAssertTrue(EvidenceLedger.verify(paths: paths).contains { $0.contains("payload checksum") })
+    }
+
+    func testBackupVerificationAndRestoreStagingExcludeCredentials() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("backup-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root.appendingPathComponent("lab"))
+        let destination = root.appendingPathComponent("backups")
+        try paths.createDirectories()
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try Data("state".utf8).write(to: paths.stateRoot.appendingPathComponent("settings.json"))
+        try Data("secret".utf8).write(to: paths.stateRoot.appendingPathComponent("agent-token"))
+        let backup = try LabBackupManager.create(
+            paths: paths, destination: destination, policy: .standard, appVersion: "0.7.0"
+        )
+        let verification = LabBackupManager.verify(backup)
+        XCTAssertTrue(verification.passed)
+        XCTAssertFalse(verification.manifest?.entries.contains { $0.relativePath.contains("agent-token") } ?? true)
+        let injected = backup.appendingPathComponent("Payload/injected.txt")
+        try Data("unexpected".utf8).write(to: injected)
+        XCTAssertFalse(LabBackupManager.verify(backup).passed)
+        try FileManager.default.removeItem(at: injected)
+        let staged = try LabBackupManager.stageRestore(backup, paths: paths)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged.appendingPathComponent("VirtualDeviceLab/settings.json").path))
+    }
+
+    func testEncryptedFullBackupRestorePlanAndCredentialExclusion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("backup-v3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root.appendingPathComponent("lab"))
+        let destination = root.appendingPathComponent("backups")
+        try paths.createDirectories()
+        let vm = paths.libraryRoot.appendingPathComponent("phone")
+        try FileManager.default.createDirectory(at: vm, withIntermediateDirectories: true)
+        try Data("disk".utf8).write(to: vm.appendingPathComponent("Disk.img"))
+        try Data("credential".utf8).write(to: vm.appendingPathComponent(GuestCredentialVault.fileName))
+        try Data("firmware".utf8).write(to: paths.firmwareRoot.appendingPathComponent("fixture.ipsw"))
+        var policy = LabBackupPolicy.standard
+        policy.includeFirmware = true
+        policy.encryptArchive = true
+        let archive = try LabBackupManager.create(
+            paths: paths,
+            destination: destination,
+            policy: policy,
+            appVersion: "0.8.0",
+            passphrase: "correct horse battery"
+        )
+        XCTAssertEqual(archive.pathExtension, "vdlbackup")
+        let archiveHandle = try FileHandle(forReadingFrom: archive)
+        defer { try? archiveHandle.close() }
+        XCTAssertEqual(
+            try archiveHandle.read(upToCount: Data("VDLBACKUP2\n".utf8).count),
+            Data("VDLBACKUP2\n".utf8)
+        )
+        XCTAssertFalse(LabBackupManager.verify(archive, passphrase: "incorrect passphrase").passed)
+        let verification = LabBackupManager.verify(archive, passphrase: "correct horse battery")
+        XCTAssertTrue(verification.passed, verification.issues.joined(separator: ", "))
+        XCTAssertTrue(verification.manifest?.includesVirtualDevices == true)
+        XCTAssertTrue(verification.manifest?.includesFirmware == true)
+        XCTAssertFalse(verification.manifest?.entries.contains { $0.relativePath.contains(GuestCredentialVault.fileName) } ?? true)
+        let plan = LabBackupManager.restorePlan(archive, paths: paths, passphrase: "correct horse battery")
+        XCTAssertTrue(plan.canStage)
+        XCTAssertTrue(plan.targets.contains(paths.libraryRoot.path))
+        let staged = try LabBackupManager.stageRestore(archive, paths: paths, passphrase: "correct horse battery")
+        let command = try LabBackupManager.writeApplyRestoreCommand(stagedPayload: staged, paths: paths)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: command.path))
+    }
+
+    func testEncryptedBackupCanOpenLegacyV1Container() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("backup-v1-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("VDL-Backup-Legacy")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try Data("legacy payload".utf8).write(to: source.appendingPathComponent("fixture.txt"))
+        let archive = try makeLegacyBackup(directory: source, passphrase: "correct horse battery")
+
+        let payload = try BackupArchiveCrypto.withDecryptedDirectory(
+            archive,
+            passphrase: "correct horse battery"
+        ) { directory in
+            try Data(contentsOf: directory.appendingPathComponent("fixture.txt"))
+        }
+        XCTAssertEqual(payload, Data("legacy payload".utf8))
+    }
+
+    func testHardeningJSONConcurrentWritersRemainDecodableAndPrivate() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("locking-v3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("state.json")
+        try HardeningJSON.save(["seed": 0], to: url)
+        DispatchQueue.concurrentPerform(iterations: 100) { index in
+            try? HardeningJSON.save(["value": index], to: url)
+            _ = try? HardeningJSON.load([String: Int].self, from: url)
+        }
+        XCTAssertNoThrow(try HardeningJSON.load([String: Int].self, from: url))
+        let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
+    }
+
+    func testTenThousandRecordStateLoadRemainsBounded() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("load-v3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("records.json")
+        let fixture = Dictionary(uniqueKeysWithValues: (0..<10_000).map { ("record-\($0)", $0) })
+        try HardeningJSON.save(fixture, to: url)
+        let started = Date()
+        let loaded = try HardeningJSON.load([String: Int].self, from: url)
+        XCTAssertEqual(loaded.count, 10_000)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    func testCompanionContractRejectsLegacyAndAcceptsProtocolV3() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("contract-v3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let executable = root.appendingPathComponent("vphone-cli")
+        let contract = "{\"schemaVersion\":1,\"backendID\":\"vphone-cli\",\"backendVersion\":\"0.8.0\",\"minimumHostAppVersion\":\"0.8.0\",\"hostControlProtocol\":3,\"exportExcludesCredentials\":true,\"sourceRevision\":null}\n"
+        let script = "#!/bin/zsh\nprint -r -- '\(contract.trimmingCharacters(in: .newlines))'\n"
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        XCTAssertTrue(CompanionBackendInspector.inspect(binary: executable).compatible)
+
+        let bundledBinary = root.appendingPathComponent("vphone-cli.app/Contents/MacOS/vphone-cli")
+        try FileManager.default.createDirectory(at: bundledBinary.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/zsh\nexit 137\n".write(to: bundledBinary, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: bundledBinary.path)
+        let resource = root.appendingPathComponent("vphone-cli.app/Contents/Resources/vdl-backend-contract.json")
+        try FileManager.default.createDirectory(at: resource.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try contract.write(to: resource, atomically: true, encoding: .utf8)
+        XCTAssertTrue(CompanionBackendInspector.inspect(binary: bundledBinary).compatible)
+    }
+
+    @MainActor
+    func testLaunchHealthWatchdogKeepsActorBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("launch-watchdog-v3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        LaunchHealthMonitor.shared.begin(paths: paths)
+        try await Task.sleep(for: .seconds(3))
+        XCTAssertEqual(LaunchHealthMonitor.shared.record.lastPhase, "launching")
+        XCTAssertEqual(LaunchHealthMonitor.shared.record.consecutiveUncleanLaunches, 0)
+        LaunchHealthMonitor.shared.markCleanExit()
+        XCTAssertEqual(LaunchHealthMonitor.shared.record.lastPhase, "clean-exit")
+    }
+
+    func testLaunchHealthForDefaultLabUsesHostLocalStorage() {
+        let root = LaunchHealthLocation.markerRoot(for: .default)
+        XCTAssertEqual(root, LaunchHealthLocation.hostRoot)
+        XCTAssertFalse(root.path.hasPrefix(LabPaths.default.dataRoot.path + "/"))
+
+        let temporary = makePaths(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        XCTAssertEqual(LaunchHealthLocation.markerRoot(for: temporary), temporary.stateRoot)
+    }
+
+    func testStorageBootstrapDoesNotRewriteExistingDirectoryPermissions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bootstrap-permissions-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try FileManager.default.createDirectory(at: paths.dataRoot, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o750], ofItemAtPath: paths.dataRoot.path)
+
+        try paths.createDirectories()
+
+        let permissions = try FileManager.default.attributesOfItem(atPath: paths.dataRoot.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o750)
+        for directory in [paths.libraryRoot, paths.firmwareRoot, paths.snapshotsRoot, paths.stateRoot] {
+            let created = try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber
+            XCTAssertEqual(created?.intValue, 0o700)
+        }
+    }
+
+    func testUpdaterRejectsArchiveSymlinkEscape() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("update-escape-v3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root.appendingPathComponent("lab"))
+        try paths.createDirectories()
+        let badApp = root.appendingPathComponent("Bad.app")
+        try FileManager.default.createDirectory(at: badApp, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: badApp.appendingPathComponent("escape").path, withDestinationPath: "/tmp")
+        let archive = root.appendingPathComponent("bad.zip")
+        XCTAssertTrue(ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/ditto"),
+            arguments: ["-c", "-k", "--keepParent", badApp.path, archive.path], timeout: 30
+        ).succeeded)
+        XCTAssertThrowsError(try UpdateLifecycleManager.stage(
+            archive: archive,
+            currentApp: nil,
+            version: "0.8.1",
+            paths: paths,
+            policy: UpdateLifecyclePolicy(
+                channel: .beta,
+                requireSignedManifest: false,
+                requireNotarization: false,
+                retainRollbackVersions: 2
+            )
+        ))
+    }
+
+    func testProductionReadinessCriticalActionsHaveAccessibilityIdentifiers() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/ProductionReadinessView.swift"),
+            encoding: .utf8
+        )
+        for identifier in [
+            "readiness.record-qualification", "readiness.seal-evidence", "readiness.create-backup",
+            "readiness.verify-backup", "readiness.stage-restore", "readiness.run-resilience",
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)\")"), identifier)
+        }
+    }
+
+    func testRemoteAgentBootstrapCreatesV2ProtectedKeyring() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("agent-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let configuration = try RemoteLabAgentBootstrap.initialize(paths: paths)
+        XCTAssertEqual(configuration.schemaVersion, 2)
+        XCTAssertNotNil(configuration.activeKeyID)
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: configuration.tokenFilePath))) as? [String: Any]
+        XCTAssertEqual(object?["schemaVersion"] as? Int, 2)
+        let permissions = try FileManager.default.attributesOfItem(atPath: configuration.tokenFilePath)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue ?? 0, 0o600)
+    }
+
+    func testResilienceSuiteExercisesEveryDeclaredScenario() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("resilience-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try SetupAssistant.repairSafeDirectories(paths: paths)
+        let report = ResilienceSuite.run(paths: paths)
+        XCTAssertTrue(report.passed)
+        XCTAssertEqual(Set(report.results.map(\.scenario)), Set(ResilienceScenario.allCases))
+    }
+
+    func testUpdateStagingCreatesExplicitInstallAndRollbackCommands() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("updates-v2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root.appendingPathComponent("lab"))
+        try paths.createDirectories()
+        let newApp = root.appendingPathComponent("New.app")
+        let currentApp = root.appendingPathComponent("Current.app")
+        try makeSignedFixtureApp(newApp)
+        try FileManager.default.copyItem(at: newApp, to: currentApp)
+        let archive = root.appendingPathComponent("update.zip")
+        let zipped = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/ditto"),
+            arguments: ["-c", "-k", "--keepParent", newApp.path, archive.path], timeout: 30
+        )
+        XCTAssertTrue(zipped.succeeded)
+        let record = try UpdateLifecycleManager.stage(
+            archive: archive, currentApp: currentApp, version: "0.7.1", paths: paths,
+            policy: UpdateLifecyclePolicy(
+                channel: .beta, requireSignedManifest: false,
+                requireNotarization: false, retainRollbackVersions: 2
+            )
+        )
+        XCTAssertTrue(record.signatureVerified)
+        XCTAssertTrue(record.installerScriptPath.map(FileManager.default.isExecutableFile) ?? false)
+        XCTAssertTrue(record.rollbackScriptPath.map(FileManager.default.isExecutableFile) ?? false)
+        XCTAssertFalse(record.installationApproved)
+    }
+
+    func testExternalStorageDetectsBrokenLinkAndRelinksAtomically() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("storage-relink-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let link = root.appendingPathComponent(".vphone")
+        try FileManager.default.createSymbolicLink(
+            at: link, withDestinationURL: root.appendingPathComponent("missing")
+        )
+        let registry = root.appendingPathComponent("registry.json")
+        XCTAssertEqual(ExternalStorageManager.inspect(root: link, registryURL: registry).state, .relinkRequired)
+
+        let destination = root.appendingPathComponent("dedicated-lab")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let status = try ExternalStorageManager.relink(root: link, to: destination, registryURL: registry)
+        XCTAssertEqual(status.state, .online)
+        XCTAssertEqual(URL(fileURLWithPath: status.resolvedPath ?? "").standardizedFileURL, destination.standardizedFileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.appendingPathComponent("VirtualDeviceLab").path))
+    }
+
+    func testRecoveryCenterPersistsAuditedAbandonDecision() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("recovery-center-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let entry = OperationJournalEntry(
+            id: UUID(), kind: .snapshot, target: "phone/golden", startedAt: .now,
+            updatedAt: .now, state: .interrupted, phase: .failed,
+            recoveryInstruction: "Inspect the archive.", message: "Interrupted"
+        )
+        var entries = [entry]
+        try OperationJournalStore.save(entries, paths: paths)
+        let decision = try RecoveryCenterStore.decide(
+            entry: entry, action: .abandon, entries: &entries, paths: paths
+        )
+        XCTAssertEqual(decision.action, .abandon)
+        XCTAssertEqual(entries.first?.state, .resolved)
+        XCTAssertEqual(RecoveryCenterStore.load(paths: paths, entries: entries).decisions.first?.journalEntryID, entry.id)
+    }
+
+    func testCanonicalFixtureRequiresVerifiedRealEvidence() throws {
+        var firmware = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/iPhone10,6_15.8_19H370_Restore.ipsw"))
+        firmware.sha256 = String(repeating: "a", count: 64)
+        firmware.validation = FirmwareValidation(
+            state: .valid, checkedAt: .now, hasBuildManifest: true,
+            archiveEntryCount: 10, issues: []
+        )
+        let device = VirtualDevice(
+            name: "golden", cpuCount: 4, memoryMB: 4_096, diskSizeBytes: 32 * 1_073_741_824,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil),
+            restoreInfo: RestoreInfoReport(
+                ios: OSVersionReport(version: "15.8", build: "19H370"),
+                cloudOS: OSVersionReport(version: "15.8", build: "19H370"),
+                variant: "regular", device: "iPhone10,6"
+            ), udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/golden"),
+            diskURL: URL(fileURLWithPath: "/tmp/golden/Disk.img"), isRunning: false,
+            hardwareProfileID: "iphone-x"
+        )
+        let snapshot = SnapshotRecord(
+            id: UUID(), name: "golden", sourceVM: device.name, createdAt: .now,
+            archivePath: "/tmp/golden.tgz", sizeBytes: 1,
+            sha256: String(repeating: "b", count: 64), lastVerifiedAt: .now,
+            integrityStatus: .verified
+        )
+        let gates = AcceptanceGateKind.allCases.map {
+            AcceptanceGateResult(kind: $0, status: .passed, evidence: "fixture", requiredEvidence: "fixture")
+        }
+        let acceptance = AcceptanceReport(
+            schemaVersion: 1, generatedAt: .now, deviceName: device.name, gates: gates
+        )
+        XCTAssertTrue(CanonicalFixtureStore.assess(
+            device: device, firmware: firmware, snapshot: snapshot, acceptance: acceptance
+        ).ready)
+        XCTAssertFalse(CanonicalFixtureStore.assess(
+            device: device, firmware: firmware, snapshot: nil, acceptance: acceptance
+        ).ready)
+    }
+
+    func testLabfilePlannerProducesCreateUpdateAndBlockedChanges() throws {
+        let paths = makePaths(root: FileManager.default.temporaryDirectory.appendingPathComponent("labfile-\(UUID().uuidString)"))
+        let profiles = HardwareProfilesCatalog.load(paths: paths)
+        let profile = try XCTUnwrap(profiles.profiles.first)
+        var image = FirmwareImage.inspect(URL(fileURLWithPath: "/tmp/fixture_26.1_23B85_Restore.ipsw"))
+        image.sha256 = String(repeating: "c", count: 64)
+        let document = LabfileDocument(
+            schemaVersion: 1, name: "Fixture", backendID: BackendDescriptor.vphone.id,
+            devices: [LabfileDevice(
+                name: "new-phone", hardwareProfileID: profile.id,
+                firmwareSHA256: image.sha256!, cloudOSFirmwareSHA256: nil,
+                cpuCount: 4, memoryMB: 4_096, diskSizeGB: 32,
+                networkMode: "nat", environmentProfileID: nil, workflowNames: []
+            )]
+        )
+        let plan = LabfilePlanner.plan(
+            document, devices: [], firmware: [image], profiles: profiles, backend: .vphone
+        )
+        XCTAssertTrue(plan.canApply)
+        XCTAssertEqual(plan.changes.first?.kind, .create)
+
+        var missing = document
+        missing.devices[0].firmwareSHA256 = String(repeating: "d", count: 64)
+        XCTAssertEqual(LabfilePlanner.plan(
+            missing, devices: [], firmware: [image], profiles: profiles, backend: .vphone
+        ).changes.first?.kind, .blocked)
+    }
+
+    func testEvidenceLifecycleInvalidatesOldOrChangedCampaign() {
+        let campaign = QualificationCampaign(
+            id: UUID(), deviceName: "phone", firmwareSHA256: String(repeating: "e", count: 64),
+            hardwareProfileID: "iphone-x", hostFingerprint: "old-host", backendID: BackendDescriptor.vphone.id,
+            backendVersion: "0.7", createdAt: Date(timeIntervalSinceNow: -60 * 86_400),
+            completedAt: Date(timeIntervalSinceNow: -60 * 86_400), state: .passed,
+            blockers: [], acceptance: .empty, evidenceSealID: nil
+        )
+        var policy = EvidenceLifecyclePolicy.standard
+        policy.requireApprovedSeal = false
+        let report = EvidenceLifecycleManager.evaluate(
+            campaigns: [campaign], policy: policy, host: testHost(), backend: .vphone,
+            currentFirmwareHashes: [String(repeating: "e", count: 64)], seals: []
+        )
+        XCTAssertFalse(report.items[0].fresh)
+        XCTAssertTrue(report.items[0].reasons.contains { $0.contains("older") })
+        XCTAssertTrue(report.items[0].reasons.contains { $0.contains("Host fingerprint") })
+    }
+
+    func testHostCapacityUsesLowMemoryMode() {
+        let calibration = HostCapacityCalibrator.recommendation(
+            physicalMemoryMB: 8_192, processors: 8, availableStorageBytes: 200 * 1_073_741_824
+        )
+        XCTAssertEqual(calibration.capacityClass, .constrained)
+        XCTAssertEqual(calibration.recommendedConcurrentVMs, 1)
+        XCTAssertLessThanOrEqual(calibration.recommendedAggregateMemoryMB, 4_096)
+    }
+
+    func testHostileInputSuiteRejectsTraversalAndOversize() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hostile-input-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        XCTAssertFalse(HostileInputValidator.isSafeArchivePath("../escape"))
+        XCTAssertFalse(HostileInputValidator.acceptsJSON(Data(repeating: 0x20, count: 1_048_577)))
+        XCTAssertTrue(HostileInputValidator.run(paths: paths).passed)
+    }
+
+    func testRetentionPreviewIsNonDestructiveAndQuarantineIsRecoverable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("retention-v3-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let diagnostics = paths.stateRoot.appendingPathComponent("Diagnostics")
+        try FileManager.default.createDirectory(at: diagnostics, withIntermediateDirectories: true)
+        let old = diagnostics.appendingPathComponent("old.log")
+        try Data("sanitized".utf8).write(to: old)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -20 * 86_400)], ofItemAtPath: old.path
+        )
+        let preview = UnifiedDataLifecycleManager.preview(paths: paths, policy: .standard)
+        XCTAssertEqual(preview.candidates.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: old.path))
+        let quarantine = try XCTUnwrap(UnifiedDataLifecycleManager.quarantine(preview, paths: paths))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: quarantine.path))
+    }
+
+    func testOperationalObjectivesFailClosedWithoutRealEvidence() {
+        let report = OperationalObjectiveEvaluator.evaluate(
+            policy: .standard, testRuns: [], acceptance: .empty,
+            resilience: nil, secondVolumeRestoreRecorded: false
+        )
+        XCTAssertFalse(report.passed)
+        XCTAssertTrue(report.gates.allSatisfy { !$0.passed })
+    }
+
+    func testPublicBetaReadinessKeepsHumanGatesExplicit() {
+        var record = BetaVerificationRecord.empty
+        record.voiceOverVerified = true
+        let report = PublicBetaReadinessManager.evaluate(record: record, localizationCount: 1)
+        XCTAssertFalse(report.passed)
+        XCTAssertEqual(report.items.first { $0.name == "VoiceOver" }?.passed, true)
+        XCTAssertEqual(report.items.first { $0.name == "Legal review" }?.passed, false)
+    }
+
+    func testAdapterConformanceAcceptsSDKExampleAndRejectsUnknownCapability() {
+        XCTAssertTrue(BackendAdapterConformance.evaluate(BackendAdapterConformance.example).passed)
+        var invalid = BackendAdapterConformance.example
+        invalid.capabilities.append("pretendSuccess")
+        XCTAssertFalse(BackendAdapterConformance.evaluate(invalid).passed)
+        invalid = BackendAdapterConformance.example
+        invalid.minimumLabVersion = "99.0.0"
+        XCTAssertFalse(BackendAdapterConformance.evaluate(invalid).passed)
+    }
+
+    func testDeterministicResetFailsClosedWithoutBackendGuestReset() {
+        let device = VirtualDevice(
+            name: "reset-phone", cpuCount: 4, memoryMB: 4_096, diskSizeBytes: 32 * 1_073_741_824,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil), restoreInfo: nil,
+            udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/reset-phone"),
+            diskURL: URL(fileURLWithPath: "/tmp/reset-phone/Disk.img"), isRunning: false
+        )
+        let fixture = CanonicalVMFixture(
+            id: UUID(), schemaVersion: 1, name: "Golden", createdAt: .now,
+            deviceName: device.name, deviceProductType: "iPhone10,6",
+            firmwareSHA256: String(repeating: "a", count: 64), cloudOSFirmwareSHA256: nil,
+            hardwareProfileID: "iphone-x", backendID: BackendDescriptor.vphone.id,
+            backendVersion: "0.10.0", guestProtocolVersion: 3,
+            snapshotSHA256: String(repeating: "b", count: 64), smokeAppSHA256: nil,
+            acceptanceGeneratedAt: .now, acceptanceGateIDs: []
+        )
+        let plan = DeterministicResetPlanner.plan(
+            device: device, fixture: fixture, policy: .standard,
+            backendCapabilities: ["snapshotRestore", "xcodeDeployment", "networking", "automation"]
+        )
+        XCTAssertFalse(plan.canExecute)
+        XCTAssertTrue(plan.blockers.contains { $0.contains("deterministicReset") })
+    }
+
+    func testBuildIdentityCatalogReadsBundleAndSymbolsWithoutInventingSigning() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("build-catalog-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = root.appendingPathComponent("Fixture.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let plist: [String: Any] = [
+            "CFBundleIdentifier": "dev.virtualdevicelab.iosfixture", "CFBundleExecutable": "Fixture",
+            "CFBundleVersion": "42", "CFBundleShortVersionString": "1.2.3",
+        ]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            .write(to: app.appendingPathComponent("Info.plist"))
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: app.appendingPathComponent("Fixture"))
+        let artifact = AppArtifact(id: UUID(), name: "Fixture", path: app.path, importedAt: .now, sizeBytes: 1, sha256: "abc")
+        let record = BuildIdentityCatalog.index(artifact: artifact, sourceRevision: "deadbeef")
+        XCTAssertEqual(record.bundleIdentifier, "dev.virtualdevicelab.iosfixture")
+        XCTAssertEqual(record.buildNumber, "42")
+        XCTAssertEqual(record.sourceRevision, "deadbeef")
+        XCTAssertFalse(record.executableUUIDs.isEmpty)
+    }
+
+    func testFailureReplayBundleIsSanitizedAndHashPinned() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("replay-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let started = Date(timeIntervalSinceNow: -1)
+        let result = DeviceTestResult(
+            id: UUID(), deviceName: "phone", state: .failed, message: "Assertion failed",
+            screenshotPath: "/sanitized/screen.png", diagnosticBundlePath: "/sanitized/diagnostics",
+            startedAt: started, completedAt: .now
+        )
+        let run = TestRunRecord(
+            id: UUID(), kind: .deployment, name: "Failure", packagePath: nil, createdAt: started,
+            completedAt: .now, state: .failed, results: [result]
+        )
+        let bundle = try FailureReplayBundler.create(run: run, labfile: nil, assignments: [:], fixtures: [], paths: paths)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bundle.path + "/replay-manifest.json"))
+        XCTAssertEqual(bundle.manifestSHA256.count, 64)
+        let manifest = try String(contentsOfFile: bundle.path + "/replay-manifest.json", encoding: .utf8)
+        XCTAssertTrue(manifest.contains("signing keys"))
+        XCTAssertFalse(manifest.contains("secretValue"))
+        let commandPath = bundle.path + "/replay.command"
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: commandPath))
+        XCTAssertTrue(try String(contentsOfFile: commandPath, encoding: .utf8).contains("--workflow"))
+    }
+
+    func testRunTrendAnalyzerDetectsFlakyAndConsecutiveFailures() {
+        let states: [TestRunState] = [.passed, .failed, .passed, .failed, .failed, .failed]
+        let runs = states.enumerated().map { index, state in
+            let start = Date(timeIntervalSince1970: Double(index * 10))
+            return TestRunRecord(
+                id: UUID(), kind: .deployment, name: "Matrix", packagePath: nil, createdAt: start,
+                completedAt: start.addingTimeInterval(5), state: state,
+                results: [DeviceTestResult(
+                    id: UUID(), deviceName: "phone", state: state, message: state.rawValue,
+                    screenshotPath: nil, diagnosticBundlePath: nil, startedAt: start,
+                    completedAt: start.addingTimeInterval(5)
+                )]
+            )
+        }
+        let trend = RunTrendAnalyzer.evaluate(runs: runs, policy: .standard).trends.first
+        XCTAssertEqual(trend?.flaky, true)
+        XCTAssertEqual(trend?.quarantined, true)
+        XCTAssertEqual(trend?.consecutiveFailures, 3)
+    }
+
+    func testFleetSchedulerRejectsDrainedHostsAndPlacesEligibleHost() {
+        var host = FleetScheduler.localHost(capabilities: ["lifecycle", "automation"], maximumConcurrentVMs: 2)
+        let request = FleetJobRequest(name: "job", requiredCapabilities: ["automation"], requiredMemoryMB: 1_024)
+        host.drained = true
+        XCTAssertFalse(FleetScheduler.place(request, on: [host]).placed)
+        host.drained = false
+        XCTAssertTrue(FleetScheduler.place(request, on: [host]).placed)
+    }
+
+    func testUnifiedTimelineCorrelatesRunEvidenceAndReportsMissingVideo() {
+        let start = Date(timeIntervalSinceNow: -2)
+        let run = TestRunRecord(
+            id: UUID(), kind: .deployment, name: "Timeline", packagePath: nil, createdAt: start,
+            completedAt: .now, state: .passed,
+            results: [DeviceTestResult(
+                id: UUID(), deviceName: "phone", state: .passed, message: "passed",
+                screenshotPath: "/tmp/screen.png", diagnosticBundlePath: nil,
+                startedAt: start, completedAt: .now
+            )]
+        )
+        let timeline = UnifiedTimelineBuilder.build(
+            run: run, logs: [LogEntry(level: .info, scope: "phone", message: "ready")],
+            performance: [:], videoSupported: false
+        )
+        XCTAssertTrue(timeline.events.contains { $0.kind == .screenshot })
+        XCTAssertFalse(timeline.unavailableSources.isEmpty)
+    }
+
+    func testSecurityPostureInventoryNeverContainsSecretValues() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("security-posture-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let report = SecurityPostureEvaluator.evaluate(paths: paths, devices: [], remoteAgentConfigured: false)
+        let encoded = String(decoding: try JSONEncoder().encode(report), as: UTF8.self)
+        XCTAssertFalse(encoded.localizedCaseInsensitiveContains("secretValue"))
+        XCTAssertTrue(report.secrets.allSatisfy { !$0.exportAllowed })
+    }
+
+    func testFuzzCampaignIsDeterministicAndCoverageFailsClosed() {
+        let first = EngineeringQualityEvaluator.run(policy: .standard)
+        let second = EngineeringQualityEvaluator.run(policy: .standard)
+        XCTAssertEqual(first.totalCases, second.totalCases)
+        XCTAssertEqual(first.failedCases, second.failedCases)
+        XCTAssertTrue(first.fuzzGatePassed)
+        XCTAssertFalse(first.coverageGatePassed)
+    }
+
+    func testBetaOperationsRequireHealthQualityFeedbackAndPublicEvidence() {
+        var policy = BetaOperationsPolicy.standard
+        policy.channel = .beta
+        policy.feedbackURL = "https://example.invalid/feedback"
+        let report = BetaOperationsEvaluator.evaluate(
+            policy: policy, runs: [], publicBeta: .empty, quality: .empty, security: .empty
+        )
+        XCTAssertFalse(report.canPromote)
+        XCTAssertEqual(report.gates.first { $0.id == "feedback" }?.passed, true)
+        XCTAssertEqual(report.gates.first { $0.id == "launch-health" }?.passed, false)
+    }
+
+    func testPlatformEngineeringStateRoundTripsAndCriticalActionsAreAccessible() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("platform-state-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        var state = PlatformEngineeringState.empty
+        state.adapterManifests = [BackendAdapterConformance.example]
+        try PlatformEngineeringStore.save(state, paths: paths)
+        XCTAssertEqual(PlatformEngineeringStore.load(paths: paths).adapterManifests.count, 1)
+
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/PlatformEngineeringView.swift"),
+            encoding: .utf8
+        )
+        for identifier in [
+            "platform.refresh", "platform.adapter-import", "platform.reset-plan", "platform.build-index",
+            "platform.replay-create", "platform.trends-analyze", "platform.fleet-register",
+            "platform.timeline-capture", "platform.security-assess", "platform.quality-run", "platform.beta-evaluate",
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)\")"), identifier)
+        }
+    }
+
+    func testCapabilityMaturityDoesNotInventRealVMQualification() {
+        let records = CapabilityMaturityEvaluator.evaluate(.init(
+            adapterInstalled: true, adapterInvocationSucceeded: true,
+            guestAutomationAvailable: true, replayValidated: true,
+            symbolicationSucceeded: true, fleetLeaseActive: true, timelineCaptured: true,
+            coverageImported: true, physicalTargetDiscovered: true, approvedQualificationCount: 0
+        ))
+        XCTAssertEqual(records.count, 10)
+        XCTAssertFalse(records.contains { $0.level >= .realVMQualified })
+        XCTAssertEqual(records.first { $0.id == "runtime-adapters" }?.level, .integrated)
+    }
+
+    func testQualificationMatrixPublishesOnlyApprovedSeals() throws {
+        let device = expansionDevice()
+        let sealID = UUID()
+        let campaign = QualificationCampaign(
+            id: UUID(), deviceName: device.name, firmwareSHA256: String(repeating: "a", count: 64),
+            hardwareProfileID: "iphone-x", hostFingerprint: "host", backendID: "backend",
+            backendVersion: "1.0.0", createdAt: .now, completedAt: .now, state: .passed,
+            blockers: [], acceptance: .empty, evidenceSealID: sealID
+        )
+        let seal = EvidenceSeal(
+            id: sealID, schemaVersion: 1, createdAt: .now, subject: "fixture", hostFingerprint: "host",
+            appVersion: "0.11.0", backendID: "backend", backendVersion: "1.0.0",
+            payloadSHA256: String(repeating: "b", count: 64), previousSealSHA256: nil,
+            signingPublicKey: "public", signature: "signature", reviewState: .approved,
+            reviewer: "reviewer", reviewedAt: .now, reviewNote: "approved"
+        )
+        let matrix = QualificationMatrixEvaluator.evaluate(devices: [device], campaigns: [campaign], seals: [seal])
+        XCTAssertEqual(matrix.first?.state, .approved)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("qualification-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(try QualificationMatrixEvaluator.publishApproved(matrix, seals: [seal], to: url).entries.count, 1)
+    }
+
+    func testRuntimeAdapterInstallerPinsChecksumAndInvocationFailsClosed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("adapter-runtime-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        var manifest = BackendAdapterConformance.example
+        manifest.executablePath = "/usr/bin/true"
+        let installed = try RuntimeAdapterInstaller.install(manifest: manifest, paths: paths, existing: [])
+        XCTAssertEqual(installed.executableSHA256, try fileSHA256(URL(fileURLWithPath: installed.executablePath)))
+        let request = AdapterRuntimeRequest(
+            schemaVersion: 1, requestID: UUID(), operation: "lifecycle",
+            deviceName: nil, arguments: ["probe": "true"]
+        )
+        let response = RuntimeAdapterHost.invoke(adapter: installed, request: request, paths: paths)
+        XCTAssertNil(response.0)
+        XCTAssertFalse(response.1.succeeded)
+    }
+
+    func testGuestAutomationRequiresAuthenticatedDeclaredCapability() {
+        let request = GuestAutomationRequest(
+            id: UUID(), action: .resetAppData, bundleIdentifier: "dev.example.app",
+            selector: nil, value: nil, timeoutSeconds: 30
+        )
+        var handshake = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.deterministicReset],
+            maximumMessageBytes: 1_048_576, authenticated: true, replayProtected: true,
+            authenticationClockSkewSeconds: 10, transport: "test", message: "test"
+        )
+        XCTAssertTrue(GuestAutomationGate.validate(request: request, handshake: handshake, policy: .strict).isEmpty)
+        handshake = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.deterministicReset],
+            maximumMessageBytes: 1_048_576, authenticated: false, replayProtected: true,
+            authenticationClockSkewSeconds: 10, transport: "test", message: "test"
+        )
+        XCTAssertFalse(GuestAutomationGate.validate(request: request, handshake: handshake, policy: .strict).isEmpty)
+    }
+
+    func testReplayValidationChecksExactFixtureAndManifestHash() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("replay-validation-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let device = expansionDevice()
+        let fixture = expansionFixture(device: device)
+        let directory = paths.stateRoot.appendingPathComponent("replay")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let manifest = FailureReplayManifest(
+            id: UUID(), schemaVersion: 1, generatedAt: .now, runID: UUID(), runName: "Replay",
+            runState: .failed, deviceNames: [device.name], appArtifactID: nil, labfile: nil,
+            environmentAssignments: [:], fixtureIDs: [fixture.id], diagnosticPaths: [],
+            screenshotPaths: [], exclusions: ["Apple firmware"]
+        )
+        let manifestURL = directory.appendingPathComponent("replay-manifest.json")
+        try HardeningJSON.save(manifest, to: manifestURL)
+        let record = FailureReplayBundleRecord(
+            id: manifest.id, generatedAt: manifest.generatedAt, runID: manifest.runID,
+            path: directory.path, manifestSHA256: try fileSHA256(manifestURL)
+        )
+        let report = ReplayValidator.validate(
+            record: record, devices: [device], artifacts: [], fixtures: [fixture],
+            environments: [], backend: .vphone
+        ).1
+        XCTAssertTrue(report.passed)
+    }
+
+    func testSymbolicationRejectsUnmatchedDSYM() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("symbolication-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let crash = root.appendingPathComponent("Fixture.crash")
+        let dSYM = root.appendingPathComponent("Fixture.dSYM")
+        try FileManager.default.createDirectory(at: dSYM.appendingPathComponent("Contents/Resources/DWARF"), withIntermediateDirectories: true)
+        try Data("UUID: 11111111-1111-1111-1111-111111111111\n0x100001234".utf8).write(to: crash)
+        let report = CrashSymbolicator.symbolicate(crash: crash, dSYM: dSYM, builds: [])
+        XCTAssertFalse(report.succeeded)
+        XCTAssertTrue(report.blockers.contains { $0.contains("dSYM") })
+    }
+
+    func testFleetControlPlanePreventsDoubleCapacityAndExpiresLeases() throws {
+        var host = FleetScheduler.localHost(capabilities: ["automation"], maximumConcurrentVMs: 1)
+        host.lastSeen = .now
+        let request = FleetJobRequest(name: "one", requiredCapabilities: ["automation"], requiredMemoryMB: 512)
+        let first = FleetControlPlane.acquire(request: request, hosts: [host], leases: [], durationSeconds: 60)
+        let lease = try XCTUnwrap(first.1)
+        XCTAssertNil(FleetControlPlane.acquire(request: request, hosts: [host], leases: [lease], durationSeconds: 60).1)
+        var expired = lease
+        expired = FleetLease(
+            id: expired.id, hostID: expired.hostID, jobName: expired.jobName,
+            createdAt: expired.createdAt, expiresAt: .distantPast, state: .active,
+            requiredCapabilities: expired.requiredCapabilities, reservedMemoryMB: expired.reservedMemoryMB
+        )
+        XCTAssertEqual(FleetControlPlane.expire([expired]).first?.state, .expired)
+    }
+
+    func testHighFidelityTimelineUsesMonotonicEventsAndReportsMissingSources() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("timeline-v11-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let start = Date(timeIntervalSinceNow: -1)
+        let run = TestRunRecord(
+            id: UUID(), kind: .deployment, name: "Timeline", packagePath: nil,
+            createdAt: start, completedAt: .now, state: .passed,
+            results: [DeviceTestResult(
+                id: UUID(), deviceName: "phone", state: .passed, message: "passed",
+                screenshotPath: "/tmp/screen.png", diagnosticBundlePath: nil,
+                startedAt: start, completedAt: .now
+            )]
+        )
+        let session = try HighFidelityTimelineBuilder.capture(
+            run: run, logs: [LogEntry(level: .info, scope: "phone", message: "ready")],
+            performance: [:], availableSources: [.hostLogs, .screenshots], paths: paths
+        )
+        XCTAssertEqual(session.events, session.events.sorted { $0.monotonicNanoseconds < $1.monotonicNanoseconds })
+        XCTAssertNotNil(session.unavailableSources[.video])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: session.artifactPath ?? ""))
+    }
+
+    func testCoverageImporterReadsLLVMReportAndFeedsGate() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("coverage-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let object: [String: Any] = ["data": [["totals": [
+            "lines": ["percent": 82.5], "functions": ["percent": 78.0], "regions": ["percent": 80.0],
+        ]]]]
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+        let record = try SourceCoverageImporter.importReport(url, sourceRevision: "deadbeef")
+        XCTAssertEqual(record.linePercent, 82.5)
+        XCTAssertEqual(record.producer, "llvm-cov")
+        var policy = FuzzAndCoveragePolicy.standard
+        policy.measuredSourceCoveragePercent = record.linePercent
+        XCTAssertTrue(EngineeringQualityEvaluator.run(policy: policy).coverageGatePassed)
+    }
+
+    func testHybridRouterUsesPhysicalTargetForPhysicalOnlyCapability() {
+        let virtual = HybridTargetRouter.virtualTargets([expansionDevice()], backendCapabilities: ["networking", "audio"])
+        let physical = ExecutionTargetRecord(
+            id: "physical", kind: .physical, name: "Test iPhone", productType: "iPhone17,3",
+            osVersion: "15.8", available: true, authorized: true,
+            capabilities: ["networking", "audio", "camera"], source: "test"
+        )
+        let decision = HybridTargetRouter.route(
+            HybridRouteRequest(iosMajor: 15, requiredCapabilities: ["camera"], preferPhysical: false),
+            targets: virtual + [physical]
+        )
+        XCTAssertEqual(decision.target?.kind, .physical)
+    }
+
+    func testPhysicalDeploymentFailsClosedForVirtualTarget() {
+        let target = ExecutionTargetRecord(
+            id: "virtual", kind: .virtual, name: "Virtual", productType: nil,
+            osVersion: "15.8", available: true, authorized: true,
+            capabilities: ["xcodeDeployment"], source: "test"
+        )
+        let result = PhysicalDeviceService.installAndLaunch(
+            app: URL(fileURLWithPath: "/tmp/Fixture.app"), on: target
+        )
+        XCTAssertFalse(result.installed)
+        XCTAssertFalse(result.launched)
+    }
+
+    func testExpansionStateRoundTripsAndCriticalActionsAreAccessible() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("expansion-state-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        var state = LabExpansionState.empty
+        state.maturity = CapabilityMaturityEvaluator.evaluate(.init(
+            adapterInstalled: false, adapterInvocationSucceeded: false,
+            guestAutomationAvailable: false, replayValidated: false,
+            symbolicationSucceeded: false, fleetLeaseActive: false, timelineCaptured: false,
+            coverageImported: false, physicalTargetDiscovered: false, approvedQualificationCount: 0
+        ))
+        try LabExpansionStore.save(state, paths: paths)
+        XCTAssertEqual(LabExpansionStore.load(paths: paths).maturity.count, 10)
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/LabExpansionView.swift"), encoding: .utf8
+        )
+        for identifier in [
+            "expansion.refresh", "expansion.qualification-record", "expansion.adapter-install",
+            "expansion.symbolicate", "expansion.fleet-lease", "expansion.timeline-capture",
+            "expansion.coverage-import", "expansion.physical-discover",
+            "expansion.physical-deploy",
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)\")"), identifier)
+        }
+    }
+
+    func testGuestCompanionLifecycleVerifiesInstallsAndRollsBack() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("companion-depth-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try paths.createDirectories()
+        let sourcePayload = root.appendingPathComponent("guest-source.bin")
+        try Data("one".utf8).write(to: sourcePayload)
+        let firstBundle = try GuestCompanionLifecycleManager.buildPackage(
+            payload: sourcePayload, identifier: "vdl-guest", version: "1.0.0",
+            supportedBackendIDs: [BackendDescriptor.vphone.id],
+            outputRoot: root.appendingPathComponent("Built", isDirectory: true)
+        )
+        let first = try GuestCompanionLifecycleManager.install(
+            package: firstBundle, backendID: BackendDescriptor.vphone.id, existing: [], paths: paths
+        )
+        XCTAssertTrue(first.active)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstBundle.appendingPathComponent("companion-manifest.json.lock").path))
+
+        let secondBundle = try makeCompanionPackage(root: root, version: "1.1.0", payload: Data("two".utf8))
+        let secondManifestURL = secondBundle.appendingPathComponent("companion-manifest.json")
+        let secondManifest = try JSONDecoder().decode(
+            GuestCompanionManifest.self, from: Data(contentsOf: secondManifestURL)
+        )
+        let uppercaseManifest = GuestCompanionManifest(
+            schemaVersion: secondManifest.schemaVersion, identifier: secondManifest.identifier,
+            version: secondManifest.version, protocolMinimum: secondManifest.protocolMinimum,
+            protocolMaximum: secondManifest.protocolMaximum, payloadPath: secondManifest.payloadPath,
+            payloadSHA256: secondManifest.payloadSHA256.uppercased(),
+            supportedBackendIDs: secondManifest.supportedBackendIDs
+        )
+        try JSONEncoder().encode(uppercaseManifest).write(to: secondManifestURL)
+        let second = try GuestCompanionLifecycleManager.install(
+            package: secondBundle, backendID: BackendDescriptor.vphone.id, existing: [first], paths: paths
+        )
+        XCTAssertEqual(second.payloadSHA256, second.payloadSHA256.lowercased())
+        let activated = GuestCompanionLifecycleManager.activate(second, in: [first, second])
+        XCTAssertEqual(activated.first(where: \.active)?.version, "1.1.0")
+        let rolledBack = try GuestCompanionLifecycleManager.rollback(second, in: activated)
+        XCTAssertEqual(rolledBack.first(where: \.active)?.version, "1.0.0")
+
+        try Data("tampered".utf8).write(to: URL(fileURLWithPath: first.payloadPath))
+        XCTAssertThrowsError(try GuestCompanionLifecycleManager.rollback(second, in: rolledBack))
+    }
+
+    func testSigningManagerFailsClosedWithoutProvisioningProfile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("signing-depth-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = root.appendingPathComponent("Fixture.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: app.appendingPathComponent("Fixture"))
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "dev.virtualdevicelab.fixture", "CFBundleExecutable": "Fixture",
+            "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
+        ]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: app.appendingPathComponent("Info.plist"))
+        let signed = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+            arguments: ["--force", "--deep", "--sign", "-", app.path], timeout: 30
+        )
+        XCTAssertTrue(signed.succeeded, signed.output)
+        let assessment = SigningProvisioningManager.inspect(app: app)
+        XCTAssertTrue(assessment.signatureValid)
+        XCTAssertFalse(assessment.provisioningValid)
+        XCTAssertFalse(assessment.passed)
+        XCTAssertEqual(assessment.bundleIdentifier, "dev.virtualdevicelab.fixture")
+        XCTAssertEqual(assessment.checks.first(where: { $0.id == "provisioning-profile" })?.passed, false)
+    }
+
+    func testPhysicalDeviceLeasesAreExclusiveAndExpire() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let first = try PhysicalDeviceLifecycleService.acquireLease(
+            targetID: "device-1", owner: "operator-a", duration: 600, existing: [], now: now
+        )
+        XCTAssertThrowsError(try PhysicalDeviceLifecycleService.acquireLease(
+            targetID: "device-1", owner: "operator-b", duration: 600, existing: [first], now: now
+        ))
+        let normalized = PhysicalDeviceLifecycleService.normalize([first], now: now.addingTimeInterval(601))
+        XCTAssertEqual(normalized.first?.state, .expired)
+        XCTAssertNoThrow(try PhysicalDeviceLifecycleService.acquireLease(
+            targetID: "device-1", owner: "operator-b", duration: 600, existing: normalized, now: now.addingTimeInterval(601)
+        ))
+    }
+
+    func testVisualAndAccessibilityRegressionsProduceEvidence() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("visual-depth-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let baseline = root.appendingPathComponent("baseline.png")
+        let candidate = root.appendingPathComponent("candidate.png")
+        try makePNG(baseline, width: 2, height: 2, pixels: [
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+        ])
+        try makePNG(candidate, width: 2, height: 2, pixels: [
+            255, 0, 0, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+        ])
+        let report = try VisualRegressionEngine.compare(
+            baseline: baseline, candidate: candidate, perChannelThreshold: 0,
+            maximumChangedPercent: 20, outputRoot: root
+        )
+        XCTAssertFalse(report.passed)
+        XCTAssertEqual(report.changedPixels, 1)
+        XCTAssertEqual(report.changedPercent, 25, accuracy: 0.001)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(report.diffPath)))
+
+        let left = AccessibilityNode(id: "root", role: "window", label: "A", value: nil, enabled: true, frame: nil, children: [])
+        let right = AccessibilityNode(id: "root", role: "window", label: "B", value: nil, enabled: true, frame: nil, children: [
+            AccessibilityNode(id: "button", role: "button", label: "Play", value: nil, enabled: true, frame: nil, children: [])
+        ])
+        let accessibility = VisualRegressionEngine.compareAccessibility(left, right)
+        XCTAssertFalse(accessibility.passed)
+        XCTAssertEqual(accessibility.addedIdentifiers, ["button"])
+        XCTAssertEqual(accessibility.changedNodes, 1)
+    }
+
+    func testFaultInjectionRequiresAuthenticatedV3Capability() {
+        let scenario = FaultInjectionScenario(
+            id: UUID(), name: "loss", domain: .network, durationSeconds: 30,
+            latencyMilliseconds: 100, packetLossPercent: 5, offline: false,
+            proxyURL: nil, audioFault: nil, audioRoute: nil
+        )
+        XCTAssertFalse(FaultInjectionGate.validate(scenario: scenario, handshake: .unavailable).isEmpty)
+        let ready = GuestProtocolHandshake(
+            status: .compatible, negotiatedVersion: 3, minimumSupportedVersion: 1,
+            maximumSupportedVersion: 3, capabilities: [.faultInjection], maximumMessageBytes: 1_048_576,
+            authenticated: true, replayProtected: true, authenticationClockSkewSeconds: 0,
+            transport: "test", message: "ready"
+        )
+        XCTAssertTrue(FaultInjectionGate.validate(scenario: scenario, handshake: ready).isEmpty)
+        let invalid = FaultInjectionScenario(
+            id: UUID(), name: "bad", domain: .network, durationSeconds: 30,
+            latencyMilliseconds: 0, packetLossPercent: 101, offline: false,
+            proxyURL: "file:///tmp/proxy", audioFault: nil, audioRoute: nil
+        )
+        XCTAssertEqual(FaultInjectionGate.validate(scenario: invalid, handshake: ready).count, 2)
+    }
+
+    func testMTLSEnrollmentValidationIsStrict() {
+        let good = MTLSEnrollmentConfiguration(
+            endpoint: "https://fleet.example.test/api", agentID: "mac-agent",
+            clientIdentityLabel: "VDL Agent", serverCertificateSHA256Pins: [String(repeating: "a", count: 64)],
+            requestTimeoutSeconds: 30
+        )
+        XCTAssertTrue(MTLSEnrollmentValidator.validate(good).isEmpty)
+        let bad = MTLSEnrollmentConfiguration(
+            endpoint: "http://user:pass@fleet.example.test", agentID: "../agent",
+            clientIdentityLabel: "", serverCertificateSHA256Pins: ["short"], requestTimeoutSeconds: 1
+        )
+        XCTAssertGreaterThanOrEqual(MTLSEnrollmentValidator.validate(bad).count, 1)
+    }
+
+    func testSQLiteEventStoreMigratesIdempotentlyWithIntegrity() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sqlite-depth-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ScalableEventStore(url: root.appendingPathComponent("lab-events.sqlite3"))
+        let log = LogEntry(level: .info, scope: "test", message: "durable")
+        let first = try store.migrate(logs: [log], testRuns: [], fleetLeases: [], physicalLeases: [])
+        let second = try store.migrate(logs: [log], testRuns: [], fleetLeases: [], physicalLeases: [])
+        XCTAssertTrue(first.integrityPassed)
+        XCTAssertEqual(first.journalMode.lowercased(), "wal")
+        XCTAssertEqual(second.rowCount, 1)
+        let records = try store.latest(category: "activity")
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.payloadSHA256, dataSHA256(records.first?.payload ?? Data()))
+        try store.checkpoint()
+    }
+
+    func testRuntimeCertificateRequiresExactApprovedTuple() throws {
+        let sealID = UUID()
+        let tuple = RuntimeCompatibilityTuple(
+            hostModel: "Mac16,12", macOSVersion: "26.3", backendID: "backend",
+            backendVersion: "1.0.0", guestCompanionID: "guest", guestCompanionVersion: "3.0.0",
+            adapterID: "adapter", adapterVersion: "1.0.0", labSchemaVersion: 8
+        )
+        let campaign = QualificationCampaign(
+            id: UUID(), deviceName: "phone", firmwareSHA256: String(repeating: "a", count: 64),
+            hardwareProfileID: "iphone-x", hostFingerprint: "host", backendID: "backend",
+            backendVersion: "1.0.0", createdAt: .now, completedAt: .now, state: .passed,
+            blockers: [], acceptance: .empty, evidenceSealID: sealID
+        )
+        let seal = EvidenceSeal(
+            id: sealID, schemaVersion: 1, createdAt: .now, subject: "suite", hostFingerprint: "host",
+            appVersion: "0.12.0", backendID: "backend", backendVersion: "1.0.0",
+            payloadSHA256: String(repeating: "b", count: 64), previousSealSHA256: nil,
+            signingPublicKey: "public", signature: "signature", reviewState: .approved,
+            reviewer: "reviewer", reviewedAt: .now, reviewNote: "approved"
+        )
+        let certificate = try RuntimeCompatibilityCertificationEngine.issue(
+            tuple: tuple, campaign: campaign, seal: seal, suiteData: Data("suite".utf8)
+        )
+        XCTAssertTrue(RuntimeCompatibilityCertificationEngine.evaluate(candidate: tuple, certificates: [certificate]).allowed)
+        let changed = RuntimeCompatibilityTuple(
+            hostModel: tuple.hostModel, macOSVersion: tuple.macOSVersion, backendID: tuple.backendID,
+            backendVersion: "1.0.1", guestCompanionID: tuple.guestCompanionID,
+            guestCompanionVersion: tuple.guestCompanionVersion, adapterID: tuple.adapterID,
+            adapterVersion: tuple.adapterVersion, labSchemaVersion: tuple.labSchemaVersion
+        )
+        XCTAssertFalse(RuntimeCompatibilityCertificationEngine.evaluate(candidate: changed, certificates: [certificate]).allowed)
+    }
+
+    func testCIMaintenanceAuditorRejectsMutableAndOldActions() throws {
+        let repository = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let passing = CIMaintenanceAuditor.inspect(repositoryRoot: repository)
+        XCTAssertTrue(passing.passed, passing.message + " \(passing.unpinnedActionReferences) \(passing.deprecatedActionReferences)")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ci-depth-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workflows = root.appendingPathComponent(".github/workflows", isDirectory: true)
+        try FileManager.default.createDirectory(at: workflows, withIntermediateDirectories: true)
+        try "steps:\n  - uses: actions/checkout@v4\n  - uses: github/codeql-action/init@main\n".write(
+            to: workflows.appendingPathComponent("ci.yml"), atomically: true, encoding: .utf8
+        )
+        let failing = CIMaintenanceAuditor.inspect(repositoryRoot: root)
+        XCTAssertFalse(failing.passed)
+        XCTAssertEqual(failing.unpinnedActionReferences.count, 2)
+        XCTAssertEqual(failing.deprecatedActionReferences.count, 2)
+    }
+
+    func testOperatorRunbooksAndProductionDepthIdentifiersAreComplete() throws {
+        XCTAssertEqual(OperatorRunbookCatalog.builtIns.count, 6)
+        let context = OperatorRunbookContext(
+            migrationBackupAvailable: true, remoteAgentKeyringAvailable: true,
+            fleetDrainControlAvailable: true, evidenceLedgerValid: true,
+            updateRollbackAvailable: true, physicalLeaseControlAvailable: true
+        )
+        for runbook in OperatorRunbookCatalog.builtIns {
+            XCTAssertNotNil(OperatorRunbookCatalog.documentationURL(for: runbook), runbook.id)
+            XCTAssertTrue(OperatorRunbookCatalog.drill(runbook, context: context).passed, runbook.id)
+        }
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/ProductionDepthView.swift"), encoding: .utf8
+        )
+        for identifier in [
+            "depth.companion.import", "depth.companion.build", "depth.signing.stage", "depth.visual.compare",
+            "depth.fault.inject", "depth.mtls.probe", "depth.sqlite.migrate",
+            "depth.upgrade.evaluate", "depth.ci.audit", "depth.runbook."
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)"), identifier)
+        }
+    }
+
+    func testContinuityCriticalActionsHaveAccessibilityIdentifiers() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/LabContinuityView.swift"),
+            encoding: .utf8
+        )
+        for identifier in [
+            "continuity.refresh", "continuity.storage-relink", "continuity.fixture-record",
+            "continuity.labfile-apply", "continuity.capacity-calibrate", "continuity.hostile-inputs",
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)\")"), identifier)
+        }
+    }
+
+    func testV1SupportContractMustPinIOSProfileAndWorkflows() {
+        XCTAssertFalse(SupportContractValidator.evaluate(.draft).allSatisfy(\.passed))
+        var contract = V1SupportContract.draft
+        contract.supportedIOSVersions = ["15", "15"]
+        contract.hardwareProfileIDs = ["iphone-x"]
+        let candidate = SupportContractValidator.candidate(contract)
+        XCTAssertEqual(candidate.status, .candidate)
+        XCTAssertEqual(candidate.supportedIOSVersions, ["15"])
+        XCTAssertTrue(SupportContractValidator.evaluate(candidate).allSatisfy(\.passed))
+    }
+
+    func testGuestCompanionSourceAuditorRequiresConcreteModulesAndContract() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("guest-audit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = root.appendingPathComponent("sources/vphone-cli/VPhoneHostControl.swift")
+        let guest = root.appendingPathComponent("scripts/vphoned/vphoned.m")
+        try FileManager.default.createDirectory(at: host.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: guest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("// fixture".utf8).write(to: root.appendingPathComponent("Package.swift"))
+        let all = GuestCompanionSourceAuditor.requiredCapabilities.map { "\"\($0)\"" }.joined(separator: " ")
+        let guestOperations = ["deterministic_reset", "accessibility_tree", "fault_injection", "fault_clear", "fault_status"]
+            .map { "\"\($0)\"" }.joined(separator: " ")
+        try Data(all.utf8).write(to: host)
+        try Data(guestOperations.utf8).write(to: guest)
+        try Data("vp_handle_reset_command reset_app_data reset_permissions reset_keychain reset_network".utf8)
+            .write(to: root.appendingPathComponent("scripts/vphoned/vphoned_reset.m"))
+        try Data("accessibility_root".utf8)
+            .write(to: root.appendingPathComponent("scripts/vphoned/vphoned_accessibility.m"))
+        try Data("vp_handle_fault_command fault_clear fault_status".utf8)
+            .write(to: root.appendingPathComponent("scripts/vphoned/vphoned_faults.m"))
+        let contract = try JSONSerialization.data(withJSONObject: ["guestCapabilities": GuestCompanionSourceAuditor.requiredCapabilities])
+        try contract.write(to: root.appendingPathComponent("sources/vdl-backend-contract.json"))
+        for arguments in [
+            ["-C", root.path, "init"],
+            ["-C", root.path, "add", "."],
+            ["-C", root.path, "-c", "user.name=VDL Test", "-c", "user.email=vdl@example.invalid", "commit", "-m", "fixture"],
+        ] {
+            let result = ProcessExecutor.run(executable: URL(fileURLWithPath: "/usr/bin/git"), arguments: arguments)
+            XCTAssertTrue(result.succeeded, result.output)
+        }
+        let report = GuestCompanionSourceAuditor.inspect(repositoryRoot: root)
+        XCTAssertTrue(report.passed, report.checks.filter { !$0.passed }.map(\.id).joined(separator: ", "))
+        XCTAssertEqual(report.sourceRevision?.count, 40)
+    }
+
+    func testUIAutomationEvidenceImporterRejectsMissingIdentifiersAndPinsValidReport() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ui-evidence-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        func writeReport(identifiers: [String], name: String) throws -> URL {
+            let checks = identifiers.map { UIAutomationEvidenceCheck(id: "identifier:\($0)", passed: true, evidence: "observed") }
+            let report = UIAutomationEvidence(
+                schemaVersion: 1, id: UUID(), generatedAt: .now, appPath: "/Applications/VDL.app",
+                appVersion: "1.0.0", sourceRevision: String(repeating: "a", count: 40), harnessVersion: "1.0.0",
+                checks: checks, observedIdentifiers: identifiers, passed: true, reportSHA256: nil
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let url = root.appendingPathComponent(name)
+            try encoder.encode(report).write(to: url)
+            return url
+        }
+        XCTAssertThrowsError(try UIAutomationEvidenceImporter.load(writeReport(
+            identifiers: Array(UIAutomationEvidenceImporter.requiredIdentifiers.dropLast()), name: "incomplete.json"
+        )))
+        let imported = try UIAutomationEvidenceImporter.load(writeReport(
+            identifiers: UIAutomationEvidenceImporter.requiredIdentifiers, name: "valid.json"
+        ))
+        XCTAssertTrue(imported.passed)
+        XCTAssertEqual(imported.reportSHA256?.count, 64)
+    }
+
+    func testFaultRecoveryReceiptRequiresClearStatusAndEmptyFaultList() async {
+        let backend = MockLabBackend()
+        let receipt = await backend.recoverFaults(scenarioID: UUID(), on: expansionDevice())
+        XCTAssertTrue(receipt.recovered)
+        XCTAssertTrue(receipt.remainingFaults.isEmpty)
+        XCTAssertTrue(receipt.completedAt >= receipt.requestedAt)
+    }
+
+    func testFleetRBACRequiresPinsSeparationAndLeastPrivilege() {
+        let pinA = String(repeating: "a", count: 64)
+        let pinB = String(repeating: "b", count: 64)
+        let policy = FleetAccessPolicy(
+            schemaVersion: 1,
+            principals: [
+                FleetPrincipal(id: UUID(), subject: "operator", role: .operatorRole, certificateSHA256: pinA, enabled: true),
+                FleetPrincipal(id: UUID(), subject: "administrator", role: .administrator, certificateSHA256: pinB, enabled: true),
+            ],
+            requirePinnedClientCertificate: true, requireDistinctOperatorAndAdministrator: true, updatedAt: .now
+        )
+        XCTAssertTrue(FleetAuthorizationEvaluator.evaluate(policy).allSatisfy(\.passed))
+        XCTAssertTrue(FleetAuthorizationEvaluator.authorize(subject: "operator", certificateSHA256: pinA, permission: .submitJob, policy: policy))
+        XCTAssertFalse(FleetAuthorizationEvaluator.authorize(subject: "operator", certificateSHA256: pinA, permission: .rotateCredentials, policy: policy))
+    }
+
+    func testFleetQualificationRequiresTwoHostsAndEveryTransportControl() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fleet-evidence-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let exercise = FleetQualificationExercise(
+            schemaVersion: 1, id: UUID(), startedAt: Date(timeIntervalSince1970: 10), completedAt: Date(timeIntervalSince1970: 20),
+            controllerHostID: "mac-a", agentHostIDs: ["mac-b"], mutualTLSVerified: true,
+            heartbeatVerified: true, leaseExpiryVerified: true, cancellationVerified: true,
+            dispatchAuditVerified: true, requestCorrelationVerified: true, passed: true, reportSHA256: nil
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let url = root.appendingPathComponent("exercise.json")
+        try encoder.encode(exercise).write(to: url)
+        let imported = try FleetQualificationImporter.load(url)
+        XCTAssertTrue(imported.passed)
+        XCTAssertEqual(imported.reportSHA256?.count, 64)
+    }
+
+    func testReliabilityCampaignRequiresSoakAndRecoveredInterruptions() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("reliability-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let results = ReliabilityScenarioKind.allCases.map {
+            ReliabilityScenarioResult(
+                id: UUID(), scenario: $0, startedAt: Date(timeIntervalSince1970: 10),
+                completedAt: Date(timeIntervalSince1970: 20), passed: true, recoveryVerified: true,
+                evidence: "fixture recovered"
+            )
+        }
+        let campaign = ReliabilityCampaignEvidence(
+            schemaVersion: 1, id: UUID(), hostFingerprint: "host-a", backendID: BackendDescriptor.vphone.id,
+            backendVersion: "0.8.0", startedAt: Date(timeIntervalSince1970: 10),
+            completedAt: Date(timeIntervalSince1970: 86_500), soakHours: 24,
+            scenarios: results, passed: true, reportSHA256: nil
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let url = root.appendingPathComponent("campaign.json")
+        try encoder.encode(campaign).write(to: url)
+        XCTAssertTrue(try ReliabilityCampaignManager.loadEvidence(url).passed)
+    }
+
+    func testCoverageRatchetAdvancesOnlyWithCoverageAndRealUIEvidence() throws {
+        let coverage = SourceCoverageRecord(
+            id: UUID(), importedAt: .now, sourceRevision: nil, producer: "llvm-cov", sourcePath: "/tmp/report.json",
+            sourceSHA256: String(repeating: "c", count: 64), linePercent: 80, functionPercent: 80, regionPercent: 80
+        )
+        let checks = (0..<8).map { UIAutomationEvidenceCheck(id: "check-\($0)", passed: true, evidence: "pass") }
+        let ui = UIAutomationEvidence(
+            schemaVersion: 1, id: UUID(), generatedAt: .now, appPath: "/Applications/VDL.app", appVersion: "1.0.0",
+            sourceRevision: nil, harnessVersion: "1.0.0", checks: checks,
+            observedIdentifiers: UIAutomationEvidenceImporter.requiredIdentifiers, passed: true, reportSHA256: String(repeating: "d", count: 64)
+        )
+        XCTAssertThrowsError(try CoverageRatchet.advance(.standard, coverage: nil, uiEvidence: ui))
+        let advanced = try CoverageRatchet.advance(.standard, coverage: coverage, uiEvidence: ui)
+        XCTAssertEqual(advanced.currentOverallFloor, 30)
+        XCTAssertEqual(advanced.nextOverallFloor, 35)
+    }
+
+    func testReleaseCompletionEvaluatorNeverAuthorizesMissingRealEvidence() {
+        let report = ReleaseCompletionEvaluator.evaluate(
+            state: .empty,
+            context: ReleaseCompletionContext(
+                liveGuestCapabilities: [], acceptance: .empty, qualificationMatrix: [],
+                successfulFaultScenarioIDs: [], coverage: nil,
+                publicBeta: .empty, stagedUpdate: nil, secondVolumeRestoreRecorded: false
+            )
+        )
+        XCTAssertEqual(report.gates.count, 10)
+        XCTAssertFalse(report.releaseAuthorized)
+        XCTAssertTrue(report.gates.allSatisfy { !$0.passed })
+    }
+
+    func testUITestRootIsConfinedToTemporaryDirectory() {
+        let temporary = URL(fileURLWithPath: "/tmp/vdl-tests", isDirectory: true)
+        XCTAssertEqual(
+            LabPaths.uiTestRoot(
+                arguments: ["app", "--vdl-ui-test-root", "/tmp/vdl-tests/run-1"],
+                temporaryDirectory: temporary
+            )?.path,
+            "/tmp/vdl-tests/run-1"
+        )
+        XCTAssertNil(
+            LabPaths.uiTestRoot(
+                arguments: ["app", "--vdl-ui-test-root", "/Volumes/external"],
+                temporaryDirectory: temporary
+            )
+        )
+        XCTAssertNil(
+            LabPaths.uiTestRoot(
+                arguments: ["app", "--vdl-ui-test-root", "/tmp/vdl-tests/../escape"],
+                temporaryDirectory: temporary
+            )
+        )
+    }
+
+    func testReleaseCompletionStatePersistsAndCriticalActionsAreAccessible() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("completion-state-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = makePaths(root: root)
+        try FileManager.default.createDirectory(at: paths.stateRoot, withIntermediateDirectories: true)
+        var state = ReleaseCompletionState.empty
+        state.supportContract.hardwareProfileIDs = ["iphone-x"]
+        try ReleaseCompletionStore.save(state, paths: paths)
+        XCTAssertEqual(ReleaseCompletionStore.load(paths: paths).supportContract.hardwareProfileIDs, ["iphone-x"])
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Sources/IOSVirtualDeviceLab/Views/ReleaseCompletionView.swift"), encoding: .utf8
+        )
+        for identifier in [
+            "completion.contract.save", "completion.companion.audit", "completion.ui.import",
+            "completion.fault.clear", "completion.fleet.policy", "completion.evaluate",
+        ] {
+            XCTAssertTrue(source.contains("accessibilityIdentifier(\"\(identifier)\")"), identifier)
+        }
+    }
+
+    private func makeCompanionPackage(root: URL, version: String, payload: Data) throws -> URL {
+        let package = root.appendingPathComponent("companion-\(version)", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        let payloadURL = package.appendingPathComponent("guest-agent.bin")
+        try payload.write(to: payloadURL)
+        let manifest = GuestCompanionManifest(
+            schemaVersion: 1, identifier: "vdl-guest", version: version,
+            protocolMinimum: 3, protocolMaximum: 3, payloadPath: payloadURL.lastPathComponent,
+            payloadSHA256: dataSHA256(payload), supportedBackendIDs: [BackendDescriptor.vphone.id]
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(manifest).write(to: package.appendingPathComponent("companion-manifest.json"))
+        return package
+    }
+
+    private func makePNG(_ url: URL, width: Int, height: Int, pixels: [UInt8]) throws {
+        XCTAssertEqual(pixels.count, width * height * 4)
+        var bytes = pixels
+        let image: CGImage? = bytes.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return nil }
+            return context.makeImage()
+        }
+        let representation = NSBitmapImageRep(cgImage: try XCTUnwrap(image))
+        let data = try XCTUnwrap(representation.representation(using: .png, properties: [:]))
+        try data.write(to: url)
+    }
+
+    private func dataSHA256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func testHost() -> HostReadiness {
+        HostReadiness(
+            state: .ready, macOSVersion: "26.3", model: "Mac16,12", architecture: "arm64",
+            sipStatus: "enabled", researchGuestsStatus: "enabled", binaryPath: "/mock/vphone-cli",
+            binaryExitCode: 0, nestedVirtualization: true, checkedAt: .now
+        )
+    }
+
+    private func expansionDevice() -> VirtualDevice {
+        VirtualDevice(
+            name: "expansion-phone", cpuCount: 4, memoryMB: 4_096,
+            diskSizeBytes: 32 * 1_073_741_824,
+            network: NetworkReport(mode: "nat", macAddress: nil, bridgeInterface: nil),
+            restoreInfo: RestoreInfoReport(
+                ios: OSVersionReport(version: "15.8", build: "19H370"),
+                cloudOS: OSVersionReport(version: "15.8", build: "19H370"),
+                variant: "regular", device: "iPhone10,6"
+            ), udid: nil, bundleURL: URL(fileURLWithPath: "/tmp/expansion-phone"),
+            diskURL: URL(fileURLWithPath: "/tmp/expansion-phone/Disk.img"),
+            isRunning: false, hardwareProfileID: "iphone-x"
+        )
+    }
+
+    private func expansionFixture(device: VirtualDevice) -> CanonicalVMFixture {
+        CanonicalVMFixture(
+            id: UUID(), schemaVersion: 1, name: "Expansion", createdAt: .now,
+            deviceName: device.name, deviceProductType: device.restoreInfo?.device ?? "unknown",
+            firmwareSHA256: String(repeating: "a", count: 64), cloudOSFirmwareSHA256: nil,
+            hardwareProfileID: device.hardwareProfileID ?? "unknown", backendID: BackendDescriptor.vphone.id,
+            backendVersion: "0.8.0", guestProtocolVersion: 3,
+            snapshotSHA256: String(repeating: "b", count: 64), smokeAppSHA256: nil,
+            acceptanceGeneratedAt: .now, acceptanceGateIDs: AcceptanceGateKind.allCases.map(\.rawValue)
+        )
+    }
+
+    private func makeSignedFixtureApp(_ app: URL) throws {
+        let contents = app.appendingPathComponent("Contents")
+        let macOS = contents.appendingPathComponent("MacOS")
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: macOS.appendingPathComponent("Fixture"))
+        let plist: [String: Any] = [
+            "CFBundleIdentifier": "dev.virtualdevicelab.fixture",
+            "CFBundleExecutable": "Fixture", "CFBundlePackageType": "APPL",
+            "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: contents.appendingPathComponent("Info.plist"))
+        let signed = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+            arguments: ["--force", "--deep", "--sign", "-", app.path], timeout: 30
+        )
+        XCTAssertTrue(signed.succeeded, signed.output)
     }
 
     private func makePaths(root: URL) -> LabPaths {
@@ -221,5 +2227,34 @@ final class IOSVirtualDeviceLabTests: XCTestCase {
             snapshotsRoot: root.appendingPathComponent("Snapshots"),
             stateRoot: root.appendingPathComponent("VirtualDeviceLab")
         )
+    }
+
+    private func makeLegacyBackup(directory: URL, passphrase: String) throws -> URL {
+        let zip = directory.deletingLastPathComponent().appendingPathComponent("legacy.zip")
+        let archive = ProcessExecutor.run(
+            executable: URL(fileURLWithPath: "/usr/bin/ditto"),
+            arguments: ["-c", "-k", "--keepParent", directory.path, zip.path]
+        )
+        XCTAssertTrue(archive.succeeded, archive.output)
+        let salt = Data(repeating: 0xA5, count: 16)
+        let rounds: UInt32 = 120_000
+        var digest = Data(SHA256.hash(data: Data(passphrase.utf8) + salt))
+        for _ in 1..<rounds { digest = Data(SHA256.hash(data: digest + salt)) }
+        let sealed = try AES.GCM.seal(Data(contentsOf: zip), using: SymmetricKey(data: digest))
+        let combined = try XCTUnwrap(sealed.combined)
+        var container = Data("VDLBACKUP1\n".utf8)
+        container.append(salt)
+        container.append(bigEndianData(rounds))
+        container.append(bigEndianData(UInt32(combined.count)))
+        container.append(combined)
+        container.append(bigEndianData(0))
+        let destination = directory.deletingLastPathComponent().appendingPathComponent("legacy.vdlbackup")
+        try container.write(to: destination, options: .atomic)
+        return destination
+    }
+
+    private func bigEndianData(_ value: UInt32) -> Data {
+        var encoded = value.bigEndian
+        return withUnsafeBytes(of: &encoded) { Data($0) }
     }
 }

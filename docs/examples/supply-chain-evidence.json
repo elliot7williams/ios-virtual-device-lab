@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "sourceRevision": "0000000",
+  "provenanceVerified": false,
+  "components": [
+    {
+      "id": "pkg:generic/example@0.0.0",
+      "name": "Replace with a generated component record",
+      "version": "0.0.0",
+      "licenses": [],
+      "maximumSeverity": "unknown",
+      "vulnerabilityIDs": []
+    }
+  ]
+}
