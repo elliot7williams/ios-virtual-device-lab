@@ -57,6 +57,24 @@ final class OperationsHardeningTests: XCTestCase {
         XCTAssertEqual(FleetWorkerProtocolEvaluator.validate(evidence), [])
     }
 
+    func testFleetProtocolAcceptsQualifiedOneTwoButRejectsUnknownVersions() {
+        XCTAssertEqual(FleetWorkerProtocolEvaluator.validate(passingFleetEvidence(serverVersion: "1.2.0")), [])
+        for version in ["1.0.0", "1.3.0", "2.0.0", "1.2.not-a-version"] {
+            XCTAssertTrue(FleetWorkerProtocolEvaluator.validate(passingFleetEvidence(serverVersion: version)).contains {
+                $0.contains("fleet server")
+            })
+        }
+    }
+
+    func testLifecycleIncludesCurrentManagerAndSchema() {
+        XCTAssertTrue(SupportLifecyclePolicy.standard.entries.contains {
+            $0.id == "manager-0.15" && $0.status == .supported
+        })
+        XCTAssertTrue(SupportLifecyclePolicy.standard.entries.contains {
+            $0.id == "state-schema-11" && $0.status == .supported
+        })
+    }
+
     func testAuditHashChainDetectsTampering() throws {
         let first = auditEnvelope(sequence: 1, previous: String(repeating: "0", count: 64), record: "{\"event\":1}")
         let second = auditEnvelope(sequence: 2, previous: first.recordHash, record: "{\"event\":2}")
@@ -250,9 +268,9 @@ final class OperationsHardeningTests: XCTestCase {
         XCTAssertEqual(loaded.supplyChainPolicy, state.supplyChainPolicy)
     }
 
-    private func passingFleetEvidence() -> FleetWorkerProtocolEvidence {
+    private func passingFleetEvidence(serverVersion: String = "1.1.0") -> FleetWorkerProtocolEvidence {
         FleetWorkerProtocolEvidence(
-            schemaVersion: 1, generatedAt: .now, serverVersion: "1.1.0",
+            schemaVersion: 1, generatedAt: .now, serverVersion: serverVersion,
             controllerHostID: "controller", workerHostIDs: ["worker"],
             capabilities: Set(FleetWorkerCapability.allCases), mutuallyAuthenticated: true,
             idempotencyVerified: true, cancellationVerified: true,

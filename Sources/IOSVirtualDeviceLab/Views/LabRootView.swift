@@ -45,7 +45,11 @@ struct LabRootView: View {
                         Task { await model.recheckHost() }
                     }
                     Divider()
-                    sectionContent
+                    if model.storageRescueActive {
+                        BootstrapRescueView()
+                    } else {
+                        sectionContent
+                    }
                 }
                 .frame(
                     width: geometry.size.width,
@@ -75,6 +79,7 @@ struct LabRootView: View {
                 .accessibilityLabel("Create a new virtual device")
                 .accessibilityIdentifier("lab.create-device")
                 .keyboardShortcut("n", modifiers: .command)
+                .disabled(model.storageRescueActive)
             }
         }
         .sheet(isPresented: $showingCreateVM) {
@@ -129,6 +134,8 @@ struct LabRootView: View {
             ReleaseCompletionView()
         case .operationsHardening:
             OperationsHardeningView()
+        case .evolution:
+            LabEvolutionView()
         case .productionReadiness:
             ProductionReadinessView()
         case .developerTools:

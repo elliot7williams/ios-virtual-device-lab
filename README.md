@@ -45,6 +45,7 @@ A native macOS SwiftUI laboratory for virtual iOS research and cross-version app
 - A Production Depth workspace with build/install/upgrade/rollback for hash-pinned guest companions, signing/provisioning inspection, exclusive physical-device leases, visual/accessibility regression, typed network/audio faults, pinned mTLS fleet enrollment, SQLite/WAL event storage, exact-tuple upgrade certification, immutable CI action checks, and bundled recovery drills.
 - A fail-closed v1 Completion workspace covering the support contract, concrete guest companion, real-VM acceptance and version matrix, live macOS UI automation, verified fault cleanup, an mTLS/RBAC fleet coordinator, reliability campaigns, a coverage ratchet, and signed release exit evidence.
 - A v1.1 Operations & Hardening workspace with restart-safe host setup, permission onboarding, a complete fleet worker lifecycle, certificate-signed audit chains, transitive evidence invalidation, live-volume encryption inspection, startup reconciliation, atomic component-set activation, enforceable supply-chain policy, and dated support/deprecation rules.
+- A [v1.2 Lab Tools workspace](docs/LAB_TOOLS_V12.md) with recoverable storage startup, host-policy diagnostics, upstream revision checks, managed background services, executable version matrices, a quarantined artifact registry, local HTTP/DNS fixtures, saved-state compatibility contracts, fleet priorities/draining/retries/recovery, and XCTest/xcresult imports and reports.
 
 ## Requirements
 
@@ -100,7 +101,7 @@ To regenerate the macOS `.icns` bundle from the checked-in 1024 px master:
 To create a versioned ZIP and checksum:
 
 ```sh
-./scripts/release_app.sh 0.14.0
+./scripts/release_app.sh 0.15.0
 ```
 
 Developer ID signing and notarization are supported through `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE`; see [Release engineering](docs/RELEASES.md).

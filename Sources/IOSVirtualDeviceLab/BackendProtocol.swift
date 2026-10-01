@@ -1,4 +1,5 @@
 import Foundation
+import VDLEvolutionCore
 
 protocol LabBackend: Sendable {
     var descriptor: BackendDescriptor { get async }
@@ -99,6 +100,24 @@ protocol LabBackend: Sendable {
         destination: URL
     ) async -> DiagnosticExportResult
     func cancelAllOperations() async
+    var supportsMachineState: Bool { get async }
+    func saveMachineState(_ device: VirtualDevice, to destination: URL) async -> MachineStateOperationResult
+    func restoreMachineState(_ device: VirtualDevice, from payload: URL, manifest: SavedMachineManifest) async -> MachineStateOperationResult
+}
+
+struct MachineStateOperationResult: Sendable {
+    let succeeded: Bool
+    let message: String
+}
+
+extension LabBackend {
+    var supportsMachineState: Bool { get async { false } }
+    func saveMachineState(_ device: VirtualDevice, to destination: URL) async -> MachineStateOperationResult {
+        MachineStateOperationResult(succeeded: false, message: "\(await descriptor.name) has no qualified saved-machine-state provider. Disk snapshots remain available.")
+    }
+    func restoreMachineState(_ device: VirtualDevice, from payload: URL, manifest: SavedMachineManifest) async -> MachineStateOperationResult {
+        MachineStateOperationResult(succeeded: false, message: "This backend does not advertise machine-state restore; restoration is blocked.")
+    }
 }
 
 actor MockLabBackend: LabBackend {

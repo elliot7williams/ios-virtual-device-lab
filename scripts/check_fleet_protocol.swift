@@ -30,6 +30,7 @@ let required = Set([
     "POST /v1/jobs", "POST /v1/jobs/next/claim", "POST /v1/jobs/{id}/claim",
     "POST /v1/jobs/{id}/progress", "POST /v1/jobs/{id}/result",
     "GET /v1/jobs/{id}", "POST /v1/jobs/{id}/cancel",
+    "POST /v1/jobs/{id}/retry", "POST /v1/admin/maintenance", "POST /v1/admin/backup",
 ])
 guard required.isSubset(of: routes) else { fail("one or more required worker routes is missing") }
 print("Fleet protocol PASS — \(routes.count) authenticated routes")

@@ -1,5 +1,11 @@
 # Roadmap
 
+## v1.2 development and operations tracks (0.15)
+
+All ten accepted additions are now represented by executable surfaces in the desktop/CLI: bootstrap rescue, host-policy diagnostics, upstream tracking, managed services, version probes, artifact registry, network/time fixtures, saved-state compatibility, fleet scheduling/recovery, and XCTest/xcresult reports. See [Lab Tools v1.2](LAB_TOOLS_V12.md) for actual behavior, command examples, and qualification boundaries.
+
+Remaining work within these tracks includes a qualified RAM-state provider, direct VM XCTest destinations/runner, guest clock and transparent network/TLS simulation, distributed coordinator consensus/fencing, mid-job preemption, and certified multi-version upgrade/downgrade campaigns. These are explicit future deliverables; a workspace or passing local algorithm test does not certify them.
+
 ## Delivered in the MVP
 
 | Plan stage | Current implementation |

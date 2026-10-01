@@ -13,7 +13,7 @@ cd "$ROOT"
 "$ROOT/scripts/build_icon.sh"
 
 echo "=== Building iOS Virtual Device Lab ==="
-swift build -c release
+swift build -c release --jobs "${VDL_BUILD_JOBS:-2}"
 BIN_DIR="$(swift build -c release --show-bin-path)"
 
 echo "=== Packaging app bundle ==="
@@ -24,6 +24,9 @@ cp "$BIN_DIR/vdlctl" "$CONTENTS/MacOS/vdlctl"
 cp "$BIN_DIR/vdl-ui-smoke" "$CONTENTS/MacOS/vdl-ui-smoke"
 cp "$BIN_DIR/vdl-fleetd" "$CONTENTS/MacOS/vdl-fleetd"
 cp "$BIN_DIR/vdl-fleetworker" "$CONTENTS/MacOS/vdl-fleetworker"
+cp "$BIN_DIR/vdl-fixture" "$CONTENTS/MacOS/vdl-fixture"
+mkdir -p "$CONTENTS/Library/LaunchAgents"
+cp "$ROOT"/Resources/LaunchAgents/*.plist "$CONTENTS/Library/LaunchAgents/"
 cp "$ROOT/Info.plist" "$CONTENTS/Info.plist"
 cp "$ROOT/Assets/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 cp "$ROOT/Resources/compatibility-manifest.json" "$CONTENTS/Resources/compatibility-manifest.json"
@@ -36,6 +39,9 @@ cp "$ROOT/docs/examples/fleet-server-policy.json" "$CONTENTS/Resources/fleet-ser
 cp "$ROOT/docs/examples/fleet-worker-evidence.json" "$CONTENTS/Resources/fleet-worker-evidence.example.json"
 cp "$ROOT/docs/examples/fleet-worker.json" "$CONTENTS/Resources/fleet-worker.example.json"
 cp "$ROOT/docs/examples/supply-chain-evidence.json" "$CONTENTS/Resources/supply-chain-evidence.example.json"
+cp "$ROOT/docs/examples/network-fixture.json" "$CONTENTS/Resources/network-fixture.example.json"
+cp "$ROOT/docs/examples/scheduling-policy.json" "$CONTENTS/Resources/scheduling-policy.example.json"
+cp "$ROOT/docs/examples/version-matrix.json" "$CONTENTS/Resources/version-matrix.example.json"
 mkdir -p "$CONTENTS/Resources/Runbooks"
 cp "$ROOT"/docs/runbooks/*.md "$CONTENTS/Resources/Runbooks/"
 for localization in "$ROOT"/Resources/*.lproj; do

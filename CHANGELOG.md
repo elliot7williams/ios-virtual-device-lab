@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.15.0
+
+- Added v1.2 Lab Tools and schema 11, sharing actual implementations across desktop, CLI, fleet coordinator, and the new `vdl-fixture` executable.
+- Made missing-volume/denied-storage startup recoverable with retry, relink, and readable-file inspection; device controls are paused during recovery.
+- Added read-only host-policy/CDHash/launch diagnostics, upstream revision comparison, bundled SMAppService agents and service configuration/start/restart/unregister controls.
+- Added executable compatibility probes, SHA-256 artifact deduplication/quarantine/approval/export/resume checks, HTTP/DNS response fixtures, latency/bandwidth/loss/offline controls, and simulated-date headers.
+- Added saved-state backend contracts and exact restore compatibility checks; vphone RAM-state support remains unavailable.
+- Upgraded the coordinator to 1.2 with bounded priority/fairness/quotas/concurrency/capability admission, draining/maintenance, retries/backoff, lease renewal, an exclusive process lock, and verified recovery snapshots.
+- Added Xcode test-plan execution across explicit destinations and xcresult preservation, case import, optional evidence export, JUnit, and HTML; direct VM XCTest destinations remain unqualified.
+- Added core failure-path tests, desktop storage-reconnect coverage, and real UI workspace checks. Defaults use two build jobs to limit local memory pressure.
+
 ## 0.14.0
 
 - Added the v1.1 Operations & Hardening workspace, persisted report, schema migration 10, and `vdlctl operations status`, with ten fail-closed controls spanning host setup, permissions, fleet execution, auditing, evidence freshness, storage, recovery, upgrades, supply chain, and lifecycle policy.

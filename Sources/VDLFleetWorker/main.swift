@@ -378,7 +378,8 @@ enum VDLFleetWorker {
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.contains("--help") || arguments.contains("-h") { usage(); return }
         do {
-            guard let path = option("--config", arguments: arguments),
+            let managedPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/iOS Virtual Device Lab/Services/fleet-worker.json").path
+            guard let path = option("--config", arguments: arguments) ?? (arguments.contains("--managed") ? managedPath : nil),
                   arguments.contains("--once") || arguments.contains("--daemon") else {
                 throw WorkerError.message("--config and either --once or --daemon are required")
             }

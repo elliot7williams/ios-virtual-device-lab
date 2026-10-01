@@ -1,8 +1,9 @@
 import CryptoKit
+// Named entrypoint supports the shared evolution command implementation.
 import Darwin
 import Foundation
 
-private let cliVersion = "0.14.0"
+private let cliVersion = "0.15.0"
 
 enum CLIFileLock {
     static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
@@ -1872,6 +1873,15 @@ func usage() {
       vdlctl agent-cleanup [--queue <directory>] [--older-than-days <n>]
       vdlctl agent-health [--queue <directory>] [--token-file <path>] [--json]
       vdlctl version
+      vdlctl evolution status [--root <state-directory>]
+      vdlctl host-policy [--backend <executable>]
+      vdlctl upstream --revision <40-character-sha> [--output <json>]
+      vdlctl artifact <list|import|approve|export|resume> [--root <registry>]
+      vdlctl matrix --file <matrix.json> --allow-executable <path> [--output <json>]
+      vdlctl fixture <template|record> --output <scenario.json>
+      vdlctl fleet-recovery <backup|restore> --source <directory> --output <new-directory> --coordinator-fenced
+      vdlctl xctest import --bundle <results.xcresult> --output <new-directory>
+      vdlctl xctest run --project <project> --scheme <scheme> --destination <destination> [--destination ...] --output <directory>
     """)
 }
 
@@ -1882,6 +1892,8 @@ enum VDLCLI {
         guard let command = arguments.first else { usage(); exit(64) }
         do {
             switch command {
+            case "evolution", "host-policy", "upstream", "artifact", "matrix", "fixture", "fleet-recovery", "xctest":
+                try await EvolutionCLI.execute(command, arguments: arguments)
             case "version", "--version":
                 print(cliVersion)
             case "doctor":

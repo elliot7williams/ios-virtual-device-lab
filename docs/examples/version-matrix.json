@@ -1,0 +1,20 @@
+[
+  {
+    "id": "candidate-0.15",
+    "manager": "0.15.0",
+    "backend": "0.8.0",
+    "guestProtocol": 3,
+    "fleetProtocol": 1,
+    "stateSchema": 11,
+    "migrationFromSchema": 10,
+    "downgradeSupported": false,
+    "probes": [
+      { "component": "manager", "executable": "/Applications/iOS Virtual Device Lab.app/Contents/MacOS/vdlctl", "arguments": ["version"], "expectedOutput": "0.15.0" },
+      { "component": "backend", "executable": "/Applications/vphone-cli.app/Contents/MacOS/vphone-cli", "arguments": ["--help"], "expectedOutput": "vphone" },
+      { "component": "companion", "executable": "/Applications/iOS Virtual Device Lab.app/Contents/MacOS/IOSVirtualDeviceLab", "arguments": ["--vdl-companion-probe", "--backend-repo", "/REPLACE/WITH/vphone-cli"], "expectedOutput": "companion source conformance PASS" },
+      { "component": "fleet-server", "executable": "/Applications/iOS Virtual Device Lab.app/Contents/MacOS/vdl-fleetd", "arguments": ["--protocol-json"], "expectedOutput": "1.2.0" },
+      { "component": "fleet-worker", "executable": "/Applications/iOS Virtual Device Lab.app/Contents/MacOS/vdl-fleetworker", "arguments": ["--help"], "expectedOutput": "1.1.0" },
+      { "component": "migration", "executable": "/Applications/iOS Virtual Device Lab.app/Contents/MacOS/IOSVirtualDeviceLab", "arguments": ["--vdl-migration-probe", "--from-schema", "10"], "expectedOutput": "migration 10→11 PASS" }
+    ]
+  }
+]

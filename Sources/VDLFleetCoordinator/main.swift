@@ -2,8 +2,9 @@
 import CryptoKit
 import Foundation
 import Security
+import VDLEvolutionCore
 
-private let serverVersion = "1.1.0"
+private let serverVersion = "1.2.0"
 private let maximumRequestBytes = 1_048_576
 
 enum FleetServerError: LocalizedError {
@@ -40,6 +41,8 @@ struct FleetSubmission: Codable {
     let workflowID: String
     let deviceName: String
     let submittedAt: Date
+    let priority: Int?
+    let requiredCapabilities: [String]?
 }
 
 struct FleetAcknowledgement: Codable {
@@ -133,6 +136,8 @@ final class FleetCoordinator: @unchecked Sendable {
     private var auditCertificateSHA256: String?
     private var auditSequence: UInt64 = 0
     private var auditPreviousHash = String(repeating: "0", count: 64)
+    private var coordinatorLockFD: Int32 = -1
+    private var schedulingPolicy = FleetSchedulingPolicy()
 
     init(policy: FleetServerPolicy) throws {
         guard policy.schemaVersion == 1,
@@ -162,6 +167,15 @@ final class FleetCoordinator: @unchecked Sendable {
     }
 
     func run() throws {
+        coordinatorLockFD = open(root.appendingPathComponent("coordinator.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard coordinatorLockFD >= 0, flock(coordinatorLockFD, LOCK_EX | LOCK_NB) == 0 else {
+            throw FleetServerError.message("Another coordinator owns this state directory. Fence it before promotion.")
+        }
+        for name in ["Schedule", "Maintenance"] { try EvolutionFiles.directory(root.appendingPathComponent(name)) }
+        let policyURL = root.appendingPathComponent("scheduling-policy.json")
+        if FileManager.default.fileExists(atPath: policyURL.path) { schedulingPolicy = try EvolutionFiles.load(FleetSchedulingPolicy.self, policyURL) }
+        try schedulingPolicy.validate()
+        try adoptLegacySchedule()
         guard let identity = keychainIdentity(label: policy.serverIdentityLabel),
               let secIdentity = sec_identity_create(identity) else {
             throw FleetServerError.message("The configured server identity was not found in the Keychain.")
@@ -248,6 +262,8 @@ final class FleetCoordinator: @unchecked Sendable {
         }
         let pathComponents = request.path.split(separator: "/").map(String.init)
         let permission: String = switch (request.method, request.path, pathComponents.count) {
+        case ("POST", "/v1/admin/maintenance", _), ("POST", "/v1/admin/backup", _): "admin"
+        case ("POST", _, 4) where pathComponents.first == "v1" && pathComponents[1] == "jobs" && pathComponents[3] == "retry": "admin"
         case ("GET", "/v1/health", _): "read"
         case ("POST", "/v1/hosts/enroll", _): "enroll"
         case ("POST", "/v1/hosts/heartbeat", _): "worker"
@@ -264,6 +280,26 @@ final class FleetCoordinator: @unchecked Sendable {
             let status = permission == "unknown" ? 404 : 403
             audit(request, subject: subject, fingerprint: fingerprint, status: status, requestID: nil, jobID: nil, message: "Request was not authorized.")
             respond(connection, status: status, object: ["error": status == 404 ? "not found" : "forbidden"])
+            return
+        }
+
+        if request.path == "/v1/admin/maintenance" {
+            do {
+                let maintenance = try decode(FleetHostMaintenance.self, from: request.body)
+                guard policy.principals.contains(where: { $0.subject == maintenance.hostID }) else { throw FleetServerError.message("Unknown host subject.") }
+                try write(maintenance, to: root.appendingPathComponent("Maintenance/\(principalFile(maintenance.hostID)).json"))
+                audit(request, subject: subject, fingerprint: fingerprint, status: 200, requestID: nil, jobID: nil, message: "Host drain/maintenance policy updated.")
+                respond(connection, status: 200, object: ["ok": true])
+            } catch { reject(error, request: request, connection: connection, subject: subject, fingerprint: fingerprint) }
+            return
+        }
+        if request.path == "/v1/admin/backup" {
+            do {
+                let target = root.deletingLastPathComponent().appendingPathComponent("FleetBackups/\(UUID().uuidString)")
+                try FleetRecoveryArchive.snapshot(root: root, destination: target)
+                audit(request, subject: subject, fingerprint: fingerprint, status: 200, requestID: nil, jobID: nil, message: "Checksum-verified coordinator recovery snapshot written.")
+                respond(connection, status: 200, object: ["ok": true, "backup_path": target.path])
+            } catch { reject(error, request: request, connection: connection, subject: subject, fingerprint: fingerprint) }
             return
         }
 
@@ -307,6 +343,14 @@ final class FleetCoordinator: @unchecked Sendable {
                     throw FleetServerError.message("worker must be enrolled before heartbeat")
                 }
                 try write(heartbeat, to: root.appendingPathComponent("Hosts/\(principalFile(heartbeat.hostID)).heartbeat.json"))
+                for jobID in heartbeat.activeJobIDs {
+                    let scheduleURL = root.appendingPathComponent("Schedule/\(jobID.uuidString).json")
+                    if var schedule = try? EvolutionFiles.load(FleetScheduleEntry.self, scheduleURL), schedule.hostID == heartbeat.hostID,
+                       FileManager.default.fileExists(atPath: root.appendingPathComponent("Running/\(jobID.uuidString).json").path) {
+                        schedule.leaseExpiresAt = Date().addingTimeInterval(schedulingPolicy.leaseSeconds)
+                        try write(schedule, to: scheduleURL)
+                    }
+                }
                 let cancellations = heartbeat.activeJobIDs.filter {
                     FileManager.default.fileExists(atPath: root.appendingPathComponent("CancelRequests/\($0.uuidString).json").path)
                 }.map(\.uuidString)
@@ -323,6 +367,7 @@ final class FleetCoordinator: @unchecked Sendable {
                     throw FleetServerError.message("submission fields or timestamp are invalid")
                 }
                 try validateTimestamp(submission.submittedAt)
+                guard (-10...10).contains(submission.priority ?? 0), (submission.requiredCapabilities?.count ?? 0) <= 128 else { throw FleetServerError.message("Priority or capabilities exceed bounds.") }
                 // Use the caller's correlation UUID as the durable job UUID. A
                 // retry therefore cannot enqueue the same request twice.
                 let jobID = submission.id
@@ -339,6 +384,13 @@ final class FleetCoordinator: @unchecked Sendable {
                     return
                 }
                 let jobURL = root.appendingPathComponent("Inbox/\(jobID.uuidString).json")
+                let entries = try scheduleEntries()
+                guard entries.filter({ $0.subject == principal.subject && jobState($0.id) == "queued" }).count < schedulingPolicy.maximumQueuedPerSubject else {
+                    throw FleetServerError.message("Subject queue quota exceeded.")
+                }
+                let schedule = FleetScheduleEntry(id: jobID, subject: principal.subject, submittedAt: submission.submittedAt,
+                    priority: submission.priority ?? 0, requiredCapabilities: submission.requiredCapabilities ?? [])
+                try write(schedule, to: root.appendingPathComponent("Schedule/\(jobID.uuidString).json"))
                 try request.body.write(to: jobURL, options: [.atomic, .completeFileProtectionUnlessOpen])
                 try protect(jobURL)
                 let acknowledgement = FleetAcknowledgement(
@@ -358,19 +410,18 @@ final class FleetCoordinator: @unchecked Sendable {
                 let claim = try decode(FleetClaim.self, from: request.body)
                 try validateIdentity(claim.hostID, subject: subject)
                 try validateTimestamp(claim.claimedAt)
-                let inbox = root.appendingPathComponent("Inbox", isDirectory: true)
-                let next = try FileManager.default.contentsOfDirectory(
-                    at: inbox, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]
-                ).filter { $0.pathExtension == "json" }.sorted {
-                    let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                    let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                    return lhs < rhs
-                }.first
-                guard let next, let jobID = UUID(uuidString: next.deletingPathExtension().lastPathComponent) else {
+                let enrollment = try workerEnrollment(claim.hostID)
+                let host = (try? EvolutionFiles.load(FleetHostMaintenance.self, root.appendingPathComponent("Maintenance/\(principalFile(claim.hostID)).json")))
+                    ?? FleetHostMaintenance(hostID: claim.hostID, draining: false)
+                let entries = try scheduleEntries().filter { ["queued", "running", "cancelling"].contains(jobState($0.id) ?? "") }
+                let next = FleetScheduler.next(entries: entries, host: host, capabilities: Set(enrollment.capabilities),
+                    activeCount: entries.filter { $0.hostID == claim.hostID }.count, policy: schedulingPolicy)
+                guard let next else {
                     audit(request, subject: subject, fingerprint: fingerprint, status: 404, requestID: nil, jobID: nil, message: "No queued job is available.")
                     respond(connection, status: 404, object: ["error": "no queued job"])
                     return
                 }
+                let jobID = next.id
                 let submission = try claimJob(jobID, claim: claim)
                 audit(request, subject: subject, fingerprint: fingerprint, status: 200, requestID: submission.id, jobID: jobID, message: "Next queued job claimed by enrolled worker.")
                 respond(connection, status: 200, encodable: submission)
@@ -396,6 +447,20 @@ final class FleetCoordinator: @unchecked Sendable {
         let action = pathComponents[3]
         do {
             switch action {
+            case "retry":
+                let entryURL = root.appendingPathComponent("Schedule/\(jobID.uuidString).json")
+                let entry = try EvolutionFiles.load(FleetScheduleEntry.self, entryURL)
+                let resultURL = root.appendingPathComponent("Results/\(jobID.uuidString).json")
+                let result = try decode(FleetResult.self, from: Data(contentsOf: resultURL))
+                guard !result.succeeded, jobState(jobID) == "completed" else { throw FleetServerError.message("Only a completed failed job can be retried; expired workers require explicit fencing/recovery.") }
+                let running = try EvolutionFiles.load(FleetRunningJob.self, root.appendingPathComponent("Schedule/\(jobID.uuidString).submission.json"))
+                let retried = try FleetScheduler.retry(entry, policy: schedulingPolicy)
+                try write(retried, to: entryURL)
+                try write(running.submission, to: root.appendingPathComponent("Inbox/\(jobID.uuidString).json"))
+                try FileManager.default.removeItem(at: resultURL)
+                try? FileManager.default.removeItem(at: root.appendingPathComponent("Progress/\(jobID.uuidString).json"))
+                audit(request, subject: subject, fingerprint: fingerprint, status: 200, requestID: nil, jobID: jobID, message: "Failed job scheduled with bounded exponential backoff.")
+                respond(connection, status: 200, object: ["ok": true])
             case "claim":
                 let claim = try decode(FleetClaim.self, from: request.body)
                 try validateIdentity(claim.hostID, subject: subject)
@@ -412,6 +477,9 @@ final class FleetCoordinator: @unchecked Sendable {
                     throw FleetServerError.message("progress fields are invalid")
                 }
                 let running = try ownedRunningJob(jobID, hostID: progress.hostID)
+                guard FleetScheduler.isCurrentAttempt(reportAt: progress.sentAt, claimedAt: running.claimedAt) else {
+                    throw FleetServerError.message("Progress predates the current job attempt.")
+                }
                 let progressURL = root.appendingPathComponent("Progress/\(jobID.uuidString).json")
                 if let prior = try? decode(FleetProgress.self, from: Data(contentsOf: progressURL)),
                    progress.sequence <= prior.sequence {
@@ -442,6 +510,9 @@ final class FleetCoordinator: @unchecked Sendable {
                     return
                 }
                 let running = try ownedRunningJob(jobID, hostID: result.hostID)
+                guard FleetScheduler.isCurrentAttempt(reportAt: result.completedAt, claimedAt: running.claimedAt) else {
+                    throw FleetServerError.message("Result predates the current job attempt.")
+                }
                 let cancellation = root.appendingPathComponent("CancelRequests/\(jobID.uuidString).json")
                 let wasCancelled = FileManager.default.fileExists(atPath: cancellation.path)
                 try write(result, to: wasCancelled ? cancelledURL : resultURL)
@@ -524,10 +595,52 @@ final class FleetCoordinator: @unchecked Sendable {
             throw FleetServerError.message("job is not available to claim")
         }
         let submission = try decode(FleetSubmission.self, from: Data(contentsOf: source))
+        let enrollment = try workerEnrollment(claim.hostID)
+        let host = (try? EvolutionFiles.load(FleetHostMaintenance.self, root.appendingPathComponent("Maintenance/\(principalFile(claim.hostID)).json")))
+            ?? FleetHostMaintenance(hostID: claim.hostID, draining: false)
+        let entries = try scheduleEntries().filter { ["queued", "running", "cancelling"].contains(jobState($0.id) ?? "") }
+        guard let entry = entries.first(where: { $0.id == jobID }),
+              FleetScheduler.next(entries: [entry], host: host, capabilities: Set(enrollment.capabilities),
+                activeCount: entries.filter { $0.hostID == claim.hostID }.count, policy: schedulingPolicy) != nil else { throw FleetServerError.message("Host drain, capability, retry/backoff, or concurrency policy blocks this claim.") }
         try FileManager.default.moveItem(at: source, to: runningURL)
         let running = FleetRunningJob(submission: submission, hostID: claim.hostID, claimedAt: claim.claimedAt)
         try write(running, to: runningURL)
+        try write(running, to: root.appendingPathComponent("Schedule/\(jobID.uuidString).submission.json"))
+        var schedule = entry
+        schedule.hostID = claim.hostID; schedule.attempts += 1
+        schedule.leaseExpiresAt = Date().addingTimeInterval(schedulingPolicy.leaseSeconds)
+        try write(schedule, to: root.appendingPathComponent("Schedule/\(jobID.uuidString).json"))
         return submission
+    }
+
+    private func workerEnrollment(_ hostID: String) throws -> FleetHostEnrollment {
+        try decode(FleetHostEnrollment.self, from: Data(contentsOf: root.appendingPathComponent("Hosts/\(principalFile(hostID)).enrollment.json")))
+    }
+    private func scheduleEntries() throws -> [FleetScheduleEntry] {
+        try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("Schedule"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" && !$0.lastPathComponent.hasSuffix(".submission.json") }
+            .map { try EvolutionFiles.load(FleetScheduleEntry.self, $0) }
+    }
+    private func adoptLegacySchedule() throws {
+        for directory in ["Inbox", "Running"] {
+            let files = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(directory), includingPropertiesForKeys: nil)
+            for file in files where file.pathExtension == "json" {
+                guard let id = UUID(uuidString: file.deletingPathExtension().lastPathComponent) else { continue }
+                let destination = root.appendingPathComponent("Schedule/\(id.uuidString).json")
+                if FileManager.default.fileExists(atPath: destination.path) { continue }
+                let submission: FleetSubmission
+                var hostID: String?
+                if directory == "Running" {
+                    let running = try decode(FleetRunningJob.self, from: Data(contentsOf: file))
+                    submission = running.submission; hostID = running.hostID
+                    try write(running, to: root.appendingPathComponent("Schedule/\(id.uuidString).submission.json"))
+                } else { submission = try decode(FleetSubmission.self, from: Data(contentsOf: file)) }
+                var entry = FleetScheduleEntry(id: id, subject: "legacy", submittedAt: submission.submittedAt, priority: submission.priority ?? 0,
+                    requiredCapabilities: submission.requiredCapabilities ?? [])
+                entry.hostID = hostID; entry.attempts = hostID == nil ? 0 : 1
+                try write(entry, to: destination)
+            }
+        }
     }
 
     private func jobState(_ jobID: UUID) -> String? {
@@ -766,6 +879,9 @@ func printProtocolManifest() {
             ["method": "POST", "path": "/v1/jobs/{id}/result", "permission": "worker"],
             ["method": "GET", "path": "/v1/jobs/{id}", "permission": "read"],
             ["method": "POST", "path": "/v1/jobs/{id}/cancel", "permission": "cancel"],
+            ["method": "POST", "path": "/v1/jobs/{id}/retry", "permission": "administrator"],
+            ["method": "POST", "path": "/v1/admin/maintenance", "permission": "administrator"],
+            ["method": "POST", "path": "/v1/admin/backup", "permission": "administrator"],
         ],
     ]
     let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
@@ -779,7 +895,8 @@ enum VDLFleetCoordinator {
         if arguments.contains("--help") || arguments.contains("-h") { usage(); return }
         if arguments.contains("--protocol-json") { printProtocolManifest(); return }
         do {
-            guard let path = value(after: "--policy", in: arguments) else {
+            let managedPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/iOS Virtual Device Lab/Services/fleet-server-policy.json").path
+            guard let path = value(after: "--policy", in: arguments) ?? (arguments.contains("--managed") ? managedPath : nil) else {
                 throw FleetServerError.message("--policy is required")
             }
             let url = URL(fileURLWithPath: path).standardizedFileURL

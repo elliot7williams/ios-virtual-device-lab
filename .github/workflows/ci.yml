@@ -20,7 +20,7 @@ jobs:
       - name: Unit tests
         run: |
           swift scripts/check_workflow_maintenance.swift .
-          swift test --enable-code-coverage
+          swift test --jobs 2 --enable-code-coverage
           coverage_report="$(swift test --show-codecov-path)"
           swift scripts/check_coverage.swift "$coverage_report" 25 65 60 85
           cp "$coverage_report" .build/coverage.json
@@ -52,6 +52,9 @@ jobs:
           test -x "$app/Contents/MacOS/vdl-ui-smoke"
           test -x "$app/Contents/MacOS/vdl-fleetd"
           test -x "$app/Contents/MacOS/vdl-fleetworker"
+          test -x "$app/Contents/MacOS/vdl-fixture"
+          plutil -lint "$app/Contents/Library/LaunchAgents/dev.vdl.fleetd.plist"
+          plutil -lint "$app/Contents/Library/LaunchAgents/dev.vdl.fleetworker.plist"
           "$app/Contents/MacOS/vdlctl" version
           "$app/Contents/MacOS/vdlctl" depth status --json
           "$app/Contents/MacOS/vdlctl" completion status --json
@@ -61,6 +64,11 @@ jobs:
           "$app/Contents/MacOS/vdl-fleetd" --protocol-json > .build/fleet-protocol.json
           swift scripts/check_fleet_protocol.swift .build/fleet-protocol.json
           "$app/Contents/MacOS/vdl-fleetworker" --help
+          "$app/Contents/MacOS/vdl-fixture" --help
+          "$app/Contents/MacOS/vdlctl" evolution status
+          "$app/Contents/MacOS/IOSVirtualDeviceLab" --vdl-version
+          "$app/Contents/MacOS/IOSVirtualDeviceLab" --vdl-migration-probe --from-schema 10
+          zsh scripts/check_fixture_smoke.sh "$app"
           "$app/Contents/MacOS/vdlctl" run --workflow boot-smoke --device ci-placeholder --dry-run --output .build/vdl-dry-run
           test -f .build/vdl-dry-run/junit.xml
           queue='.build/agent-smoke/Queue'

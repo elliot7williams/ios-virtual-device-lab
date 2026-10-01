@@ -145,17 +145,22 @@ final class LabAppModel: ObservableObject {
     @Published private(set) var availableSigningIdentities: [CodeSigningIdentityRecord] = []
     @Published private(set) var busyKeys: Set<String> = []
     @Published var alertMessage: String?
+    @Published var evolution = LabEvolutionState()
+    @Published private(set) var storageRescueActive = false
+    var fixtureProcess: Process?
 
     let paths: LabPaths
     private let backend: any LabBackend
     private var didBootstrap = false
+    private let storageRegistryURL: URL?
     private var orchestrationFlags: [UUID: OperationCancellationFlag] = [:]
     private let updateService = UpdateService()
     private var scalableEventStore: ScalableEventStore?
 
-    init(paths: LabPaths = .default, backend: (any LabBackend)? = nil) {
+    init(paths: LabPaths = .default, backend: (any LabBackend)? = nil, storageRegistryURL: URL? = nil) {
         self.paths = paths
         self.backend = backend ?? VPhoneBackend(paths: paths)
+        self.storageRegistryURL = storageRegistryURL
     }
 
     var selectedDevice: VirtualDevice? {
@@ -169,15 +174,18 @@ final class LabAppModel: ObservableObject {
     func bootstrap(safeMode: Bool = false) async {
         guard !didBootstrap else { return }
         didBootstrap = true
-        storageLocationStatus = ExternalStorageManager.inspect(paths: paths)
+        busyKeys.insert("bootstrap")
+        defer { busyKeys.remove("bootstrap") }
+        storageLocationStatus = ExternalStorageManager.inspect(paths: paths, registryURL: storageRegistryURL)
         guard !storageLocationStatus.requiresRelink, storageLocationStatus.state != .readOnly else {
-            alertMessage = storageLocationStatus.message
+            storageRescueActive = true
+            didBootstrap = false
             appendLog(.error, scope: "storage", storageLocationStatus.message)
             return
         }
         do {
             try await backend.prepareStorage()
-            storageLocationStatus = ExternalStorageManager.inspect(paths: paths)
+            storageLocationStatus = ExternalStorageManager.inspect(paths: paths, registryURL: storageRegistryURL)
             let labPaths = paths
             let localState = try await Task.detached(priority: .userInitiated) {
                 try LocalBootstrapState.load(paths: labPaths, safeMode: safeMode)
@@ -217,6 +225,8 @@ final class LabAppModel: ObservableObject {
             productionDepth = localState.productionDepth
             releaseCompletion = localState.releaseCompletion
             operationsHardening = localState.operationsHardening
+            loadEvolution()
+            storageRescueActive = false
             do {
                 let store = try ScalableEventStore(
                     url: paths.stateRoot.appendingPathComponent("lab-events.sqlite3")
@@ -261,11 +271,16 @@ final class LabAppModel: ObservableObject {
                 Task { await checkForUpdates(automatic: true) }
             }
         } catch {
+            storageRescueActive = true
+            didBootstrap = false
             present(error, context: "Preparing lab storage")
         }
     }
 
+    func resetBootstrapForRecovery() { didBootstrap = false }
+
     func refreshAll() async {
+        guard !storageRescueActive else { await retryBootstrap(); return }
         busyKeys.insert("refresh")
         readiness = await backend.checkHost()
         companionAssessment = CompanionBackendInspector.inspect(
@@ -1765,7 +1780,7 @@ final class LabAppModel: ObservableObject {
             return
         }
         do {
-            storageLocationStatus = try ExternalStorageManager.relink(root: paths.dataRoot, to: destination)
+            storageLocationStatus = try ExternalStorageManager.relink(root: paths.dataRoot, to: destination, registryURL: storageRegistryURL)
             appendLog(.success, scope: "storage", "Atomically relinked lab storage to \(destination.path)")
             persistLogs()
             didBootstrap = false

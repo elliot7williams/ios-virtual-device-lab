@@ -7,6 +7,7 @@ struct IOSVirtualDeviceLabApp: App {
     @StateObject private var launchHealth = LaunchHealthMonitor.shared
 
     init() {
+        LabMatrixProbe.handleCommandLine()
         LaunchHealthMonitor.shared.begin(paths: .default)
     }
 
@@ -21,6 +22,7 @@ struct IOSVirtualDeviceLabApp: App {
                     launchHealth.markReady()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    model.stopNetworkFixture()
                     launchHealth.markCleanExit()
                 }
         }

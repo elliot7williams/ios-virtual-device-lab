@@ -309,7 +309,9 @@ enum FleetWorkerProtocolEvaluator {
         if !evidence.idempotencyVerified { issues.append("Idempotent retries were not verified.") }
         if !evidence.cancellationVerified { issues.append("Cancellation propagation was not verified.") }
         if !evidence.boundedPayloadsVerified { issues.append("Request and result size bounds were not verified.") }
-        if !evidence.serverVersion.hasPrefix("1.1.") { issues.append("Fleet server 1.1 evidence is required.") }
+        if evidence.serverVersion.range(of: "^1\\.[12]\\.[0-9]+$", options: .regularExpression) == nil {
+            issues.append("Qualified fleet server 1.1.x or 1.2.x evidence is required.")
+        }
         if evidence.sourceSHA256?.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) == nil {
             issues.append("Fleet evidence must pin the qualification source revision or report digest.")
         }
@@ -984,9 +986,11 @@ struct SupportLifecyclePolicy: Codable, Hashable, Sendable {
     static let standard = SupportLifecyclePolicy(
         minimumDeprecationNoticeDays: 90,
         entries: [
-            SupportLifecycleEntry(id: "manager-0.14", component: "iOS Virtual Device Lab", versionRange: "0.14.x", status: .supported, deprecatedAt: nil, endOfLifeAt: nil, migrationTarget: nil, rationale: "Current operations-hardening release line."),
+            SupportLifecycleEntry(id: "manager-0.15", component: "iOS Virtual Device Lab", versionRange: "0.15.x", status: .supported, deprecatedAt: nil, endOfLifeAt: nil, migrationTarget: nil, rationale: "Current lab-tools release line."),
+            SupportLifecycleEntry(id: "manager-0.14", component: "iOS Virtual Device Lab", versionRange: "0.14.x", status: .supported, deprecatedAt: nil, endOfLifeAt: nil, migrationTarget: "0.15.x", rationale: "Retained operations-hardening release line."),
             SupportLifecycleEntry(id: "guest-protocol-3", component: "Guest protocol", versionRange: "3", status: .supported, deprecatedAt: nil, endOfLifeAt: nil, migrationTarget: nil, rationale: "Authenticated and replay-protected protocol contract."),
-            SupportLifecycleEntry(id: "state-schema-10", component: "State schema", versionRange: "10", status: .supported, deprecatedAt: nil, endOfLifeAt: nil, migrationTarget: nil, rationale: "Current persisted state schema."),
+            SupportLifecycleEntry(id: "state-schema-11", component: "State schema", versionRange: "11", status: .supported, deprecatedAt: nil, endOfLifeAt: nil, migrationTarget: nil, rationale: "Current persisted state schema."),
+            SupportLifecycleEntry(id: "state-schema-10", component: "State schema", versionRange: "10", status: .supported, deprecatedAt: nil, endOfLifeAt: nil, migrationTarget: "11", rationale: "Supported migration input; downgrade is not qualified."),
         ], updatedAt: .now
     )
 }

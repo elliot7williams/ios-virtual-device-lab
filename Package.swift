@@ -13,10 +13,12 @@ let package = Package(
         .executable(name: "vdl-ui-smoke", targets: ["VDLUISmoke"]),
         .executable(name: "vdl-fleetd", targets: ["VDLFleetCoordinator"]),
         .executable(name: "vdl-fleetworker", targets: ["VDLFleetWorker"]),
+        .executable(name: "vdl-fixture", targets: ["VDLFixture"]),
     ],
     targets: [
         .executableTarget(
             name: "IOSVirtualDeviceLab",
+            dependencies: ["VDLEvolutionCore"],
             path: "Sources/IOSVirtualDeviceLab"
         ),
         .testTarget(
@@ -26,6 +28,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "VDLCLI",
+            dependencies: ["VDLEvolutionCore"],
             path: "Sources/VDLCLI"
         ),
         .executableTarget(
@@ -34,11 +37,15 @@ let package = Package(
         ),
         .executableTarget(
             name: "VDLFleetCoordinator",
+            dependencies: ["VDLEvolutionCore"],
             path: "Sources/VDLFleetCoordinator"
         ),
         .executableTarget(
             name: "VDLFleetWorker",
             path: "Sources/VDLFleetWorker"
         ),
+        .target(name: "VDLEvolutionCore"),
+        .executableTarget(name: "VDLFixture", dependencies: ["VDLEvolutionCore"]),
+        .testTarget(name: "VDLEvolutionCoreTests", dependencies: ["VDLEvolutionCore"]),
     ]
 )

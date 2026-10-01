@@ -2,12 +2,12 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-private let harnessVersion = "1.1.0"
+private let harnessVersion = "1.2.0"
 private let requiredIdentifiers = [
     "lab.refresh", "lab.create-device", "continuity.refresh",
     "continuity.storage-relink", "continuity.labfile-apply",
     "depth.fault.inject", "depth.fault.clear", "completion.evaluate",
-    "hardening.inspect",
+    "hardening.inspect", "evolution.refresh",
 ]
 
 struct UICheck: Identifiable, Codable {
@@ -236,6 +236,7 @@ enum VDLUISmoke {
                     ("lab.section.production-depth", "depth.fault.inject"),
                     ("lab.section.v1-completion", "completion.evaluate"),
                     ("lab.section.v1.1-hardening", "hardening.inspect"),
+                    ("lab.section.v1.2-lab-tools", "evolution.refresh"),
                 ] {
                     let activated = snapshot.activate(identifier: section)
                     if activated {
