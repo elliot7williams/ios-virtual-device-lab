@@ -10,6 +10,7 @@
 - Upgraded the coordinator to 1.2 with bounded priority/fairness/quotas/concurrency/capability admission, draining/maintenance, retries/backoff, lease renewal, an exclusive process lock, and verified recovery snapshots.
 - Added Xcode test-plan execution across explicit destinations and xcresult preservation, case import, optional evidence export, JUnit, and HTML; direct VM XCTest destinations remain unqualified.
 - Added core failure-path tests, desktop storage-reconnect coverage, and real UI workspace checks. Defaults use two build jobs to limit local memory pressure.
+- Hardened UI smoke navigation with fresh accessibility objects, live-page assertions, bounded readiness polling, and AX-first selection without unnecessary mouse clicks.
 
 ## 0.14.0
 

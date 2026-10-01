@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-private let harnessVersion = "1.2.0"
+private let harnessVersion = "1.2.1"
 private let requiredIdentifiers = [
     "lab.refresh", "lab.create-device", "continuity.refresh",
     "continuity.storage-relink", "continuity.labfile-apply",
@@ -41,10 +41,15 @@ final class AccessibilitySnapshot {
     private(set) var identifiers = Set<String>()
     private(set) var roles = [String]()
     private var elementsByIdentifier = [String: AXUIElement]()
+    private(set) var currentIdentifiers = Set<String>()
     private var visited = 0
 
     func capture(_ element: AXUIElement) {
         visited = 0
+        // SwiftUI can destroy AX elements when a selection changes. Retain the
+        // cumulative evidence identifiers, never the stale actionable objects.
+        elementsByIdentifier.removeAll(keepingCapacity: true)
+        currentIdentifiers.removeAll(keepingCapacity: true)
         captureChildren(element)
     }
 
@@ -59,7 +64,7 @@ final class AccessibilitySnapshot {
             target, kAXSelectedAttribute as CFString, kCFBooleanTrue
         )
         let pressError = AXUIElementPerformAction(target, kAXPressAction as CFString)
-        let clicked = clickCenter(of: element)
+        let clicked = selectionError != .success && pressError != .success && clickCenter(of: element)
         print(
             "Activate \(identifier): target=\(stringAttribute(target, kAXRoleAttribute as CFString) ?? "unknown") "
                 + "select=\(selectionError.rawValue) press=\(pressError.rawValue) click=\(clicked)"
@@ -108,6 +113,7 @@ final class AccessibilitySnapshot {
         visited += 1
         if let identifier = stringAttribute(element, kAXIdentifierAttribute as CFString), !identifier.isEmpty {
             identifiers.insert(identifier)
+            currentIdentifiers.insert(identifier)
             elementsByIdentifier[identifier] = element
         }
         if let role = stringAttribute(element, kAXRoleAttribute as CFString), !role.isEmpty {
@@ -238,12 +244,15 @@ enum VDLUISmoke {
                     ("lab.section.v1.1-hardening", "hardening.inspect"),
                     ("lab.section.v1.2-lab-tools", "evolution.refresh"),
                 ] {
-                    let activated = snapshot.activate(identifier: section)
-                    if activated {
-                        RunLoop.current.run(until: Date().addingTimeInterval(0.75))
+                    let deadline = Date().addingTimeInterval(timeout)
+                    var reached = false
+                    repeat {
                         snapshot.capture(applicationElement)
-                    }
-                    let reached = activated && snapshot.identifiers.contains(expectedIdentifier)
+                        let activated = snapshot.activate(identifier: section)
+                        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+                        snapshot.capture(applicationElement)
+                        reached = activated && snapshot.currentIdentifiers.contains(expectedIdentifier)
+                    } while !reached && Date() < deadline
                     navigationChecks.append(UICheck(
                         id: "navigation:\(section)", passed: reached,
                         evidence: reached ? "Activated \(section) and observed \(expectedIdentifier)." : "Could not reach \(section) through macOS Accessibility."
